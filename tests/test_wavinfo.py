@@ -208,5 +208,34 @@ class MarkerTests(unittest.TestCase):
             wavinfo.with_markers(wav, [])
 
 
+class GoldenFingerprintTests(unittest.TestCase):
+    """EVP marks are keyed by this fingerprint. If either test fails, every
+    recording's marks are re-keyed (existing marks no longer match their
+    recordings): a change to the fingerprint or to the decoder's output needs
+    a migration, not a new golden value."""
+
+    VECTORS = os.path.join(os.path.dirname(__file__), "vectors")
+    GOLDEN = "22da7d09128a98010dd035a10917654fde0553ddc3d3a4756b72687d52bde2c7"   # sweep-50-4000
+
+    def test_fingerprint_of_the_reference_pcm(self):
+        with open(os.path.join(self.VECTORS, "sweep-50-4000.pcm"), "rb") as f:
+            pcm = f.read()
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(pcm)
+        self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(out.getvalue())), self.GOLDEN)
+
+    def test_fingerprint_of_the_decoded_vector(self):
+        from st25 import audio
+        if not audio.available():
+            self.skipTest("st25.lpec tables are not available in this checkout")
+        with open(os.path.join(self.VECTORS, "sweep-50-4000.dvf"), "rb") as f:
+            wav = audio.dvf_to_wav(f.read())
+        self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(wav)), self.GOLDEN)
+
+
 if __name__ == "__main__":
     unittest.main()

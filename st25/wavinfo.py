@@ -11,14 +11,14 @@ prefix is built from channels/width/rate, not the format tag, and both are
 still the same PCM samples in the same layout.
 
 Marks are written as standard RIFF markers (a 'cue ' chunk plus a LIST/adtl
-chunk with 'labl' texts and 'ltxt' region lengths), which audio editors such
-as Audition and Ocenaudio show.
+chunk with 'labl' texts and 'ltxt' region lengths), the marker format many
+audio editors read (no editor has been verified with OpenEVP's files yet).
 """
 import hashlib
 import struct
 import wave
 
-CHUNK_FRAMES = 1 << 18                  # ~1 MiB of 16-bit mono per read
+CHUNK_FRAMES = 1 << 18                  # 512 KiB of 16-bit mono per read
 
 # with_markers() refuses to build a WAV bigger than this (RIFF's own 32-bit
 # size field cannot express more than 4 GiB - 1 anyway).

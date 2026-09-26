@@ -47,7 +47,9 @@ def _analyze(f):
     """(peaks, duration, rate, fp) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per
     second of audio (at most MAX_PEAKS in all), each the loudest sample of any channel
     in its slice, plus the sample rate and the audio fingerprint (st25.wavinfo) of the
-    decoded samples. Reads in chunks, never the whole file."""
+    decoded samples. Reads in chunks, never the whole file. A WAV with no samples
+    has fp None: every empty WAV of one format would otherwise share one identity
+    (and one set of marks), so it gets none and cannot be marked."""
     try:
         w = wave.open(f)
     except (wave.Error, EOFError) as e:
@@ -58,7 +60,7 @@ def _analyze(f):
             raise ValueError(f"unsupported sample size ({8 * width} bit)")
         h = hashlib.sha256(wavinfo.fingerprint_prefix(ch, width, rate))
         if not n or not rate:
-            return [], 0.0, rate, h.hexdigest()
+            return [], 0.0, rate, None
         expected = n * ch * width
         count = min(MAX_PEAKS, n, max(1, -(-n * PEAKS_PER_SECOND // rate)))
         per = -(-n // count)                                  # frames per peak (ceil)
@@ -85,7 +87,7 @@ class AudioServer:
         self._dir = cache_dir
         self._max = max_bytes
         self._token = secrets.token_urlsafe(16)
-        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration"}; LRU order
+        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration", "rate", "fp"}; LRU order
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
@@ -139,8 +141,9 @@ class AudioServer:
                     self._inflight.pop(key, None)
 
     def prepare_file(self, path):
-        """Register a WAV file the user picked; returns {"url", "peaks", "duration"}.
-        Raises ValueError for a file that is not a playable PCM WAV."""
+        """Register a WAV file the user picked; returns {"url", "peaks", "duration",
+        "rate", "fp"} (fp None for a WAV with no samples). Raises ValueError for a
+        file that is not a playable PCM WAV."""
         path = os.path.abspath(path)
         st = os.stat(path)
         key = ("file", os.path.normcase(path), st.st_size, st.st_mtime_ns)

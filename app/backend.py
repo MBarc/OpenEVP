@@ -56,6 +56,7 @@ DISK = "Check free disk space and that the folder can be written to."
 HANDLES = 32                 # recording handles (and captured .dvf bytes) kept at once
 NO_MARKS = "Marks are not available here."
 RELOAD = "Load the recording again."
+NO_AUDIO = "This recording has no audio to mark."
 CLOSING = "The app is closing."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 
@@ -381,8 +382,10 @@ class Api:
         if self._store is None:
             return _fail(NO_MARKS)
         entry = self._entry(rec)
-        if entry is None or not entry["fp"]:
+        if entry is None:
             return _fail(RELOAD)
+        if not entry["fp"]:                   # an empty WAV has no fingerprint (see _analyze)
+            return _fail(NO_AUDIO)
         try:
             return action(entry)
         except (StoreReadOnly, StoreUnavailable, ValueError) as e:
@@ -616,8 +619,10 @@ class Api:
         if self._store is None:
             return _fail(NO_MARKS)
         entry = self._entry(rec)
-        if entry is None or not entry["fp"]:
+        if entry is None:
             return _fail(RELOAD)
+        if not entry["fp"]:
+            return _fail(NO_AUDIO)
         if self._stop.is_set():
             return _fail(CLOSING)
         marks = self._store.marks(entry["fp"])
@@ -994,7 +999,7 @@ class Api:
                     **_marks_row({}, False, "")}, False
         seconds = round(length, 1) if length else _seconds(path, kind)
         stored = cacheable and self._remember_fp(path, size, mtime_ns, fp, seconds, error)
-        if kind == "wav" and fp:
+        if kind == "wav" and fp and length:     # an empty WAV gets no marks (no identity of its own)
             self._import_markers(path, {"fp": fp, "duration": length}, name)
         return {"fp": fp, "seconds": seconds, "error": error, **self._fp_marks(fp)}, stored
 

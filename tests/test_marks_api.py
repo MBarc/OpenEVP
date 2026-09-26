@@ -613,6 +613,22 @@ class MarksApiTests(unittest.TestCase):
         self.assertFalse(self.api.backing_up())
         self.assertIsNone(self.api._backup_thread)
 
+    def test_an_empty_wav_cannot_be_marked(self):
+        path = os.path.join(self.tmp, "empty.wav")
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"e", seconds=0))
+        server = mock.Mock()
+        server.prepare_file.return_value = {"url": "http://x/e.wav", "peaks": [], "duration": 0.0,
+                                            "rate": 8000, "fp": None}
+        api = backend.Api(self.m, self.emit, lambda start: None, self.dest, server,
+                          pick_wav=lambda start: path, store=self.store)
+        self.addCleanup(api.shutdown)
+        r = api.open_wav()
+        self.assertEqual((r["ok"], r["fp"], r["marks"], r["imported"]), (True, None, [], 0))
+        for call in (lambda: api.add_mark(r["rec"], 0.0, 0.1, "A", ""), lambda: api.get_marks(r["rec"]),
+                     lambda: api.export_marked(r["rec"])):
+            self.assertEqual(call()["error"], backend.NO_AUDIO)
+
     # ---- import of embedded markers ------------------------------------------
 
     def test_deleted_marks_never_come_back_from_the_apps_own_wavs(self):

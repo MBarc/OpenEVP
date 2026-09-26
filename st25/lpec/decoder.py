@@ -11,6 +11,11 @@ returns its 512 samples plus the number of bytes the frame consumed;
 decodes a whole frame stream the way DVE does and returns little-endian
 int16 PCM. ``dvf_to_wav(dvf_bytes)`` validates and decodes a whole .dvf file
 and returns the WAV DVE would have written for it.
+
+EVP marks are keyed by the fingerprint of the decoded samples
+(st25.wavinfo): any change in this decoder's output -- even one sample --
+re-keys every recording's marks, so existing marks stop matching their .dvf
+files. tests/test_wavinfo.py (GoldenFingerprintTests) guards this.
 """
 
 from __future__ import annotations

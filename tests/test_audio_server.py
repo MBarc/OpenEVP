@@ -167,6 +167,15 @@ class AnalyzeTests(unittest.TestCase):
             with mock.patch.object(audio_server, "MAX_PEAKS", 100), open(p, "rb") as f:
                 self.assertEqual(len(audio_server._analyze(f)[0]), 100)
 
+    def test_an_empty_wav_has_no_fingerprint(self):
+        """Empty WAVs of one format must not share one identity (and its marks)."""
+        from app import audio_server
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "empty.wav")
+            pcm_wav(p, 2, 1, 0, rate=8000)
+            with open(p, "rb") as f:
+                self.assertEqual(audio_server._analyze(f), ([], 0.0, 8000, None))
+
     def test_not_a_wav(self):
         from app import audio_server
         with self.assertRaises(ValueError):
@@ -213,7 +222,8 @@ class PickedFileTests(unittest.TestCase):
             self.assertEqual(urllib.request.urlopen(info["url"], timeout=5).status, 200)
             with self.assertRaises(ValueError):
                 bad = os.path.join(mine, "notes.wav")
-                open(bad, "w").write("hello")
+                with open(bad, "w") as f:
+                    f.write("hello")
                 s.prepare_file(bad)
 
 
