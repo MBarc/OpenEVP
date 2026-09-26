@@ -13,12 +13,14 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    files: [], byId: new Map(), groups: [], rowEls: new Map(), subEls: new Map(),
                    subMarks: new Map(), expanded: new Set(), filter: "all", search: "", renderQueued: false,
                    moreRow: null,
-                   summaries: new Map() },                // fp -> {marks, reviewed, notes}: one per recording, not per file
+                   summaries: new Map(),                  // fp -> {marks, reviewed, notes}: one per recording, not per file
+                   subTokens: new Map(), subToken: 0 },   // key -> token of the subMarks fetch that may still answer
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
             backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
-            moves: new Map() };                              // mark id -> {busy, next}: one update_mark move in flight per mark
+            moves: new Map(),                                // mark id -> {busy, next}: one update_mark move in flight per mark
+            markGen: 0, markBusy: 0, reloadingMarks: false, reloadWanted: 0 };  // player mark calls: started (generation) and in flight
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -296,7 +298,7 @@ async function loadLibrary() {
   const buffered = L.buffer;
   L.buffer = [];
   L.listed = true;
-  L.subMarks.clear();                         // expanded rows fetch their marks again
+  clearSubMarks();                            // expanded rows fetch their marks again
   if (!r.ok) {
     Object.assign(L, { files: [], byId: new Map(), indexing: false, problem: [r.error, r.advice].filter(Boolean).join(" ") });
     scheduleLibraryRender();
@@ -306,7 +308,9 @@ async function loadLibrary() {
                      indexing: r.indexing, done: 0, total: r.pending, checkError: "", problem: "",
                      files: r.files, byId: new Map(r.files.map((f) => [f.id, f])), summaries: new Map() });
   for (const f of r.files) if (f.fp && !L.summaries.has(f.fp)) L.summaries.set(f.fp, fileSummary(f));
-  if (S.current) syncLibraryMarks(S.current.fp, S.marks, $("reviewed").checked);   // the player's own state is newest
+  // The backend is the source of truth: if it differs from the player (markers imported
+  // meanwhile), the player fetches its marks again instead of overwriting the listing.
+  if (S.current && S.current.fp && L.summaries.has(S.current.fp)) checkPlayerMarks(L.summaries.get(S.current.fp));
   for (const [event, p] of buffered) if (p.scan_id === L.scanId) libraryEvent(event, p);
   scheduleLibraryRender();
   // A newer scan started while this listing was on its way (listings racing each other).
@@ -330,12 +334,13 @@ function libraryEvent(event, p) {
     setFileFp(f, fp);
     Object.assign(f, { seconds: p.seconds, error: p.error });
     if (!fp) Object.assign(f, fileSummary(p));
-    else if (S.current && S.current.fp === fp) syncLibraryMarks(fp, S.marks, $("reviewed").checked);
     else {
       // Every copy of the recording shows these marks, whichever file reported them (a WAV's
       // imported markers belong to its .dvf too), and an expanded row fetches them again.
+      // If it is the recording in the player, the player checks its marks against the backend.
       setSummary(fp, fileSummary(p));
-      L.subMarks.delete(fp);
+      dropSubMarks(fp);
+      if (S.current && S.current.fp === fp) checkPlayerMarks(fileSummary(p));
     }
   } else if (event === "library-progress") {
     L.done = p.done; L.total = p.total;
@@ -598,12 +603,24 @@ function libraryMarkRows(g) {
   return els;
 }
 
+// The expanded rows' marks cache. Every change of an entry (a fetch starting, marks from the
+// player, the entry dropped or the cache cleared) gives it a new token; a fetch's answer is
+// used only while its own token is still the entry's, so an older answer can never win.
+function setSubMarks(key, value) {
+  const L = S.lib, token = ++L.subToken;
+  L.subTokens.set(key, token);
+  L.subMarks.set(key, value);
+  return token;
+}
+function dropSubMarks(key) { S.lib.subTokens.delete(key); S.lib.subMarks.delete(key); }
+function clearSubMarks() { S.lib.subTokens.clear(); S.lib.subMarks.clear(); }
+
 async function fetchLibraryMarks(g) {
   const L = S.lib, key = g.key, seq = L.seq;
-  L.subMarks.set(key, null);                  // loading
+  const token = setSubMarks(key, null);       // loading
   const r = await api().library_marks(g.main.id);
-  if (seq !== L.seq || L.subMarks.get(key) !== null) return;   // relisted, or updated from the player meanwhile
-  L.subMarks.set(key, r.ok ? sortMarks(r.marks) : { error: [r.error, r.advice].filter(Boolean).join(" ") });
+  if (seq !== L.seq || L.subTokens.get(key) !== token) return;   // relisted, updated or fetched again meanwhile
+  setSubMarks(key, r.ok ? sortMarks(r.marks) : { error: [r.error, r.advice].filter(Boolean).join(" ") });
   scheduleLibraryRender();
 }
 
@@ -634,14 +651,79 @@ async function playLibrary(g, mark) {
 }
 
 // The player changed a recording's marks or reviewed flag: update its library rows in place.
-function syncLibraryMarks(fp, marks, reviewed) {
-  if (!fp) return;
-  const L = S.lib, counts = { A: 0, B: 0, C: 0 };
+function marksSummary(marks, reviewed) {
+  const counts = { A: 0, B: 0, C: 0 };
   for (const m of marks) counts[m.cls] = (counts[m.cls] || 0) + 1;
   const notes = marks.map((m) => m.note).filter(Boolean).map((n) => n.toLowerCase()).join("\n");
-  const hit = setSummary(fp, { marks: counts, reviewed: !!reviewed, notes });
-  if (L.subMarks.has(fp)) L.subMarks.set(fp, sortMarks(marks));
+  return { marks: counts, reviewed: !!reviewed, notes };
+}
+
+function sameSummary(a, b) {
+  return ["A", "B", "C"].every((c) => (a.marks[c] || 0) === (b.marks[c] || 0)) &&
+         !!a.reviewed === !!b.reviewed && (a.notes || "") === (b.notes || "");
+}
+
+// Marks from the player (its own changes) or from the backend: update the library rows in place.
+function syncLibraryMarks(fp, marks, reviewed) {
+  if (!fp) return;
+  const L = S.lib;
+  const hit = setSummary(fp, marksSummary(marks, reviewed));
+  if (L.subMarks.has(fp)) setSubMarks(fp, sortMarks(marks));
   if (hit) scheduleLibraryRender();
+}
+
+// The backend reports a summary for the recording in the player (a library listing or row).
+// If it differs from what the player shows (e.g. markers imported from a WAV copy after an
+// unmarked .dvf was loaded), the player fetches the marks again: the backend is the truth.
+function checkPlayerMarks(sum) {
+  if (!S.current || sameSummary(sum, marksSummary(S.marks, $("reviewed").checked))) return;
+  S.reloadWanted++;
+  if (!S.reloadingMarks) reloadPlayerMarks(S.current.rec);
+}
+
+// Run a mark-changing call of the player; reloadPlayerMarks never applies an answer that
+// overlapped one (it could miss that change).
+async function markCall(call) {
+  S.markGen++; S.markBusy++;
+  try { return await call(); } finally { S.markBusy--; S.markGen++; }
+}
+
+function playerSaving() { return S.markBusy > 0 || S.markTimers.size > 0 || S.moves.size > 0; }
+
+// Fetch the loaded recording's marks until an answer that no change of the player's own
+// overlapped has been applied after the latest request for one (checkPlayerMarks).
+async function reloadPlayerMarks(rec) {
+  S.reloadingMarks = true;
+  try {
+    for (let tries = 0; tries < 50 && showing(rec); tries++) {
+      if (playerSaving()) { await new Promise((res) => setTimeout(res, 300)); continue; }
+      const want = S.reloadWanted, gen = S.markGen;
+      const r = await api().get_marks(rec);
+      if (!showing(rec) || !r.ok) return;
+      if (gen !== S.markGen || playerSaving()) continue;        // overlapped a change of its own: ask again
+      applyPlayerMarks(r);
+      if (want === S.reloadWanted) return;                      // no newer backend report meanwhile
+    }
+  } finally {
+    S.reloadingMarks = false;
+  }
+}
+
+// The backend's marks replace the player's (regions added, moved or removed to match).
+function applyPlayerMarks(r) {
+  S.marks = sortMarks(r.marks);
+  const ids = new Set(S.marks.map((m) => m.id));
+  for (const [id, region] of S.markRegions) if (!ids.has(id)) { region.remove(); S.markRegions.delete(id); }
+  if (S.markForm && S.markForm.id && !ids.has(S.markForm.id)) closeMarkForm();
+  const drawn = !!S.ws.getDuration();                           // otherwise drawMarks adds them on "ready"
+  for (const m of S.marks) {
+    const region = S.markRegions.get(m.id);
+    if (region) region.setOptions({ start: m.start, end: m.end, color: MARK_COLORS[m.cls], content: m.cls });
+    else if (drawn) addMarkRegion(m);
+  }
+  $("reviewed").checked = !!r.reviewed;
+  S.backup = r.backup; S.backupNeeded = !!r.backup_needed;
+  renderMarks();                                                // also syncs the library rows
 }
 
 // A marks call answered after the player moved on to another recording: ask for that one's marks.
@@ -999,8 +1081,8 @@ async function saveMarkForm() {
   const note = $("mark-note").value.trim();
   $("mark-save").disabled = true;
   const r = form.id
-    ? await api().update_mark(rec, form.id, null, null, cls, note)
-    : await api().add_mark(rec, S.region.start, Math.min(S.region.end, duration || S.region.end), cls, note);
+    ? await markCall(() => api().update_mark(rec, form.id, null, null, cls, note))
+    : await markCall(() => api().add_mark(rec, S.region.start, Math.min(S.region.end, duration || S.region.end), cls, note));
   $("mark-save").disabled = false;
   if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }   // another recording: its form was closed
   if (!r.ok) { showError(r); return; }                    // the form stays open: the note is not lost
@@ -1053,7 +1135,7 @@ async function sendMarkMove(id, q, job) {
   q.busy = true;
   let r;
   try {
-    r = await api().update_mark(job.rec, id, job.start, job.end, null, null);
+    r = await markCall(() => api().update_mark(job.rec, id, job.start, job.end, null, null));
   } catch (e) {
     r = { ok: false, error: `The move was not saved: ${e}` };
   }
@@ -1144,7 +1226,7 @@ function editNoteInline(span, m, text = m.note) {
 async function saveNote(m, note) {
   if (!S.current) return;
   const { rec, fp } = S.current;
-  const r = await api().update_mark(rec, m.id, null, null, null, note);
+  const r = await markCall(() => api().update_mark(rec, m.id, null, null, null, note));
   if (!r.ok) showError(r);
   if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (r.ok) { replaceMark(r.mark); return; }
@@ -1156,7 +1238,7 @@ async function saveNote(m, note) {
 async function deleteMark(m) {
   if (!S.current || !confirm("Delete this mark?")) return;
   const { rec, fp } = S.current;
-  const r = await api().delete_mark(rec, m.id);
+  const r = await markCall(() => api().delete_mark(rec, m.id));
   if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (!r.ok) { showError(r); return; }
   clearTimeout(S.markTimers.get(m.id));
@@ -1175,7 +1257,7 @@ async function deleteMark(m) {
 async function setReviewed() {
   if (!S.current) return;
   const want = $("reviewed").checked, { rec, fp } = S.current;
-  const r = await api().set_reviewed(rec, want);
+  const r = await markCall(() => api().set_reviewed(rec, want));
   if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (!r.ok) { $("reviewed").checked = !want; showError(r); return; }
   syncLibraryMarks(fp, S.marks, want);
