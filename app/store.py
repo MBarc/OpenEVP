@@ -692,9 +692,10 @@ class AppData:
         with self._lock:
             self._require_writable()
             prefix = os.path.normcase(os.path.abspath(folder))
+            under = prefix.rstrip(os.sep) + os.sep      # a drive root already ends in one
             seen = {_index_key(k) for k in seen_keys}
             to_delete = [k for k in self._index["files"]
-                         if (k == prefix or k.startswith(prefix + os.sep)) and k not in seen]
+                         if (k == prefix or k.startswith(under)) and k not in seen]
             for k in to_delete:
                 del self._index["files"][k]
             if to_delete:

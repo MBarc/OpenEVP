@@ -386,6 +386,21 @@ class StoreTests(unittest.TestCase):
             self.assertIsNotNone(store.cached_fp(path, 100, 1000))
             store.close()
 
+    def test_prune_index_at_a_drive_root(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            try:
+                root = os.path.abspath(os.sep)                 # e.g. C:\ -- already ends in a separator
+                gone = os.path.join(root, "openevp-no-such-dir", "gone.wav")
+                kept = os.path.join(root, "kept.wav")
+                store.remember_fp(gone, 1, 2, "aa", 1.0)
+                store.remember_fp(kept, 1, 2, "bb", 1.0)
+                store.prune_index(root, seen_keys={kept})
+                self.assertIsNone(store.cached_fp(gone, 1, 2))
+                self.assertIsNotNone(store.cached_fp(kept, 1, 2))
+            finally:
+                store.close()
+
     def test_failed_write_leaves_memory_unchanged_and_removes_temp_file(self):
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)

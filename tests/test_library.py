@@ -153,7 +153,7 @@ class LibraryTests(unittest.TestCase):
         """list_library() and wait for its indexer (if any) to finish."""
         r = api.list_library()
         self.assertTrue(r["ok"], r)
-        if any(f["fp"] is None and f["error"] is None for f in r["files"]):
+        if r["indexing"]:
             self.events.wait_done(r["scan_id"])
         return r
 
@@ -351,8 +351,10 @@ class LibraryTests(unittest.TestCase):
             r = self.index(api)
         rows = self.events.rows(r["scan_id"])
         ids = {f["name"]: f["id"] for f in r["files"]}
-        self.assertNotIn(ids["live.wav"], rows)                               # no stale fp emitted
-        self.assertIn(ids["still.wav"], rows)
+        live = rows[ids["live.wav"]]                                          # no stale fp emitted
+        self.assertIsNone(live["fp"])
+        self.assertIn("changed while it was being read", live["error"])
+        self.assertIsNotNone(rows[ids["still.wav"]]["fp"])
         st = os.stat(path)
         self.assertIsNone(self.store.cached_fp(path, st.st_size, st.st_mtime_ns))
         again = api.list_library()
@@ -426,6 +428,124 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(api.play_library(first["files"][0]["id"])["ok"])
         self.assertTrue(api.play_library(second["files"][0]["id"])["ok"])
 
+    def test_same_folder_refresh_keeps_the_file_in_flight(self):
+        self.write("one.dvf", dvf_bytes(1))
+        self.write("two.dvf", dvf_bytes(2))
+        fake = FakeDecoder(block=1)
+        api = self.new_api()
+        with fake.installed():
+            first = api.list_library()
+            self.assertTrue(fake.started.wait(WAIT))
+            second = api.list_library()                                       # same folder
+            self.assertEqual((second["indexing"], second["pending"]), (True, 2))
+            fake.release.set()
+            self.events.wait_done(second["scan_id"])
+        self.assertFalse(fake.saw_stop)                                       # the decode was not cancelled
+        self.assertEqual(fake.calls, 2)                                       # one.dvf decoded once, not twice
+        rows = self.events.rows(second["scan_id"])
+        self.assertEqual(set(rows), {f["id"] for f in second["files"]})
+        self.assertTrue(all(r["fp"] for r in rows.values()))
+        self.assertEqual(self.events.rows(first["scan_id"]), {})
+
+    def test_indexing_flag(self):
+        self.populate()
+        with FakeDecoder().installed():
+            r = self.new_api(store=None).list_library()
+            self.assertEqual((r["indexing"], r["pending"]), (False, 0))
+            api = self.new_api()
+            with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("no threads")):
+                r = api.list_library()
+            self.assertEqual((r["indexing"], r["pending"]), (False, 0))
+            r = api.list_library()
+            self.assertEqual((r["indexing"], r["pending"]), (True, 4))
+            self.events.wait_done(r["scan_id"])
+            r = api.list_library()                                            # everything cached
+            self.assertEqual((r["indexing"], r["pending"]), (False, 0))
+
+    def test_a_job_that_fails_still_ends_with_library_done(self):
+        self.write("z.wav", wav_bytes(b"z"))
+        api = self.new_api()
+        with mock.patch.object(api, "_index_file", side_effect=RuntimeError("disk on fire")):
+            r = api.list_library()
+            with self.events.cond:
+                ok = self.events.cond.wait_for(
+                    lambda: any(n == "library-done" for n, p in self.events.items), WAIT)
+        self.assertTrue(ok)
+        done = [p for n, p in self.events.items if n == "library-done"]
+        self.assertEqual(done[0]["scan_id"], r["scan_id"])
+        self.assertIn("disk on fire", done[0]["error"])
+
+    def test_read_only_store_keeps_results_for_the_session(self):
+        self.write("x.dvf", dvf_bytes())
+        second = AppData(os.path.join(self.tmp, "appdata"))                   # another window: read-only
+        self.addCleanup(second.close)
+        self.assertTrue(second.read_only)
+        fake = FakeDecoder()
+        api = self.new_api(store=second)
+        with fake.installed():
+            self.index(api)
+            again = api.list_library()
+        self.assertEqual(fake.calls, 1)
+        self.assertFalse(again["indexing"])
+        self.assertIsNotNone(again["files"][0]["fp"])
+
+    def test_unreadable_subfolder_is_not_pruned(self):
+        path = self.write("sub/s.wav", wav_bytes(b"s"))
+        self.write("t.wav", wav_bytes(b"t"))
+        api = self.new_api()
+        self.index(api)
+        real = os.scandir
+        sub = os.path.normcase(os.path.join(self.lib, "sub"))
+
+        def denied(p="."):
+            if os.path.normcase(str(p)) == sub:
+                raise PermissionError(13, "Access is denied", str(p))
+            return real(p)
+        with mock.patch("os.scandir", denied):
+            r = api.list_library()
+        self.assertEqual([f["name"] for f in r["files"]], ["t.wav"])
+        st = os.stat(path)
+        self.assertIsNotNone(self.store.cached_fp(path, st.st_size, st.st_mtime_ns))
+
+    def test_dot_names_are_skipped(self):
+        self.write("._z.wav", b"\0\5\26\7AppleDouble")
+        self.write(".hidden/h.wav", wav_bytes(b"h"))
+        self.write("z.wav", wav_bytes(b"z"))
+        r = self.new_api(store=None).list_library()
+        self.assertEqual([f["name"] for f in r["files"]], ["z.wav"])
+
+    def test_oversized_dvf_is_refused_and_remembered(self):
+        self.write("huge.dvf", dvf_bytes())
+        fake = FakeDecoder()
+        api = self.new_api()
+        with fake.installed(), mock.patch.object(backend, "DVF_MAX_BYTES", 100):
+            r = self.index(api)
+            again = api.list_library()
+        self.assertEqual(fake.calls, 0)
+        self.assertEqual(self.events.rows(r["scan_id"])[r["files"][0]["id"]]["error"],
+                         "huge.dvf is too large to be an ICD-ST25 recording.")
+        self.assertEqual((again["indexing"], again["files"][0]["error"]),
+                         (False, "huge.dvf is too large to be an ICD-ST25 recording."))
+
+    def test_decoder_unavailable_or_out_of_memory_is_not_remembered(self):
+        self.write("x.dvf", dvf_bytes())
+        api = self.new_api()
+        for problem in (audio.DecoderUnavailable("the decoder went away"), MemoryError()):
+            fake = FakeDecoder()
+
+            def decode(data, should_stop=None, problem=problem):
+                raise problem
+            fake.module.dvf_to_wav = decode
+            with fake.installed():
+                r = self.index(api)
+            self.assertTrue(r["indexing"])                                     # retried every time
+            row = self.events.rows(r["scan_id"])[r["files"][0]["id"]]
+            self.assertEqual(row["fp"], None)
+            self.assertTrue(row["error"])
+        with FakeDecoder().installed():
+            r = self.index(api)
+        self.assertIsNotNone(self.events.rows(r["scan_id"])[r["files"][0]["id"]]["fp"])
+
     def test_stop_stops_the_indexer(self):
         self.write("one.dvf", dvf_bytes(1))
         self.write("two.dvf", dvf_bytes(2))
@@ -443,7 +563,8 @@ class LibraryTests(unittest.TestCase):
         self.assertNotIn(("library-done", {"scan_id": r["scan_id"]}), self.events.items)
         self.assertEqual(self.events.rows(), {})
         with fake.installed():
-            api.list_library()                                                # closing: no new indexer
+            again = api.list_library()                                        # closing: no new indexer
+        self.assertEqual((again["indexing"], again["pending"]), (False, 0))
         self.assertIsNone(api._indexer)
 
     def test_shutdown_joins_the_indexer_and_flushes_the_cache(self):
