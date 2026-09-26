@@ -16,6 +16,12 @@ exact .dvf bytes that were decoded for playback, so the backup made when the
 recording is first marked saves exactly the audio that was marked. Backups run
 on one background worker (registered with the export worker, so shutdown()
 waits for both) and report through "backup-done" / "backup-failed" events.
+
+The EVP library lists the .dvf/.wav files of one folder tree by opaque ids.
+Fingerprints come from the store's index cache; files not in it are
+fingerprinted by one background indexer (also a registered worker), which
+reports "library-row" / "library-progress" / "library-done" events tagged with
+the scan_id of the list_library() call that started it.
 """
 import datetime
 import hashlib
@@ -109,6 +115,65 @@ def _seconds(path, kind):
     return None
 
 
+INDEX_FLUSH_EVERY = 20      # the library indexer writes its cache after this many files
+
+
+def _file_id(path):
+    """The opaque id the page uses for a file on disk (never its path)."""
+    return hashlib.sha1(os.path.normcase(path).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def _wav_length(f):
+    """Exact length in seconds of a PCM WAV (a path or a file object)."""
+    with wave.open(f) as w:
+        return w.getnframes() / w.getframerate() if w.getframerate() else None
+
+
+def _scan_library(folder):
+    """([(investigation, name, kind, path, stat)], truncated): every .dvf/.wav in
+    folder and all its subfolders -- a folder's files first (by name), then its
+    subfolders in name order. Walking stops as soon as more than SAVED_LIMIT files
+    were found. Symlinked folders and junctions are not followed (no loops);
+    unreadable folders are skipped. investigation is the first folder under
+    `folder` ("" for files directly in it)."""
+    found = []
+    stack = [(folder, "")]
+    while stack:
+        where, investigation = stack.pop()
+        try:
+            with os.scandir(where) as it:
+                entries = sorted(it, key=lambda e: e.name.lower())
+        except OSError:
+            continue
+        subdirs = []
+        for e in entries:
+            try:
+                if e.is_symlink() or getattr(e, "is_junction", lambda: False)():
+                    continue
+                if e.is_dir():
+                    subdirs.append(e)
+                    continue
+                kind = os.path.splitext(e.name)[1].lower()[1:]
+                if kind not in ("dvf", "wav") or not e.is_file():
+                    continue
+                st = e.stat()
+            except OSError:
+                continue
+            found.append((investigation, e.name, kind, e.path, st))
+            if len(found) > SAVED_LIMIT:
+                return found[:SAVED_LIMIT], True
+        for d in reversed(subdirs):
+            stack.append((d.path, investigation or d.name))
+    return found, False
+
+
+def _marks_row(counts, reviewed, notes):
+    """A library row's marks fields: counts per class, reviewed, and the lower-cased
+    note text (for search)."""
+    return {"marks": {c: counts.get(c, 0) for c in ("A", "B", "C")}, "reviewed": bool(reviewed),
+            "notes": notes or ""}
+
+
 def _update_problem(e, what="Could not check for updates"):
     """A plain-words reason for a failed update check or download."""
     code = getattr(e, "code", None)
@@ -186,6 +251,12 @@ class Api:
         self._backup_queue = OrderedDict()    # fp -> (rec, entry): one pending backup per recording
         self._backup_running = None           # fp being backed up right now
         self._backup_thread = None
+        self._lib_lock = threading.Lock()
+        self._library = {}                    # id -> path, from the last list_library()
+        self._scan_id = 0                     # bumped by every list_library(); in every library-* event
+        self._lib_job = None                  # (scan_id, files to fingerprint) waiting for the indexer
+        self._indexer = None                  # the one library indexer thread, while it runs
+        self._lib_folder = None               # the library folder chosen in this session
         if store is not None:
             saved = store.get_setting("save_folder")
             if isinstance(saved, str) and saved and os.path.isdir(saved):
@@ -587,7 +658,7 @@ class Api:
         self._saved = {}
         files = []
         for sub, name, kind, path in found[:SAVED_LIMIT]:
-            fid = hashlib.sha1(os.path.normcase(path).encode("utf-8", "surrogatepass")).hexdigest()[:16]
+            fid = _file_id(path)
             self._saved[fid] = path
             try:
                 st = os.stat(path)
@@ -600,7 +671,11 @@ class Api:
 
     def play_saved(self, file_id):
         """Prepare a saved file (by id from list_saved) for the player."""
-        path = self._saved.get(file_id) if isinstance(file_id, str) else None
+        return self._play_file(self._saved.get(file_id) if isinstance(file_id, str) else None)
+
+    def _play_file(self, path):
+        """The player's result for a .wav (served in place, its embedded markers
+        imported once) or a .dvf (decoded through the audio server) on disk."""
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
         name = os.path.basename(path)
@@ -620,7 +695,7 @@ class Api:
                     return audio.dvf_to_wav(f.read(), should_stop=self._stop.is_set)
             return self._loaded(self._server.prepare(key, make=decode), name, name, source, {"name": name})
         except Exception as e:
-            return _fail(f"Could not play {name}: {e}")
+            return _fail(f"Could not play {name}: {_plain(e)}")
 
     def open_wav(self):
         """Let the user pick a WAV file and prepare it for the player. The path comes
@@ -640,6 +715,237 @@ class Api:
         name = os.path.basename(path)
         imported = self._import_markers(path, info, name)
         return self._loaded(info, name, name, {"kind": "file", "path": path}, {"name": name, "imported": imported})
+
+    # ---- the EVP library (a folder of recordings, fingerprinted in the background) ----
+    def _library_path(self):
+        folder = self._lib_folder
+        if folder is None and self._store is not None:
+            folder = self._store.get_setting("library_folder")
+        return folder if isinstance(folder, str) and folder else self._dest
+
+    def library_folder(self):
+        """The library folder (default: the Save-to folder); shown to the user."""
+        folder = self._library_path()
+        return {"ok": True, "folder": folder, "exists": os.path.isdir(folder)}
+
+    def choose_library_folder(self):
+        """Let the user pick the library folder, starting in the current one; returns
+        it (or None if cancelled). Remembered for the next start."""
+        current = self._library_path()
+        try:
+            picked = self._pick(current if os.path.isdir(current) else self._start_folder())
+        except Exception:                       # the dialog failed; keep the current folder
+            return None
+        if not picked:
+            return None
+        self._lib_folder = picked
+        if self._store is not None:
+            try:
+                self._store.set_setting("library_folder", picked)
+            except (StoreReadOnly, StoreUnavailable):
+                pass                            # used for this session; not remembered
+        return picked
+
+    def list_library(self):
+        """Every .dvf/.wav in the library folder and all its subfolders (at most
+        SAVED_LIMIT). Returns at once, from the folder listing and the fingerprint
+        cache: files not fingerprinted yet have fp None and go to the background
+        indexer, whose "library-row", "library-progress" and "library-done" events
+        carry this call's scan_id. The page gets ids, never paths."""
+        try:
+            return self._list_library()
+        except Exception as e:
+            return _fail(f"Could not list the library: {_plain(e)}")
+
+    def _list_library(self):
+        folder = self._library_path()
+        with self._lib_lock:
+            self._scan_id += 1                  # from here on the running indexer is stale
+            scan_id = self._scan_id
+        result = {"ok": True, "folder": folder, "scan_id": scan_id, "exists": os.path.isdir(folder),
+                  "truncated": False, "files": []}
+        if not result["exists"]:
+            with self._lib_lock:
+                if scan_id == self._scan_id:
+                    self._library = {}
+            return result
+        found, truncated = _scan_library(folder)
+        store = self._store
+        summary = store.summary() if store is not None else {}
+        table, files, pending = {}, [], []
+        for investigation, name, kind, path, st in found:
+            fid = _file_id(path)
+            table[fid] = path
+            fp = error = seconds = None
+            if store is None:
+                seconds = _seconds(path, kind)
+            else:
+                cached = store.cached_fp(path, st.st_size, st.st_mtime_ns)
+                if cached is None:
+                    pending.append((fid, path, kind, st.st_size, st.st_mtime_ns))
+                else:
+                    fp, error, seconds = cached.get("fp"), cached.get("error"), cached.get("seconds")
+            s = summary.get(fp) if fp else None
+            files.append({"id": fid, "name": name, "investigation": investigation, "type": kind,
+                          "seconds": seconds,
+                          "modified": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                          "fp": fp, **_marks_row(s or {}, s and s["reviewed"], s and s["notes"]),
+                          "error": error})
+        if store is not None and not store.read_only:
+            try:
+                if not truncated:               # files past the limit were not seen: keep theirs
+                    store.prune_index(folder, [f[3] for f in found])
+                if not pending:
+                    store.flush_index()
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        result.update(truncated=truncated, files=files)
+        with self._lib_lock:
+            if scan_id != self._scan_id:        # a newer list_library() overtook this one
+                return result
+            self._library = table
+            self._lib_job = (scan_id, pending) if pending else None
+            if pending and self._indexer is None and not self._stop.is_set():
+                thread = threading.Thread(target=self._library_worker, name="library-indexer")
+                try:
+                    thread.start()
+                except Exception:
+                    self._lib_job = None        # the rows stay unindexed until the next scan
+                else:
+                    self._indexer = thread
+                    self._add_worker(thread)
+        return result
+
+    def _library_worker(self):
+        """The one indexer thread. It runs the latest scan's job; a newer scan
+        replaces the job, and the job being run stops before its next file (or in
+        the middle of a .dvf decode), so two files are never decoded at once."""
+        while True:
+            with self._lib_lock:
+                job, self._lib_job = self._lib_job, None
+                if job is None or self._stop.is_set():
+                    self._indexer = None
+                    return
+            try:
+                self._index_job(*job)
+            except Exception:                   # e.g. emit failed; never die holding _indexer
+                pass
+
+    def _index_job(self, scan_id, pending):
+        def stale():
+            return self._stop.is_set() or self._scan_id != scan_id
+        decoder_problem = None
+        if any(p[2] == "dvf" for p in pending) and not audio.available():
+            decoder_problem = audio.status()
+        unflushed = 0
+        try:
+            for done, (fid, path, kind, size, mtime_ns) in enumerate(pending, 1):
+                if stale():
+                    return
+                row, cached = self._index_file(path, kind, size, mtime_ns, stale, decoder_problem)
+                if cached:
+                    unflushed += 1
+                    if unflushed >= INDEX_FLUSH_EVERY:
+                        unflushed = 0
+                        self._flush_index()
+                if stale():                     # cached, but the page has moved on
+                    return
+                if row is not None:
+                    self._emit("library-row", {"scan_id": scan_id, "id": fid, **row})
+                self._emit("library-progress", {"scan_id": scan_id, "done": done, "total": len(pending)})
+            self._emit("library-done", {"scan_id": scan_id})
+        finally:
+            self._flush_index()
+
+    def _flush_index(self):
+        if self._store is None or self._store.read_only:
+            return
+        try:
+            self._store.flush_index()
+        except (StoreReadOnly, StoreUnavailable):
+            pass
+
+    def _index_file(self, path, kind, size, mtime_ns, stale, decoder_problem):
+        """(the library-row fields or None, whether the result was cached) for one
+        file. None when the decode was cancelled or the file changed meanwhile."""
+        store = self._store
+        fp = length = error = None
+        cacheable = True
+        try:
+            if kind == "wav":
+                fp = wavinfo.wav_fingerprint(path)
+                length = _wav_length(path)
+            elif decoder_problem:
+                # Not the file's fault: nothing is cached, so a later scan tries
+                # again once the decoder is there.
+                error, cacheable = decoder_problem, False
+            else:
+                with open(path, "rb") as f:
+                    data = f.read()
+                wav = audio.dvf_to_wav(data, should_stop=stale)
+                del data
+                fp = wavinfo.wav_fingerprint(io.BytesIO(wav))
+                length = _wav_length(io.BytesIO(wav))
+                del wav
+        except audio.Cancelled:
+            return None, False
+        except OSError as e:                    # locked or vanished: may work next time
+            fp, error, cacheable = None, _plain(e), False
+        except Exception as e:                  # not a readable recording: remembered
+            fp, error = None, _plain(e)
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None, False
+        if (st.st_size, st.st_mtime_ns) != (size, mtime_ns):
+            return None, False                  # changed while it was read: the next scan redoes it
+        seconds = round(length, 1) if length else _seconds(path, kind)
+        cached = False
+        if store is not None and cacheable and not store.read_only:
+            try:
+                store.remember_fp(path, size, mtime_ns, fp, seconds, error=error)
+                cached = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        if kind == "wav" and fp:
+            self._import_markers(path, {"fp": fp, "duration": length}, os.path.basename(path))
+        return {"fp": fp, "seconds": seconds, "error": error, **self._fp_marks(fp)}, cached
+
+    def _fp_marks(self, fp):
+        """_marks_row for one recording, read straight from the store."""
+        r = self._store.recording(fp) if self._store is not None and fp else None
+        if r is None:
+            return _marks_row({}, False, "")
+        counts = {}
+        for m in r["marks"]:
+            counts[m["cls"]] = counts.get(m["cls"], 0) + 1
+        return _marks_row(counts, r["reviewed"], "\n".join(m["note"].lower() for m in r["marks"] if m["note"]))
+
+    def _library_file(self, file_id):
+        if not isinstance(file_id, str):
+            return None
+        with self._lib_lock:
+            return self._library.get(file_id)
+
+    def play_library(self, file_id):
+        """Prepare a library file (by id from list_library) for the player."""
+        return self._play_file(self._library_file(file_id))
+
+    def library_marks(self, file_id):
+        """The marks of a library file's recording, by its cached fingerprint
+        ([] while the file is not fingerprinted yet)."""
+        path = self._library_file(file_id)
+        if not path:
+            return _fail("That file is no longer there. Refresh the list.")
+        if self._store is None:
+            return {"ok": True, "marks": []}
+        try:
+            st = os.stat(path)
+        except OSError:
+            return _fail("That file is no longer there. Refresh the list.")
+        cached = self._store.cached_fp(path, st.st_size, st.st_mtime_ns)
+        fp = cached.get("fp") if cached else None
+        return {"ok": True, "marks": self._store.marks(fp) if fp else []}
 
     # ---- updates ------------------------------------------------------------------
     def check_update(self):
@@ -787,9 +1093,12 @@ class Api:
     def shutdown(self):
         """Stop background work and wait for it (an export stops between recordings;
         a backup finishes the file it is writing, and queued backups are recorded as
-        not made), then close the store."""
+        not made; the library indexer stops before its next file), then close the
+        store, which writes the fingerprint cache."""
         self._stop.set()
         with self._backup_lock:                 # no backup worker can start after this
+            pass
+        with self._lib_lock:                    # nor a library indexer
             pass
         with self._workers_lock:
             workers = list(self._workers)
