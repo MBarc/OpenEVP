@@ -111,13 +111,17 @@ def _open_store():
         return None, [f"EVP marks are off: OpenEVP could not open its data ({type(e).__name__}: {e})."]
 
 
-def _close_question(exporting, backing_up):
+def _close_question(exporting, backing_up, saving_marked=False):
     """(title, text) for the close prompt while work is still running, or None."""
     backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
               "a backup that did not finish is shown as failed and can be retried later.")
     if exporting:
         text = "An export is still running. Stop it after the current recording and close?"
         return "Export in progress", f"{text} {backup}" if backing_up else text
+    if saving_marked:
+        text = ("A WAV with its EVP marks is still being saved. Closing now may stop it before it "
+                "is saved (the marks themselves are kept). Close?")
+        return "Export in progress", f"{backup} {text}" if backing_up else text
     if backing_up:
         return "Backup in progress", f"{backup} Close?"
     return None
@@ -197,7 +201,7 @@ def main():
                 if proceed:
                     api.request_stop()
                 return proceed
-            question = _close_question(api.exporting(), api.backing_up())
+            question = _close_question(api.exporting(), api.backing_up(), api.saving_marked())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
                 if proceed:

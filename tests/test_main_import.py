@@ -59,6 +59,13 @@ class MainImportTests(unittest.TestCase):
         self.assertIn("backup of a marked recording", text)
         self.assertNotIn("backup", main._close_question(True, False)[1])
 
+    def test_close_question_mentions_a_wav_being_saved_with_marks(self):
+        main = self.main()
+        title, text = main._close_question(False, False, True)
+        self.assertEqual(title, "Export in progress")
+        self.assertIn("WAV with its EVP marks", text)
+        self.assertIn("backup of a marked recording", main._close_question(False, True, True)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -513,6 +513,74 @@ class MarksApiTests(unittest.TestCase):
         self.assertIn("cell 3.wav", r["error"])
         self.assertNotIn(self.tmp, r["error"])
 
+    def marked_file(self):
+        """A picked WAV with one mark, in a new api: (api, rec)."""
+        path = os.path.join(self.tmp, "take.wav")
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"take"))
+        api = self.new_api(pick_wav=lambda start: path)
+        rec = api.open_wav()["rec"]
+        self.assertTrue(api.add_mark(rec, 0.2, 0.3, "C", "")["ok"])
+        return api, rec
+
+    def test_export_marked_is_refused_during_an_export_an_update_or_closing(self):
+        api, rec = self.marked_file()
+        self.assertTrue(api._busy.acquire(blocking=False))                  # an export is running
+        try:
+            self.assertEqual(api.export_marked(rec)["error"], backend.MARKED_BUSY)
+            api._updating = True                                             # an update is installing
+            self.assertEqual(api.export_marked(rec)["error"], backend.MARKED_BUSY_UPDATE)
+        finally:
+            api._updating = False
+            api._busy.release()
+        self.assertTrue(api.export_marked(rec)["ok"])
+        api.request_stop()
+        self.assertEqual(api.export_marked(rec)["error"], backend.CLOSING)
+        self.assertFalse(api._busy.locked())
+
+    def test_shutdown_waits_for_export_marked_and_no_update_or_export_starts_meanwhile(self):
+        api, rec = self.marked_file()
+        entered, go = threading.Event(), threading.Event()
+        real = backend.save_wav
+        closed_while_saving = []
+
+        def slow(*a):
+            entered.set()
+            go.wait(5)
+            closed_while_saving.append(self.store._closed)
+            return real(*a)
+        result = []
+        with mock.patch.object(backend, "save_wav", slow):
+            saver = threading.Thread(target=lambda: result.append(api.export_marked(rec)))
+            saver.start()
+            self.assertTrue(entered.wait(5))
+            self.assertTrue(api.saving_marked())
+            self.assertFalse(api.exporting())                                # the close prompt names it separately
+            api._update, api._can_install = {"version": "9.0.0"}, True
+            self.assertIn("export", api.install_update()["error"])
+            self.assertFalse(api.updating())
+            self.assertEqual(api.export(ID, [{"folder": "A", "number": 1}], "dvf", self.dest, 1)["error"],
+                             "An export is already running.")
+            self.assertEqual(api.export_marked(rec)["error"], backend.MARKED_BUSY)
+            closer = threading.Thread(target=api.shutdown)
+            closer.start()
+            closer.join(0.3)
+            self.assertTrue(closer.is_alive())                               # waiting for the WAV
+            self.assertFalse(self.store._closed)
+            go.set()
+            closer.join(5)
+            saver.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertEqual(closed_while_saving, [False])
+        self.assertTrue(result[0]["ok"], result)
+        self.assertTrue(self.store._closed)
+        self.assertFalse(api.saving_marked())
+
+    def test_export_marked_is_refused_once_shutdown_has_begun(self):
+        api, rec = self.marked_file()
+        api.shutdown()
+        self.assertEqual(api.export_marked(rec)["error"], backend.CLOSING)
+
     def test_export_marked_outside_an_investigation_goes_to_the_save_to_root(self):
         library = os.path.join(self.tmp, "Library")
         os.makedirs(library)

@@ -59,6 +59,8 @@ RELOAD = "Load the recording again."
 NO_AUDIO = "This recording has no audio to mark."
 CLOSING = "The app is closing."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
+MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
+MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
 
 
 class _BackupRunning(Exception):
@@ -265,7 +267,8 @@ class Api:
         self._update = None                   # the release found by the last check_update()
         self._before_install = before_install # () -> None, just before the installer starts
         self._updating = False
-        self._busy = threading.Lock()      # held while an export runs
+        self._busy = threading.Lock()      # held while an export, export_marked() or an update install runs
+        self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -620,7 +623,13 @@ class Api:
         folder: <letter>/ for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
         any other file goes into the Save-to folder itself. Never replaces a file: identical bytes
-        count as already saved, anything else gets a numbered name."""
+        count as already saved, anything else gets a numbered name.
+
+        It runs on the caller's thread while holding _busy, like an export: it does
+        not start while an export or an update install runs, and neither starts
+        while it runs. Admission checks _stop under _workers_lock, the lock
+        shutdown() takes after setting _stop, so shutdown() either refuses it or
+        sees it and waits for it before closing the store."""
         if self._store is None:
             return _fail(NO_MARKS)
         entry = self._entry(rec)
@@ -628,8 +637,25 @@ class Api:
             return _fail(RELOAD)
         if not entry["fp"]:
             return _fail(NO_AUDIO)
-        if self._stop.is_set():
-            return _fail(CLOSING)
+        with self._workers_lock:
+            if self._stop.is_set():
+                return _fail(CLOSING)
+            if not self._busy.acquire(blocking=False):
+                return _fail(MARKED_BUSY_UPDATE if self._updating else MARKED_BUSY)
+            done = self._marked_done = threading.Event()
+        try:
+            return self._export_marked(entry)
+        finally:
+            with self._workers_lock:
+                self._marked_done = None
+            self._busy.release()
+            done.set()
+
+    def saving_marked(self):
+        """True while export_marked() runs (the close prompt says so)."""
+        return self._marked_done is not None
+
+    def _export_marked(self, entry):
         marks = self._store.marks(entry["fp"])
         if not marks:
             return _fail("This recording has no marks yet.")
@@ -1187,12 +1213,16 @@ class Api:
         if not self._busy.acquire(blocking=False):
             return _fail("An export is already running.")
         thread = threading.Thread(target=self._export, args=(device_id, work, fmt, dest, job), name="export")
-        try:
-            thread.start()
-        except Exception as e:
-            self._busy.release()
-            return _fail(f"Could not start the export: {e}")
-        self._add_worker(thread)
+        with self._workers_lock:              # started and registered in one step against shutdown()
+            if self._stop.is_set():
+                self._busy.release()
+                return _fail(CLOSING)
+            try:
+                thread.start()
+            except Exception as e:
+                self._busy.release()
+                return _fail(f"Could not start the export: {e}")
+            self._workers = [t for t in self._workers if t.is_alive()] + [thread]
         return {"ok": True, "job": job}
 
     def _add_worker(self, thread):
@@ -1201,7 +1231,8 @@ class Api:
             self._workers = [t for t in self._workers if t.is_alive()] + [thread]
 
     def exporting(self):
-        return self._busy.locked() and not self._updating
+        """True while an export of recorder recordings runs (export_marked(): saving_marked())."""
+        return self._busy.locked() and not self._updating and self._marked_done is None
 
     def stopping(self):
         """True once the app is closing: long decodes poll this to stop early."""
@@ -1215,18 +1246,22 @@ class Api:
     def shutdown(self):
         """Stop background work and wait for it (an export stops between recordings;
         a backup finishes the file it is writing, and queued backups are recorded as
-        not made; the library indexer stops before its next file), then close the
+        not made; the library indexer stops before its next file; a WAV being
+        saved with its marks stops its decode or finishes writing), then close the
         store, which writes the fingerprint cache."""
         self._stop.set()
         with self._backup_lock:                 # no backup worker can start after this
             pass
         with self._lib_lock:                    # nor a library indexer
             pass
-        with self._workers_lock:
+        with self._workers_lock:                # nor an export or export_marked()
             workers = list(self._workers)
+            marked = self._marked_done
         for t in workers:
             if t.is_alive():
                 t.join()
+        if marked is not None:
+            marked.wait()
         if self._store is not None:
             self._store.close()
 
