@@ -116,6 +116,22 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(len(data["recordings"]["fp1"]["marks"]), 1)
             store.close()
 
+    def test_invalid_utf8_in_marks_json_is_set_aside_like_bad_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "marks.json"), "wb") as f:
+                f.write(b"{\"version\": 1, \"recordings\": {\"" + bytes([0xFF, 0xFE, 0x80]) + b"\": {}}}")
+
+            store = AppData(d)                      # must not raise UnicodeDecodeError
+            self.assertEqual(store.marks("anything"), [])
+            self.assertEqual(len(store.problems()), 1)
+            corrupt = [n for n in os.listdir(d) if n.startswith("marks.json.corrupt-")]
+            self.assertEqual(len(corrupt), 1)
+
+            store.add_mark("fp1", 1.0, 2.0, "A", "note")
+            with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)["recordings"]["fp1"]["marks"]), 1)
+            store.close()
+
     def test_import_marks_parses_labels_and_runs_once(self):
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)

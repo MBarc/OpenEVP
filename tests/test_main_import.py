@@ -40,6 +40,16 @@ class MainImportTests(unittest.TestCase):
             self.assertIsNone(store)
             self.assertIn("EVP marks are off", problems[0])
 
+    def test_any_store_failure_still_lets_the_app_start(self):
+        main = self.main()
+        failure = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"APPDATA": d}), \
+                mock.patch.object(main, "AppData", side_effect=failure):
+            store, problems = main._open_store()
+        self.assertIsNone(store)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("EVP marks are off", problems[0])
+
     def test_close_question_mentions_a_running_backup(self):
         main = self.main()
         self.assertIsNone(main._close_question(False, False))

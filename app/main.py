@@ -100,12 +100,15 @@ def _hand_over(running):
 
 def _open_store():
     """(AppData or None, [problem]): the app's own data folder (%APPDATA%\\OpenEVP).
-    If it cannot be created the app still runs, without EVP marks, and says why."""
+    If it cannot be created or opened the app still runs, without EVP marks, and
+    says why: no store failure may stop the app from starting."""
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     try:
         return AppData(os.path.join(base, "OpenEVP")), []
     except OSError as e:
         return None, [f"EVP marks are off: OpenEVP could not create its data folder ({e.strerror or e})."]
+    except Exception as e:
+        return None, [f"EVP marks are off: OpenEVP could not open its data ({type(e).__name__}: {e})."]
 
 
 def _close_question(exporting, backing_up):

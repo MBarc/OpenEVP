@@ -117,18 +117,20 @@ def _read_json_raw(path):
     """Read and parse one JSON file. Returns (status, data):
     "missing" (no such file), "io_error" (couldn't even open/read it --
     treated as transiently unavailable, never as corrupt), "bad_json"
-    (opened fine but isn't valid JSON), or "ok" (data is the parsed value).
+    (opened fine but isn't valid UTF-8 JSON), or "ok" (data is the parsed value).
+    The bytes are decoded here, not by the file object, so invalid UTF-8
+    (UnicodeDecodeError) counts as malformed content like any other bad JSON.
     """
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            text = f.read()
+        with open(path, "rb") as f:
+            raw = f.read()
     except FileNotFoundError:
         return "missing", None
     except OSError:
         return "io_error", None
     try:
-        return "ok", json.loads(text)
-    except ValueError:
+        return "ok", json.loads(raw.decode("utf-8"))
+    except ValueError:                  # includes UnicodeDecodeError and JSONDecodeError
         return "bad_json", None
 
 
