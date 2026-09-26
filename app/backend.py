@@ -96,7 +96,7 @@ def _fail(message, advice="", state=READY):
     return {"ok": False, "error": message, "advice": advice, "state": state}
 
 
-SAVED_LIMIT = 5000          # a folder with more is listed partially (the page says so)
+SAVED_LIMIT = 5000          # the library lists at most this many files (the page says so)
 LP_BYTES_PER_SECOND = 750   # ST25 LP audio
 
 
@@ -239,7 +239,6 @@ class Api:
         self._server = audio_server
         self._driver_setup = driver_setup     # () -> (exit_code, log); see app/driver_setup.py
         self._pick_wav = pick_wav             # (start_dir) -> path or None (a file dialog)
-        self._saved = {}                      # id -> path, from the last list_saved()
         self._updater = updater               # app.updater (check / download / launch), or None
         self._quit = quit_app                 # () -> None: close the window without asking
         self._can_install = can_install       # only the installed app can replace itself
@@ -647,44 +646,7 @@ class Api:
                 return d
         return None
 
-    # ---- saved recordings (the save folder) -------------------------------------
-    def list_saved(self):
-        """The .dvf and .wav files in the save folder and its subfolders (one level:
-        exports go to <folder>/<recorder folder letter>/). The page gets ids, never paths."""
-        folder = self._dest
-        if not os.path.isdir(folder):
-            self._saved = {}
-            return {"ok": True, "folder": folder, "exists": False, "files": [], "truncated": False}
-        found = []
-        for sub in [""] + sorted(e.name for e in os.scandir(folder) if e.is_dir()):
-            where = os.path.join(folder, sub)
-            try:
-                entries = sorted(os.scandir(where), key=lambda e: e.name.lower())
-            except OSError:
-                continue
-            for e in entries:
-                kind = os.path.splitext(e.name)[1].lower()[1:]
-                if kind in ("dvf", "wav") and e.is_file():
-                    found.append((sub, e.name, kind, e.path))
-        truncated = len(found) > SAVED_LIMIT
-        self._saved = {}
-        files = []
-        for sub, name, kind, path in found[:SAVED_LIMIT]:
-            fid = _file_id(path)
-            self._saved[fid] = path
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            files.append({"id": fid, "name": name, "folder": sub, "type": kind, "seconds": _seconds(path, kind),
-                          "size": st.st_size,
-                          "modified": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")})
-        return {"ok": True, "folder": folder, "exists": True, "files": files, "truncated": truncated}
-
-    def play_saved(self, file_id):
-        """Prepare a saved file (by id from list_saved) for the player."""
-        return self._play_file(self._saved.get(file_id) if isinstance(file_id, str) else None)
-
+    # ---- files on disk (library files and WAVs opened from the file dialog) -------
     def _play_file(self, path):
         """The player's result for a .wav (served in place, its embedded markers
         imported once) or a .dvf (decoded through the audio server) on disk."""
@@ -1011,7 +973,7 @@ class Api:
             st = os.stat(path)
         except OSError:
             return _fail("That file is no longer there. Refresh the list.")
-        cached = self._store.cached_fp(path, st.st_size, st.st_mtime_ns)
+        cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)   # also a read-only window's own results
         fp = cached.get("fp") if cached else None
         return {"ok": True, "marks": self._store.marks(fp) if fp else []}
 

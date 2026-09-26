@@ -6,7 +6,13 @@ const $ = (id) => document.getElementById(id);
 const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: false },
             dest: "", selected: new Set(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: false, settingUp: false,
-            view: "device", saved: null, savedSeq: 0,     // view: "device" (a recorder) or "saved" (this PC)
+            view: "device",                               // "device" (a recorder) or "library" (this PC)
+            // The EVP library: the listing, its scan, what is shown (see loadLibrary).
+            lib: { seq: 0, loading: false, listed: false, scanId: 0, buffer: [], folder: "", exists: true,
+                   truncated: false, indexing: false, done: 0, total: 0, checkError: "", problem: "",
+                   files: [], byId: new Map(), groups: [], rowEls: new Map(), subEls: new Map(),
+                   subMarks: new Map(), expanded: new Set(), filter: "all", search: "", renderQueued: false,
+                   moreRow: null },
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
             formCls: "B", lastCls: "B", backup: null, backupRunning: false, exportingMarked: false,
@@ -46,7 +52,8 @@ window.addEventListener("pywebviewready", async () => {
   // The player always accepts a WAV file from disk. Clicking a recording to play it
   // (and WAV export) needs our LPEC decoder; without it rows are not clickable.
   setupPlayer();
-  loadSaved();
+  setupLibrary();
+  loadLibrary();
   if (S.caps.wav) {
     $("player-hint").textContent = "Select a recording, or open a WAV file, to analyze it here.";
     $("device-table").classList.add("playable");
@@ -122,7 +129,9 @@ function deviceLabel(d, i) {
 
 function leaveDevice() {
   S.device = null; S.folders = {}; S.selected.clear(); S.loadSeq++;
-  if (S.playing) { S.playSeq++; S.ws.empty(); S.playing = null; setCurrent(null); showPlayerEmpty(); }  // a file stays loaded
+  if (S.playing && !S.playing.startsWith("lib|")) {        // a recorder recording; a file on this PC stays loaded
+    S.playSeq++; S.ws.empty(); S.playing = null; setCurrent(null); showPlayerEmpty();
+  }
   renderMain();
 }
 
@@ -176,7 +185,7 @@ async function openWav() {
 function renderDevices() {
   const nav = $("devices");
   nav.innerHTML = "";
-  $("saved-entry").className = "device-name" + (S.view === "saved" ? " selected" : "");
+  $("library-entry").className = "device-name" + (S.view === "library" ? " selected" : "");
   if (S.device && !S.devices.some((d) => d.id === S.device)) {
     leaveDevice(); banner("The recorder was unplugged.");
   }
@@ -248,73 +257,386 @@ async function openDevice(id) {
 }
 
 function renderMain() {
-  const saved = S.view === "saved";
-  $("device-table").hidden = saved;
-  $("saved-table").hidden = !saved;
-  if (saved) renderSaved(); else renderRows();
+  const library = S.view === "library";
+  $("device-table").hidden = library;
+  $("library-table").hidden = $("library-bar").hidden = !library;
+  if (library) renderLibrary(); else renderRows();
   updateExport();
 }
 
-// ---- Saved recordings: the files in the save folder (the "active folder") ----
-async function loadSaved() {
-  const seq = ++S.savedSeq;
-  const r = await api().list_saved();
-  if (seq !== S.savedSeq) return;
-  S.saved = r;
-  $("saved-count").textContent = r.files.length ? `(${r.files.length})` : "";
-  $("saved-entry").title = r.folder;
-  if (S.view === "saved") renderSaved();
-}
+// ---- EVP Library: the recordings in a folder (default: the save folder) with their EVP marks ----
+// The backend lists files and fingerprints new ones in the background ("library-*" events,
+// tagged with the scan_id of the listing they belong to). Copies of one recording (same
+// fingerprint: a .dvf and its WAV, or a WAV saved twice) show as one row.
+const LIB_FILTERS = {
+  all: () => true,
+  evp: (g) => g.marks.A + g.marks.B + g.marks.C > 0,
+  A: (g) => g.marks.A > 0, B: (g) => g.marks.B > 0, C: (g) => g.marks.C > 0,
+  unreviewed: (g) => !g.reviewed,
+};
 
-function showSaved() {
-  S.view = "saved"; banner("");
-  renderDevices(); renderMain();
-  loadSaved();
-}
+function libFileKey(f) { return f.fp || `id:${f.id}`; }       // un-indexed files are rows of their own
 
-function renderSaved() {
-  const rows = $("saved-rows");
-  rows.innerHTML = "";
-  const r = S.saved;
-  const files = r ? r.files : [];
-  $("empty").hidden = files.length > 0;
-  if (!r) $("empty").textContent = "Loading…";
-  else if (!r.exists) $("empty").textContent = "Nothing saved yet. Export recordings from a recorder and they appear here.";
-  else if (!files.length) $("empty").textContent = `No .dvf or WAV files in ${r.folder} yet.`;
-  for (const f of files) {
-    const tr = document.createElement("tr");
-    if (S.playing === `file|${f.id}`) tr.className = "playing";
-    const playable = f.type === "wav" || S.caps.wav;
-    if (!playable) { tr.classList.add("unplayable"); tr.title = "Can't play .dvf files. " + wavStatus(); }
-    const badge = `<span class="badge badge-${f.type}">${f.type.toUpperCase()}</span>`;
-    const cells = [f.name, f.folder || "—", badge, f.seconds == null ? "" : fmtTime(f.seconds), f.modified];
-    cells.forEach((c, i) => {
-      const td = document.createElement("td");
-      if (i === 2) td.innerHTML = c; else td.textContent = c;
-      tr.appendChild(td);
-    });
-    tr.onclick = () => playSaved(f);
-    rows.appendChild(tr);
-  }
-  if (r && r.truncated) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="5" class="muted">Only the first ${files.length} files are shown.</td>`;
-    rows.appendChild(tr);
-  }
-}
-
-async function playSaved(f) {
-  if (f.type === "dvf" && !S.caps.wav) {
-    banner("Can't play .dvf files. " + wavStatus() + " WAV files still play.");
+async function loadLibrary() {
+  const L = S.lib, seq = ++L.seq;
+  L.loading = true;
+  const r = await api().list_library();
+  if (seq !== L.seq) return;                  // a newer listing is on its way; its events are buffered
+  L.loading = false;
+  const buffered = L.buffer;
+  L.buffer = [];
+  L.listed = true;
+  L.subMarks.clear();                         // expanded rows fetch their marks again
+  if (!r.ok) {
+    Object.assign(L, { files: [], byId: new Map(), indexing: false, problem: [r.error, r.advice].filter(Boolean).join(" ") });
+    scheduleLibraryRender();
     return;
   }
+  Object.assign(L, { scanId: r.scan_id, folder: r.folder, exists: r.exists, truncated: r.truncated,
+                     indexing: r.indexing, done: 0, total: r.pending, checkError: "", problem: "",
+                     files: r.files, byId: new Map(r.files.map((f) => [f.id, f])) });
+  for (const [event, p] of buffered) if (p.scan_id === L.scanId) libraryEvent(event, p);
+  scheduleLibraryRender();
+}
+
+// "library-row" / "-progress" / "-done". Events of an older listing are dropped; events that
+// come before their listing's answer (the indexer may be quicker than the reply) wait for it.
+function libraryEvent(event, p) {
+  const L = S.lib;
+  if (p.scan_id !== L.scanId) {
+    if (L.loading && p.scan_id > L.scanId) L.buffer.push([event, p]);
+    return;
+  }
+  if (event === "library-row") {
+    const f = L.byId.get(p.id);
+    if (!f) return;
+    const fp = p.fp || null;
+    setFileFp(f, fp);
+    Object.assign(f, { marks: p.marks, reviewed: p.reviewed, notes: p.notes, seconds: p.seconds, error: p.error });
+  } else if (event === "library-progress") {
+    L.done = p.done; L.total = p.total;
+  } else if (event === "library-done") {
+    L.indexing = false;
+    L.checkError = p.error || "";
+  }
+  scheduleLibraryRender();
+}
+
+// A file learns (or loses) its fingerprint: an expanded row stays expanded under its new key.
+function setFileFp(f, fp) {
+  const was = libFileKey(f);
+  f.fp = fp;
+  const now = libFileKey(f);
+  if (was !== now && S.lib.expanded.delete(was)) S.lib.expanded.add(now);
+}
+
+// The recordings: files grouped by fingerprint, in the order of their main file.
+function libraryGroups() {
+  const L = S.lib, groups = new Map(), order = new Map();
+  L.files.forEach((f, i) => {
+    order.set(f, i);
+    const k = libFileKey(f);
+    if (!groups.has(k)) groups.set(k, { key: k, files: [] });
+    groups.get(k).files.push(f);
+  });
+  const out = [];
+  for (const g of groups.values()) {
+    const byName = g.files.slice().sort((a, b) => a.name.localeCompare(b.name));
+    const main = byName.find((f) => f.type === "dvf") || byName[0];
+    g.main = main;
+    g.copies = g.files.filter((f) => f !== main);
+    g.fp = main.fp;
+    g.marks = main.marks;                     // copies share the fingerprint, so its marks too
+    g.reviewed = main.reviewed;
+    g.notes = main.notes || "";
+    g.seconds = g.files.map((f) => f.seconds).find((s) => s != null);
+    g.error = main.error;
+    g.order = order.get(main);
+    out.push(g);
+  }
+  return out.sort((a, b) => a.order - b.order);
+}
+
+function libraryMatches(g) {
+  const L = S.lib;
+  if (!LIB_FILTERS[L.filter](g)) return false;
+  const q = L.search.trim().toLowerCase();
+  if (!q) return true;
+  const text = [...g.files.flatMap((f) => [f.name, f.investigation]), g.notes].join("\n").toLowerCase();
+  return text.includes(q);
+}
+
+// Events can come in hundreds: redraw at most once a frame, updating rows in place.
+function scheduleLibraryRender() {
+  if (S.lib.renderQueued) return;
+  S.lib.renderQueued = true;
+  requestAnimationFrame(renderLibrary);
+}
+
+function renderLibrary() {
+  const L = S.lib;
+  L.renderQueued = false;
+  L.groups = libraryGroups();
+  $("library-count").textContent = L.listed && L.groups.length ? `(${L.groups.length})` : "";
+  $("library-entry").title = L.folder || "";
+  if (S.view !== "library") return;
+  renderLibraryBar();
+  const wanted = [], live = new Set();
+  let shown = 0;
+  for (const g of L.groups) {
+    live.add(g.key);
+    if (!libraryMatches(g)) continue;
+    shown++;
+    wanted.push(libraryRow(g));
+    if (L.expanded.has(g.key)) wanted.push(...libraryMarkRows(g));
+  }
+  for (const k of L.rowEls.keys()) if (!live.has(k)) { L.rowEls.delete(k); L.subEls.delete(k); }
+  if (L.truncated) {
+    L.moreRow.firstChild.textContent = `Only the first ${L.files.length} files are shown.`;
+    wanted.push(L.moreRow);
+  }
+  // Put the rows in order, moving only the ones out of place (no flicker, scroll kept).
+  const body = $("library-rows");
+  let at = body.firstChild;
+  for (const el of wanted) {
+    if (el === at) at = at.nextSibling;
+    else body.insertBefore(el, at);
+  }
+  while (at) { const next = at.nextSibling; at.remove(); at = next; }
+  const empty = $("empty");
+  empty.hidden = shown > 0;
+  if (!L.listed) empty.textContent = "Loading…";
+  else if (L.problem) empty.textContent = L.problem;
+  else if (!L.exists) empty.textContent = `${L.folder} does not exist yet. Export recordings from a recorder, or choose another library folder above.`;
+  else if (!L.files.length) empty.textContent = `No .dvf or WAV files in ${L.folder} yet.`;
+  else empty.textContent = "No recordings match.";
+}
+
+function renderLibraryBar() {
+  const L = S.lib;
+  $("library-folder").textContent = L.folder || "…";
+  for (const b of document.querySelectorAll("#library-filters button")) b.setAttribute("aria-pressed", String(b.dataset.filter === L.filter));
+  $("library-filters").hidden = !S.caps.marks;
+  const st = $("library-status");
+  st.classList.toggle("warn", !L.indexing && !!L.checkError);
+  st.textContent = L.indexing ? `Checking recordings… ${L.done} of ${L.total}` : L.checkError ? "Could not check some recordings" : "";
+  st.title = L.indexing ? "" : L.checkError;
+}
+
+function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
+  return S.caps.wav ? g.main : g.files.find((f) => f.type === "wav") || null;
+}
+
+function libraryPlaying(g) { return g.files.some((f) => S.playing === `lib|${f.id}`); }
+
+// One recording's row: created once per key, its cells rewritten only when something changed.
+function libraryRow(g) {
+  const L = S.lib;
+  let tr = L.rowEls.get(g.key);
+  if (!tr) {
+    tr = document.createElement("tr");
+    tr.className = "lib-row";
+    for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
+    const toggle = document.createElement("button");
+    toggle.className = "lib-toggle";
+    toggle.onclick = (e) => { e.stopPropagation(); toggleLibraryRow(tr.group); };
+    tr.cells[0].appendChild(toggle);
+    tr.onclick = () => playLibrary(tr.group, null);
+    L.rowEls.set(g.key, tr);
+  }
+  tr.group = g;
+  const total = g.marks.A + g.marks.B + g.marks.C;
+  const expanded = L.expanded.has(g.key);
+  const playable = libraryPlayable(g);
+  const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type]), g.seconds, g.marks, g.reviewed,
+                              g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable]);
+  if (tr.sig === sig) return tr;
+  tr.sig = sig;
+  tr.classList.toggle("playing", libraryPlaying(g));
+  tr.classList.toggle("unplayable", !playable);
+  tr.title = playable ? "" : "Can't play .dvf files. " + wavStatus();
+  const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
+  const toggle = cToggle.firstChild;
+  toggle.hidden = !total && !expanded;
+  toggle.textContent = expanded ? "▾" : "▸";
+  toggle.title = expanded ? "Hide the EVPs" : "Show the EVPs";
+  cName.textContent = "";
+  const name = document.createElement("div");
+  name.textContent = g.main.name;
+  cName.appendChild(name);
+  if (g.copies.length) {
+    const also = document.createElement("div");
+    also.className = "lib-also";
+    also.textContent = "also: " + g.copies.map((f) => f.investigation && f.investigation !== g.main.investigation
+      ? `${f.name} (${f.investigation})` : f.name).join(", ");
+    cName.appendChild(also);
+  }
+  cInv.textContent = g.main.investigation || "—";
+  cType.textContent = "";
+  for (const t of [...new Set([g.main.type, ...g.copies.map((f) => f.type)])]) {
+    const badge = document.createElement("span");
+    badge.className = `badge badge-${t}`;
+    badge.textContent = t.toUpperCase();
+    cType.append(badge, " ");
+  }
+  cLen.textContent = g.seconds == null ? "" : fmtTime(g.seconds);
+  cEvp.textContent = "";
+  cEvp.title = "";
+  if (!S.caps.marks) {
+    // no marks store: nothing to show
+  } else if (g.error) {
+    const warn = document.createElement("span");
+    warn.className = "lib-error";
+    warn.textContent = "⚠";
+    cEvp.title = g.error;
+    cEvp.appendChild(warn);
+  } else if (!g.fp) {
+    cEvp.textContent = L.indexing ? "…" : "—";
+    cEvp.title = L.indexing ? "Not checked yet" : "";
+  } else if (!total) {
+    cEvp.textContent = "—";
+  } else {
+    for (const c of ["A", "B", "C"]) {
+      if (!g.marks[c]) continue;
+      const chip = document.createElement("span");
+      chip.className = `cls-chip cls-${c}`;
+      chip.textContent = `${c}×${g.marks[c]}`;
+      chip.title = `${plural(g.marks[c], "class " + c + " EVP")}`;
+      cEvp.append(chip, " ");
+    }
+  }
+  cRev.textContent = g.reviewed ? "✓" : "";
+  return tr;
+}
+
+// The sub-rows of an expanded recording: one per mark (or a loading / error line).
+function libraryMarkRows(g) {
+  const L = S.lib, marks = L.subMarks.get(g.key);
+  if (marks === undefined) fetchLibraryMarks(g);
+  const held = L.subEls.get(g.key);
+  if (held && held.marks === marks && held.fp === g.fp) return held.els;
+  let els;
+  if (!Array.isArray(marks)) {
+    const tr = document.createElement("tr");
+    tr.className = "lib-mark";
+    const td = document.createElement("td");
+    td.colSpan = 7;
+    td.textContent = marks && marks.error ? marks.error : "Loading the EVPs…";
+    tr.appendChild(td);
+    els = [tr];
+  } else {
+    els = marks.map((m) => {
+      const tr = document.createElement("tr");
+      tr.className = "lib-mark";
+      tr.title = "Play this EVP";
+      tr.appendChild(document.createElement("td"));
+      const td = document.createElement("td");
+      td.colSpan = 6;
+      const chip = document.createElement("span");
+      chip.className = `cls-chip cls-${m.cls}`; chip.textContent = m.cls; chip.title = `Class ${m.cls}`;
+      const time = document.createElement("span");
+      time.className = "mark-time";
+      time.textContent = isPoint(m) ? fmtPrecise(m.start) : `${fmtPrecise(m.start)} – ${fmtPrecise(m.end)}`;
+      const note = document.createElement("span");
+      note.className = "lib-mark-note" + (m.note ? "" : " empty");
+      note.textContent = m.note || "No note";
+      td.append(chip, time, note);
+      tr.appendChild(td);
+      tr.onclick = () => playLibrary(L.rowEls.get(g.key)?.group || g, m);
+      return tr;
+    });
+    if (!els.length) {
+      const tr = document.createElement("tr");
+      tr.className = "lib-mark";
+      const td = document.createElement("td");
+      td.colSpan = 7; td.textContent = "No EVPs marked.";
+      tr.appendChild(td);
+      els = [tr];
+    }
+  }
+  L.subEls.set(g.key, { marks, fp: g.fp, els });
+  return els;
+}
+
+async function fetchLibraryMarks(g) {
+  const L = S.lib, key = g.key, seq = L.seq;
+  L.subMarks.set(key, null);                  // loading
+  const r = await api().library_marks(g.main.id);
+  if (seq !== L.seq || L.subMarks.get(key) !== null) return;   // relisted, or updated from the player meanwhile
+  L.subMarks.set(key, r.ok ? sortMarks(r.marks) : { error: [r.error, r.advice].filter(Boolean).join(" ") });
+  scheduleLibraryRender();
+}
+
+function toggleLibraryRow(g) {
+  const L = S.lib;
+  if (!L.expanded.delete(g.key)) L.expanded.add(g.key);
+  scheduleLibraryRender();
+}
+
+// Play a recording (mark = null), or one of its EVPs: loaded first unless it is in the player already.
+async function playLibrary(g, mark) {
+  if (mark && S.current && g.fp && S.current.fp === g.fp) {
+    playMark(S.marks.find((m) => m.id === mark.id) || mark);
+    return;
+  }
+  const f = libraryPlayable(g);
+  if (!f) { banner("Can't play .dvf files. " + wavStatus() + " WAV files still play."); return; }
   const seq = ++S.playSeq;
   banner(""); status(`Loading ${f.name}…`);
-  const r = await api().play_saved(f.id);
+  const r = await api().play_library(f.id);
   if (seq !== S.playSeq) return;
-  if (!r.ok) { status(""); showError(r); loadSaved(); return; }
-  S.playing = `file|${f.id}`; renderSaved();
-  await loadIntoPlayer(seq, f.name, r, true);
+  if (!r.ok) { status(""); showError(r); loadLibrary(); return; }
+  S.playing = `lib|${f.id}`;
+  if (!f.fp && !f.error && r.fp) setFileFp(f, r.fp);   // known now, before the indexer gets to it
+  scheduleLibraryRender();
+  await loadIntoPlayer(seq, f.name, r, !mark);
+  if (mark && seq === S.playSeq) playMark(S.marks.find((m) => m.id === mark.id) || mark);
+}
+
+// The player changed a recording's marks or reviewed flag: update its library rows in place.
+function syncLibraryMarks(fp, marks, reviewed) {
+  if (!fp) return;
+  const L = S.lib, counts = { A: 0, B: 0, C: 0 };
+  for (const m of marks) counts[m.cls] = (counts[m.cls] || 0) + 1;
+  const notes = marks.map((m) => m.note).filter(Boolean).map((n) => n.toLowerCase()).join("\n");
+  let hit = false;
+  for (const f of L.files) {
+    if (f.fp !== fp) continue;
+    hit = true;
+    f.marks = counts; f.reviewed = !!reviewed; f.notes = notes;
+  }
+  if (L.subMarks.has(fp)) L.subMarks.set(fp, sortMarks(marks));
+  if (hit) scheduleLibraryRender();
+}
+
+// A marks call answered after the player moved on to another recording: ask for that one's marks.
+async function refreshLibraryMarks(rec, fp) {
+  if (!fp) return;
+  const r = await api().get_marks(rec);
+  if (r.ok) syncLibraryMarks(fp, r.marks, r.reviewed);
+}
+
+function showLibrary() {
+  S.view = "library"; banner("");
+  renderDevices(); renderMain();
+  loadLibrary();
+}
+
+function setupLibrary() {
+  $("library-entry").onclick = showLibrary;
+  $("library-folder").onclick = async () => {
+    const d = await api().choose_library_folder();
+    if (d) { S.lib.folder = d; S.lib.expanded.clear(); loadLibrary(); }
+  };
+  for (const b of document.querySelectorAll("#library-filters button")) {
+    b.onclick = () => { S.lib.filter = b.dataset.filter; scheduleLibraryRender(); };
+  }
+  $("library-search").oninput = () => { S.lib.search = $("library-search").value; scheduleLibraryRender(); };
+  const more = document.createElement("tr");
+  const td = document.createElement("td");
+  td.colSpan = 7; td.className = "muted";
+  more.appendChild(td);
+  S.lib.moreRow = more;
 }
 
 function renderRows() {
@@ -364,11 +686,9 @@ function updateExport() {
   $("export").textContent = n ? `Export ${n} selected` : "Export selected";
 }
 
-$("saved-entry").onclick = showSaved;
-
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
-  if (d) { S.dest = d; $("dest").textContent = d; loadSaved(); }
+  if (d) { S.dest = d; $("dest").textContent = d; loadLibrary(); }   // the library may be the save folder
 };
 
 $("export").onclick = async () => {
@@ -387,6 +707,7 @@ window.onBackendEvent = (event, p) => {
     return;
   }
   if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
+  if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;
@@ -402,7 +723,7 @@ window.onBackendEvent = (event, p) => {
     else msg = "Nothing was saved.";
     if (p.notes.length) banner(`${msg} Not saved: ${p.notes.join(" · ")}`, "warn", open);
     else banner(msg, "ok", open);
-    loadSaved();
+    loadLibrary();
   }
   if (event === "export-failed") {
     S.exporting = false; progress(0, null); updateExport();
@@ -565,7 +886,7 @@ function setCurrent(label, r) {
   closeMarkForm();
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
-  S.current = r ? { rec: r.rec, name: label, duration: r.duration } : null;
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
   S.backupRunning = false;
@@ -626,14 +947,14 @@ async function saveMarkForm() {
   const form = S.markForm;
   if (!form || !S.current || $("mark-save").disabled) return;
   if (!form.id && !S.region) { closeMarkForm(); return; }
-  const { rec, duration } = S.current, cls = S.formCls, events = backupEventsSeen(rec);
+  const { rec, duration, fp } = S.current, cls = S.formCls, events = backupEventsSeen(rec);
   const note = $("mark-note").value.trim();
   $("mark-save").disabled = true;
   const r = form.id
     ? await api().update_mark(rec, form.id, null, null, cls, note)
     : await api().add_mark(rec, S.region.start, Math.min(S.region.end, duration || S.region.end), cls, note);
   $("mark-save").disabled = false;
-  if (!showing(rec)) return;                              // another recording: its form was closed
+  if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }   // another recording: its form was closed
   if (!r.ok) { showError(r); return; }                    // the form stays open: the note is not lost
   S.lastCls = cls;
   if (S.markForm === form) closeMarkForm();               // (it may have been cancelled meanwhile)
@@ -654,17 +975,17 @@ function scheduleMarkMove(region) {
   clearTimeout(S.markTimers.get(id));
   S.markTimers.delete(id);
   if (Math.abs(old.start - region.start) < 1e-6 && Math.abs(old.end - region.end) < 1e-6) return;   // a click, not a move
-  const { rec, duration } = S.current, move = (S.moveSeq.get(id) || 0) + 1;
+  const { rec, duration, fp } = S.current, move = (S.moveSeq.get(id) || 0) + 1;
   S.moveSeq.set(id, move);                                   // answers to earlier moves are now stale
-  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, move, id, region, duration); }, 300));
+  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, fp, move, id, region, duration); }, 300));
 }
 
-async function saveMarkMove(rec, move, id, region, duration) {
+async function saveMarkMove(rec, fp, move, id, region, duration) {
   const end = Math.min(region.end, duration || region.end);
   const r = await api().update_mark(rec, id, region.start, end, null, null);
   if (S.moveSeq.get(id) !== move) return;                    // a later move of this mark decides
   if (!r.ok) showError(r);                                   // also after switching: the move was not saved
-  if (!showing(rec)) return;
+  if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (r.ok) { replaceMark(r.mark); return; }
   const old = S.marks.find((m) => m.id === id);
   if (old) region.setOptions({ start: old.start, end: old.end });   // back to where it is stored
@@ -680,6 +1001,8 @@ function renderMarks() {
   $("marks-empty").hidden = S.marks.length > 0;
   $("export-marked").disabled = !S.marks.length || S.exportingMarked;
   renderBackup();
+  // Every change of the loaded marks ends here: the library shows the same counts and notes.
+  if (S.current) syncLibraryMarks(S.current.fp, S.marks, $("reviewed").checked);
 }
 
 function markButton(text, title, run, enabled = true) {
@@ -737,10 +1060,10 @@ function editNoteInline(span, m, text = m.note) {
 
 async function saveNote(m, note) {
   if (!S.current) return;
-  const rec = S.current.rec;
+  const { rec, fp } = S.current;
   const r = await api().update_mark(rec, m.id, null, null, null, note);
   if (!r.ok) showError(r);
-  if (!showing(rec)) return;
+  if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (r.ok) { replaceMark(r.mark); return; }
   renderMarks();                                             // the typed note stays in its field to try again
   const span = $("marks-list").querySelector(`.mark-note[data-id="${m.id}"]`);
@@ -749,9 +1072,9 @@ async function saveNote(m, note) {
 
 async function deleteMark(m) {
   if (!S.current || !confirm("Delete this mark?")) return;
-  const rec = S.current.rec;
+  const { rec, fp } = S.current;
   const r = await api().delete_mark(rec, m.id);
-  if (!showing(rec)) return;
+  if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (!r.ok) { showError(r); return; }
   clearTimeout(S.markTimers.get(m.id));
   S.markTimers.delete(m.id);
@@ -765,10 +1088,11 @@ async function deleteMark(m) {
 
 async function setReviewed() {
   if (!S.current) return;
-  const want = $("reviewed").checked, rec = S.current.rec;
+  const want = $("reviewed").checked, { rec, fp } = S.current;
   const r = await api().set_reviewed(rec, want);
-  if (!showing(rec)) return;
-  if (!r.ok) { $("reviewed").checked = !want; showError(r); }
+  if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
+  if (!r.ok) { $("reviewed").checked = !want; showError(r); return; }
+  syncLibraryMarks(fp, S.marks, want);
 }
 
 // ---- backup of a marked recorder recording, and the WAV export with marks ----
@@ -791,7 +1115,7 @@ function backupEvent(event, p) {
   S.backupEvents.set(p.rec, backupEventsSeen(p.rec) + 1);
   if (done) banner(`✓ Backed up ${p.label} so this EVP is safe even if the recorder is wiped. ${p.detail}`, "ok");
   else banner(p.detail, "warn", marksWritable() ? { label: "Retry backup", run: () => retryBackup(p.rec) } : null);
-  if (done) loadSaved();
+  if (done) loadLibrary();
   if (!S.current) return;
   if (p.rec !== S.current.rec) { refreshBackup(); return; }   // the same recording may be loaded again under a new handle
   S.backupRunning = false;
@@ -828,5 +1152,5 @@ async function exportMarked() {
   const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
   banner(r.already ? `✓ ${r.name} with these marks was already saved in ${where}.`
                    : `✓ Saved ${r.name} with its EVP marks in ${where}.`, "ok");
-  loadSaved();
+  loadLibrary();
 }

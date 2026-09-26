@@ -489,6 +489,23 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(again["indexing"])
         self.assertIsNotNone(again["files"][0]["fp"])
 
+    def test_read_only_store_library_marks_use_the_session_results(self):
+        self.write("x.dvf", dvf_bytes())
+        fp = wavinfo.wav_fingerprint(io.BytesIO(DECODED))
+        self.store.add_mark(fp, 0.2, 0.5, "A", "hello", name="x.dvf", duration=2.0)
+        self.store.close()
+        folder = os.path.join(self.tmp, "appdata")
+        holder = AppData(folder)                                              # another window holds the lock
+        self.addCleanup(holder.close)
+        reader = AppData(folder)
+        self.addCleanup(reader.close)
+        self.assertTrue(reader.read_only)
+        api = self.new_api(store=reader)
+        with FakeDecoder().installed():
+            r = self.index(api)                                               # the fp is only in this session
+        marks = api.library_marks(r["files"][0]["id"])
+        self.assertEqual([(m["cls"], m["note"]) for m in marks["marks"]], [("A", "hello")])
+
     def test_read_only_store_uses_the_saved_index(self):
         self.write("x.dvf", dvf_bytes())
         self.write("y.wav", wav_bytes(b"y"))
@@ -658,6 +675,39 @@ class LibraryTests(unittest.TestCase):
         ids = {f["name"]: f["id"] for f in r["files"]}
         self.assertTrue(api.play_library(ids["z.wav"])["ok"])
         self.assertEqual(api.library_marks(ids["z.wav"]), {"ok": True, "marks": []})
+
+    # ---- moved from the old "saved recordings" tests ------------------------------
+
+    def test_header_lengths_upper_case_names_and_stable_ids(self):
+        self.write("A/001_A_001_X.dvf", dvf_bytes())                          # 3 blocks: 2980 audio bytes
+        self.write("A/session.WAV", wav_bytes(b"s", 2.5))
+        api = self.new_api(store=None)
+        r = api.list_library()
+        got = {f["name"]: (f["type"], f["seconds"]) for f in r["files"]}
+        self.assertEqual(got, {"001_A_001_X.dvf": ("dvf", round(2980 / 750, 1)), "session.WAV": ("wav", 2.5)})
+        self.assertEqual([f["id"] for f in api.list_library()["files"]], [f["id"] for f in r["files"]])
+        w = api.play_library(self.by_name(r)["session.WAV"]["id"])
+        self.assertEqual((w["ok"], w["name"]), (True, "session.WAV"))
+
+    def test_playing_a_dvf_without_a_working_decoder(self):
+        self.write("x.dvf", dvf_bytes())
+        api = self.new_api(store=None)
+        fid = api.list_library()["files"][0]["id"]
+        with mock.patch.dict(sys.modules, {"st25.lpec": None}):
+            r = api.play_library(fid)
+            self.assertFalse(r["ok"])
+            self.assertIn(audio.status(), r["error"])
+        missing_tables = types.ModuleType("st25.lpec")
+        missing_tables.dvf_to_wav = lambda data: data
+
+        def boom_check():
+            raise RuntimeError("lpec_tables.json not found")
+        missing_tables.check = boom_check
+        with mock.patch.dict(sys.modules, {"st25.lpec": missing_tables}):
+            r = api.play_library(fid)
+        self.assertFalse(r["ok"])
+        self.assertIn("could not be loaded", r["error"])
+        self.assertEqual(self.server.made, [])
 
 
 if __name__ == "__main__":

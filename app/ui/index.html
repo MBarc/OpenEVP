@@ -28,18 +28,33 @@
     <div class="nav-title">Recorders</div>
     <div id="devices"><p class="muted">Looking for recorders…</p></div>
     <div class="nav-title">On this PC</div>
-    <div id="saved-entry" class="device-name">Saved recordings <span id="saved-count" class="muted"></span></div>
+    <div id="library-entry" class="device-name">EVP Library <span id="library-count" class="muted"></span></div>
   </nav>
   <section id="list">
+    <div id="library-bar" hidden>
+      <span>Library: <button id="library-folder" class="link" title="Choose the folder with your recordings"></button></span>
+      <span id="library-filters" role="group" aria-label="Show">
+        <button type="button" data-filter="all">All</button>
+        <button type="button" data-filter="evp" title="Recordings with at least one EVP marked">Has EVPs</button>
+        <button type="button" data-filter="A" class="cls-A" title="Recordings with a class A EVP">A</button>
+        <button type="button" data-filter="B" class="cls-B" title="Recordings with a class B EVP">B</button>
+        <button type="button" data-filter="C" class="cls-C" title="Recordings with a class C EVP">C</button>
+        <button type="button" data-filter="unreviewed" title="Recordings not marked as reviewed yet">Not reviewed</button>
+      </span>
+      <input id="library-search" type="search" placeholder="Search names and notes" autocomplete="off">
+      <span id="library-status"></span>
+    </div>
+    <div id="list-scroll">
     <table id="device-table">
       <thead><tr><th><input type="checkbox" id="all" title="Select all"></th><th>No.</th><th>Recorded</th><th>Length</th><th></th></tr></thead>
       <tbody id="rows"></tbody>
     </table>
-    <table id="saved-table" hidden>
-      <thead><tr><th>Name</th><th>Folder</th><th>Type</th><th>Length</th><th>Saved</th></tr></thead>
-      <tbody id="saved-rows"></tbody>
+    <table id="library-table" hidden>
+      <thead><tr><th></th><th>Recording</th><th>Investigation</th><th>Type</th><th>Length</th><th>EVPs</th><th>Reviewed</th></tr></thead>
+      <tbody id="library-rows"></tbody>
     </table>
     <p id="empty" class="muted">Plug in an ICD-ST25 and select it on the left.</p>
+    </div>
   </section>
 </main>
 <footer id="player">
