@@ -15,7 +15,7 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    moreRow: null },
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
-            formCls: "B", lastCls: "B", backup: null, backupRunning: false, exportingMarked: false,
+            formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
             backupEvents: new Map(), moveSeq: new Map() };   // rec -> backup events seen; mark id -> latest move
 
 function api() { return window.pywebview.api; }
@@ -283,6 +283,9 @@ async function loadLibrary() {
   const r = await api().list_library();
   if (seq !== L.seq) return;                  // a newer listing is on its way; its events are buffered
   L.loading = false;
+  // Listings that raced each other can answer out of order: never go back to an older scan
+  // (its events are dropped already; the newer scan's events would be dropped next).
+  if (r.ok && r.scan_id < L.scanId) { scheduleLibraryRender(); return; }
   const buffered = L.buffer;
   L.buffer = [];
   L.listed = true;
@@ -297,6 +300,8 @@ async function loadLibrary() {
                      files: r.files, byId: new Map(r.files.map((f) => [f.id, f])) });
   for (const [event, p] of buffered) if (p.scan_id === L.scanId) libraryEvent(event, p);
   scheduleLibraryRender();
+  // A newer scan started while this listing was on its way (listings racing each other).
+  if (buffered.some(([, p]) => p.scan_id > L.scanId)) loadLibrary();
 }
 
 // "library-row" / "-progress" / "-done". Events of an older listing are dropped; events that
@@ -304,7 +309,9 @@ async function loadLibrary() {
 function libraryEvent(event, p) {
   const L = S.lib;
   if (p.scan_id !== L.scanId) {
-    if (L.loading && p.scan_id > L.scanId) L.buffer.push([event, p]);
+    if (p.scan_id < L.scanId) return;                     // an older scan
+    if (L.loading) L.buffer.push([event, p]);             // its listing's answer is on its way
+    else loadLibrary();                                   // a scan this page never got the listing of
     return;
   }
   if (event === "library-row") {
@@ -889,6 +896,7 @@ function setCurrent(label, r) {
   S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
+  S.backupNeeded = !!(r && r.backup_needed);
   S.backupRunning = false;
   $("reviewed").checked = !!(r && r.reviewed);
   renderMarks();
@@ -965,6 +973,7 @@ async function saveMarkForm() {
   // The backup's own event may have come before this answer: then it is over already.
   if (r.backup_queued && backupEventsSeen(rec) === events) S.backupRunning = true;
   renderMarks();
+  if (!r.backup_queued) refreshBackup();                  // refused (closing, updating) or not needed
 }
 
 // ---- dragging a mark's band (or an edge) saves the new times after a short pause ----
@@ -1100,12 +1109,15 @@ function renderBackup() {
   const el = $("backup-status"), b = S.backup || { status: null, detail: "" };
   const saved = !S.backupRunning && b.status === "saved";
   const failed = !S.backupRunning && b.status === "failed";
-  el.className = saved ? "ok" : failed ? "warn" : "";
+  // Marked on the recorder but never backed up (no backup was started, so no event will come).
+  const needed = !S.backupRunning && !saved && !failed && S.backupNeeded && S.marks.length > 0;
+  el.className = saved ? "ok" : failed || needed ? "warn" : "";
   el.textContent = S.backupRunning ? "Backing up…" : saved ? "Backed up to your save folder"
-    : failed ? b.detail || "The backup failed." : "";      // the detail names the recording and why
+    : failed ? b.detail || "The backup failed."            // the detail names the recording and why
+    : needed ? "Not backed up yet" : "";
   el.title = saved ? b.detail : "";
   el.hidden = !el.textContent;
-  $("retry-backup").hidden = !failed;
+  $("retry-backup").hidden = !(failed || needed);
   $("retry-backup").disabled = !marksWritable();
   $("retry-backup").title = marksTip();
 }
@@ -1120,6 +1132,7 @@ function backupEvent(event, p) {
   if (p.rec !== S.current.rec) { refreshBackup(); return; }   // the same recording may be loaded again under a new handle
   S.backupRunning = false;
   S.backup = { status: done ? "saved" : "failed", detail: p.detail };
+  S.backupNeeded = !done;
   renderBackup();
 }
 
@@ -1128,6 +1141,7 @@ async function refreshBackup() {
   const r = await api().get_marks(rec);
   if (!showing(rec) || !r.ok) return;
   S.backup = r.backup;
+  S.backupNeeded = !!r.backup_needed;
   renderBackup();
 }
 

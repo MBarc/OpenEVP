@@ -129,17 +129,19 @@ or a WAV saved twice — are grouped into one row, showing its investigation
 (the subfolder it came from), type, length, how many class A/B/C EVPs it
 has, and whether it's been reviewed. Click a row to play it, the triangle to
 see its marks, or a mark to jump straight to it. Filter with the **All / Has
-EVPs / A / B / C / Not reviewed** buttons above the list, or search by name
-or note.
+EVPs / A / B / C / Not reviewed** buttons above the list, or search by file
+name, investigation (folder) name, or note.
 
 **Backups.** The first time you mark a recording still on the recorder,
 OpenEVP saves a copy of it (the `.dvf`, and a WAV if conversion is available)
 to the Save-to folder in the background, so the mark isn't lost if the
 recorder is later wiped. A line under the marks list shows when it's done,
-or offers **Retry backup** if it failed.
+or says it isn't backed up yet (if it failed, or couldn't start because the
+app was closing or updating) and offers **Retry backup**.
 
 **Export WAV with marks** saves a WAV copy of the loaded recording, with its
-marks written in, to the Save-to folder. Those marks are standard RIFF
+marks written in, to the Save-to folder (into the recorder folder's letter,
+or the investigation's folder for a file in the library). Those marks are standard RIFF
 `cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
 read (none has been verified with OpenEVP yet).
 
