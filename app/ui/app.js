@@ -12,7 +12,8 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    truncated: false, indexing: false, done: 0, total: 0, checkError: "", problem: "",
                    files: [], byId: new Map(), groups: [], rowEls: new Map(), subEls: new Map(),
                    subMarks: new Map(), expanded: new Set(), filter: "all", search: "", renderQueued: false,
-                   moreRow: null },
+                   moreRow: null,
+                   summaries: new Map() },                // fp -> {marks, reviewed, notes}: one per recording, not per file
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
@@ -303,7 +304,9 @@ async function loadLibrary() {
   }
   Object.assign(L, { scanId: r.scan_id, folder: r.folder, exists: r.exists, truncated: r.truncated,
                      indexing: r.indexing, done: 0, total: r.pending, checkError: "", problem: "",
-                     files: r.files, byId: new Map(r.files.map((f) => [f.id, f])) });
+                     files: r.files, byId: new Map(r.files.map((f) => [f.id, f])), summaries: new Map() });
+  for (const f of r.files) if (f.fp && !L.summaries.has(f.fp)) L.summaries.set(f.fp, fileSummary(f));
+  if (S.current) syncLibraryMarks(S.current.fp, S.marks, $("reviewed").checked);   // the player's own state is newest
   for (const [event, p] of buffered) if (p.scan_id === L.scanId) libraryEvent(event, p);
   scheduleLibraryRender();
   // A newer scan started while this listing was on its way (listings racing each other).
@@ -325,7 +328,15 @@ function libraryEvent(event, p) {
     if (!f) return;
     const fp = p.fp || null;
     setFileFp(f, fp);
-    Object.assign(f, { marks: p.marks, reviewed: p.reviewed, notes: p.notes, seconds: p.seconds, error: p.error });
+    Object.assign(f, { seconds: p.seconds, error: p.error });
+    if (!fp) Object.assign(f, fileSummary(p));
+    else if (S.current && S.current.fp === fp) syncLibraryMarks(fp, S.marks, $("reviewed").checked);
+    else {
+      // Every copy of the recording shows these marks, whichever file reported them (a WAV's
+      // imported markers belong to its .dvf too), and an expanded row fetches them again.
+      setSummary(fp, fileSummary(p));
+      L.subMarks.delete(fp);
+    }
   } else if (event === "library-progress") {
     L.done = p.done; L.total = p.total;
   } else if (event === "library-done") {
@@ -333,6 +344,21 @@ function libraryEvent(event, p) {
     L.checkError = p.error || "";
   }
   scheduleLibraryRender();
+}
+
+function fileSummary(x) { return { marks: x.marks, reviewed: !!x.reviewed, notes: x.notes || "" }; }
+
+// A recording's marks summary, kept per fingerprint and copied to every file with that fp.
+function setSummary(fp, sum) {
+  const L = S.lib;
+  L.summaries.set(fp, sum);
+  let hit = false;
+  for (const f of L.files) {
+    if (f.fp !== fp) continue;
+    hit = true;
+    Object.assign(f, { marks: { ...sum.marks }, reviewed: sum.reviewed, notes: sum.notes });
+  }
+  return hit;
 }
 
 // A file learns (or loses) its fingerprint: an expanded row stays expanded under its new key.
@@ -359,9 +385,10 @@ function libraryGroups() {
     g.main = main;
     g.copies = g.files.filter((f) => f !== main);
     g.fp = main.fp;
-    g.marks = main.marks;                     // copies share the fingerprint, so its marks too
-    g.reviewed = main.reviewed;
-    g.notes = main.notes || "";
+    const sum = (g.fp && L.summaries.get(g.fp)) || fileSummary(main);   // by fp: whichever copy reported it
+    g.marks = sum.marks;
+    g.reviewed = sum.reviewed;
+    g.notes = sum.notes;
     g.seconds = g.files.map((f) => f.seconds).find((s) => s != null);
     g.error = main.error;
     g.order = order.get(main);
@@ -612,12 +639,7 @@ function syncLibraryMarks(fp, marks, reviewed) {
   const L = S.lib, counts = { A: 0, B: 0, C: 0 };
   for (const m of marks) counts[m.cls] = (counts[m.cls] || 0) + 1;
   const notes = marks.map((m) => m.note).filter(Boolean).map((n) => n.toLowerCase()).join("\n");
-  let hit = false;
-  for (const f of L.files) {
-    if (f.fp !== fp) continue;
-    hit = true;
-    f.marks = counts; f.reviewed = !!reviewed; f.notes = notes;
-  }
+  const hit = setSummary(fp, { marks: counts, reviewed: !!reviewed, notes });
   if (L.subMarks.has(fp)) L.subMarks.set(fp, sortMarks(marks));
   if (hit) scheduleLibraryRender();
 }
