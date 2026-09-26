@@ -10,6 +10,7 @@ import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.audio_server import AudioServer  # noqa: E402
+from st25 import wavinfo  # noqa: E402
 
 
 def make_wav(seconds=1.0, rate=8000):
@@ -53,6 +54,7 @@ class AudioServerTests(unittest.TestCase):
         self.assertAlmostEqual(info["duration"], 1.0, places=3)
         self.assertTrue(0 < len(info["peaks"]) <= 400)                 # 400 per second
         self.assertTrue(all(0.0 <= p <= 1.0 for p in info["peaks"]))
+        self.assertEqual(info["fp"], wavinfo.wav_fingerprint(io.BytesIO(WAV)))
         r = self.get(info["url"])
         self.assertEqual((r.status, r.headers["Content-Type"], r.headers["Accept-Ranges"]),
                          (200, "audio/wav", "bytes"))
@@ -135,10 +137,11 @@ class AnalyzeTests(unittest.TestCase):
                 p = os.path.join(d, f"w{width}c{channels}.wav")
                 pcm_wav(p, width, channels, 9000)
                 with open(p, "rb") as f:
-                    peaks, duration, rate = audio_server._analyze(f)
+                    peaks, duration, rate, fp = audio_server._analyze(f)
                 self.assertEqual(rate, 48000)
                 self.assertAlmostEqual(duration, 9000 / 48000)
                 self.assertAlmostEqual(max(peaks), 0.5 if channels == 2 else 0.25, places=2)
+                self.assertEqual(fp, wavinfo.wav_fingerprint(p))
 
     def test_chunked_peaks_equal_whole_file_peaks(self):
         from unittest import mock
@@ -168,6 +171,28 @@ class AnalyzeTests(unittest.TestCase):
         from app import audio_server
         with self.assertRaises(ValueError):
             audio_server._analyze(io.BytesIO(b"this is not audio"))
+
+
+class RealDecoderFingerprintTests(unittest.TestCase):
+    """_analyze()'s fp on a real decoded recording (not a synthetic pcm_wav
+    fixture) matches wavinfo.wav_fingerprint of the same WAV, and survives
+    with_markers(). Skipped cleanly when st25.lpec's extracted tables are not
+    available in this checkout."""
+
+    VECTOR = os.path.join(os.path.dirname(__file__), "vectors", "single-frame.dvf")
+
+    def test_fp_matches_real_decoded_audio_and_survives_markers(self):
+        from st25 import audio
+        if not audio.available():
+            self.skipTest("st25.lpec tables are not available in this checkout")
+        from app import audio_server
+        with open(self.VECTOR, "rb") as f:
+            dvf_bytes = f.read()
+        wav = audio.dvf_to_wav(dvf_bytes)
+        _, _, _, fp = audio_server._analyze(io.BytesIO(wav))
+        self.assertEqual(fp, wavinfo.wav_fingerprint(io.BytesIO(wav)))
+        marked = wavinfo.with_markers(wav, [{"start": 0.0, "end": 0.0, "cls": "A", "note": "x"}])
+        self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(marked)), fp)
 
 
 class PickedFileTests(unittest.TestCase):

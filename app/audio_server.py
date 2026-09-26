@@ -10,6 +10,7 @@ prepare_file() does the same for a WAV file the user picked (for example from a
 recorder that writes WAV itself): it is served from where it is, never copied or
 deleted, and only files registered this way can be reached.
 """
+import hashlib
 import io
 import os
 import re
@@ -20,6 +21,8 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
+
+from st25 import wavinfo
 
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
 MAX_PEAKS = 400_000                    # longer files get fewer per second (keeps the page responsive)
@@ -41,9 +44,10 @@ def _samples(data, width):
 
 
 def _analyze(f):
-    """(peaks, duration) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per second of
-    audio (at most MAX_PEAKS in all), each the loudest sample of any channel in its
-    slice. Reads in chunks, never the whole file."""
+    """(peaks, duration, rate, fp) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per
+    second of audio (at most MAX_PEAKS in all), each the loudest sample of any channel
+    in its slice, plus the sample rate and the audio fingerprint (st25.wavinfo) of the
+    decoded samples. Reads in chunks, never the whole file."""
     try:
         w = wave.open(f)
     except (wave.Error, EOFError) as e:
@@ -52,20 +56,27 @@ def _analyze(f):
         rate, n, ch, width = w.getframerate(), w.getnframes(), w.getnchannels(), w.getsampwidth()
         if width not in (1, 2, 3, 4):
             raise ValueError(f"unsupported sample size ({8 * width} bit)")
+        h = hashlib.sha256(wavinfo.fingerprint_prefix(ch, width, rate))
         if not n or not rate:
-            return [], 0.0, rate
+            return [], 0.0, rate, h.hexdigest()
+        expected = n * ch * width
         count = min(MAX_PEAKS, n, max(1, -(-n * PEAKS_PER_SECOND // rate)))
         per = -(-n // count)                                  # frames per peak (ceil)
         chunk = per * max(1, CHUNK_BYTES // (per * ch * width))  # whole peaks per chunk
         full = float(1 << (8 * width - 1))
         peaks = []
+        total = 0
         while True:
             data = w.readframes(chunk)
             if not data:
                 break
+            total += len(data)
+            h.update(data)
             mags = np.abs(_samples(data, width).reshape(-1, ch)).max(axis=1)
             peaks.extend((np.maximum.reduceat(mags, np.arange(0, len(mags), per)) / full).tolist())
-        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate
+        if total != expected:
+            raise ValueError("the WAV file is truncated")
+        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
 
 
 class AudioServer:
@@ -113,13 +124,13 @@ class AudioServer:
                     return self._info(e)
             try:
                 wav = make() if make else self._provider(key)
-                peaks, duration, rate = _analyze(io.BytesIO(wav))
+                peaks, duration, rate, fp = _analyze(io.BytesIO(wav))
                 file_id = secrets.token_hex(8)
                 with open(os.path.join(self._dir, file_id + ".wav"), "wb") as f:
                     f.write(wav)
                 with self._lock:
                     self._entries[key] = {"file": file_id, "size": len(wav), "peaks": peaks, "duration": duration,
-                                          "rate": rate}
+                                          "rate": rate, "fp": fp}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
                 return self._info(self._entries[key])
@@ -139,19 +150,21 @@ class AudioServer:
                 self._entries.move_to_end(key)
                 return self._info(e)
         with open(path, "rb") as f:
-            peaks, duration, rate = _analyze(f)
+            peaks, duration, rate, fp = _analyze(f)
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "path": path}
+                                  "fp": fp, "path": path}
             self._by_file[file_id] = key
         return self._info(self._entries[key])
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
-        duration, and the sample rate (short files are then drawn from the audio itself)."""
-        return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"]}
+        duration, the sample rate (short files are then drawn from the audio itself),
+        and the audio fingerprint (st25.wavinfo) of the decoded samples."""
+        return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
+                "fp": e["fp"]}
 
     def forget(self, device_id):
         with self._lock:
