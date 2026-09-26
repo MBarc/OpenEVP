@@ -20,7 +20,8 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
             backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
             moves: new Map(),                                // mark id -> {busy, next}: one update_mark move in flight per mark
-            markGen: 0, markBusy: 0, reloadingMarks: false, reloadWanted: 0 };  // player mark calls: started (generation) and in flight
+            markGen: 0, markBusy: 0,                         // player mark calls: started (generation) and in flight
+            reloads: new Map() };                            // rec -> {wanted, running}: marks reloads, per loaded recording
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -677,8 +678,10 @@ function syncLibraryMarks(fp, marks, reviewed) {
 // unmarked .dvf was loaded), the player fetches the marks again: the backend is the truth.
 function checkPlayerMarks(sum) {
   if (!S.current || sameSummary(sum, marksSummary(S.marks, $("reviewed").checked))) return;
-  S.reloadWanted++;
-  if (!S.reloadingMarks) reloadPlayerMarks(S.current.rec);
+  const rec = S.current.rec, st = S.reloads.get(rec) || { wanted: 0, running: false };
+  S.reloads.set(rec, st);
+  st.wanted++;
+  if (!st.running) reloadPlayerMarks(rec, st);
 }
 
 // Run a mark-changing call of the player; reloadPlayerMarks never applies an answer that
@@ -691,21 +694,24 @@ async function markCall(call) {
 function playerSaving() { return S.markBusy > 0 || S.markTimers.size > 0 || S.moves.size > 0; }
 
 // Fetch the loaded recording's marks until an answer that no change of the player's own
-// overlapped has been applied after the latest request for one (checkPlayerMarks).
-async function reloadPlayerMarks(rec) {
-  S.reloadingMarks = true;
+// overlapped has been applied after the latest request for one (checkPlayerMarks). The state
+// belongs to this rec: a reload still running for a recording the player has left never
+// swallows a request made for the one now loaded.
+async function reloadPlayerMarks(rec, st) {
+  st.running = true;
   try {
     for (let tries = 0; tries < 50 && showing(rec); tries++) {
       if (playerSaving()) { await new Promise((res) => setTimeout(res, 300)); continue; }
-      const want = S.reloadWanted, gen = S.markGen;
+      const want = st.wanted, gen = S.markGen;
       const r = await api().get_marks(rec);
       if (!showing(rec) || !r.ok) return;
       if (gen !== S.markGen || playerSaving()) continue;        // overlapped a change of its own: ask again
       applyPlayerMarks(r);
-      if (want === S.reloadWanted) return;                      // no newer backend report meanwhile
+      if (want === st.wanted) return;                           // no newer backend report meanwhile
     }
   } finally {
-    S.reloadingMarks = false;
+    st.running = false;
+    if (S.reloads.get(rec) === st) S.reloads.delete(rec);        // served (or left); a new report starts afresh
   }
 }
 
