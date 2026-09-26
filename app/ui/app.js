@@ -16,7 +16,8 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
-            backupEvents: new Map(), moveSeq: new Map() };   // rec -> backup events seen; mark id -> latest move
+            backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
+            moves: new Map() };                              // mark id -> {busy, next}: one update_mark move in flight per mark
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -933,10 +934,12 @@ function addMarkRegion(m) {
 }
 
 // A saved mark replaces the old one in the list and on the waveform.
+// While a move of it is still to be saved, the band stays where the user dragged it.
 function replaceMark(mark) {
   S.marks = sortMarks(S.marks.map((m) => (m.id === mark.id ? mark : m)));
   const region = S.markRegions.get(mark.id);
-  if (region) region.setOptions({ start: mark.start, end: mark.end, color: MARK_COLORS[mark.cls], content: mark.cls });
+  const where = movePending(mark.id) ? {} : { start: mark.start, end: mark.end };
+  if (region) region.setOptions({ ...where, color: MARK_COLORS[mark.cls], content: mark.cls });
   renderMarks();
 }
 
@@ -992,6 +995,10 @@ async function saveMarkForm() {
 }
 
 // ---- dragging a mark's band (or an edge) saves the new times after a short pause ----
+// Moves of one mark are sent one at a time: while an update_mark for it is in flight, a newer
+// move waits (replacing any move already waiting) and is sent when that call returns. So the
+// backend always stores the latest move last, and never an older one after a newer one.
+// moveSeq numbers the moves: only the answer to the latest one updates the player.
 function scheduleMarkMove(region) {
   const id = region.id.slice("mark-".length);
   const old = S.marks.find((m) => m.id === id);
@@ -1001,13 +1008,43 @@ function scheduleMarkMove(region) {
   if (Math.abs(old.start - region.start) < 1e-6 && Math.abs(old.end - region.end) < 1e-6) return;   // a click, not a move
   const { rec, duration, fp } = S.current, move = (S.moveSeq.get(id) || 0) + 1;
   S.moveSeq.set(id, move);                                   // answers to earlier moves are now stale
-  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, fp, move, id, region, duration); }, 300));
+  S.markTimers.set(id, setTimeout(() => {
+    S.markTimers.delete(id);
+    queueMarkMove(id, { rec, fp, move, region, start: region.start, end: Math.min(region.end, duration || region.end) });
+  }, 300));
 }
 
-async function saveMarkMove(rec, fp, move, id, region, duration) {
-  const end = Math.min(region.end, duration || region.end);
-  const r = await api().update_mark(rec, id, region.start, end, null, null);
-  if (S.moveSeq.get(id) !== move) return;                    // a later move of this mark decides
+function queueMarkMove(id, job) {
+  const q = S.moves.get(id) || { busy: false, next: null };
+  S.moves.set(id, q);
+  if (q.busy) { q.next = job; return; }                      // coalesced: only the latest waiting move is sent
+  sendMarkMove(id, q, job);
+}
+
+// Is a move of this mark still to be saved (waiting for its pause, waiting its turn, or in flight)?
+function movePending(id) {
+  const q = S.moves.get(id);
+  return S.markTimers.has(id) || !!(q && (q.busy || q.next));
+}
+
+async function sendMarkMove(id, q, job) {
+  q.busy = true;
+  let r;
+  try {
+    r = await api().update_mark(job.rec, id, job.start, job.end, null, null);
+  } catch (e) {
+    r = { ok: false, error: `The move was not saved: ${e}` };
+  }
+  q.busy = false;
+  if (q.next) {                                              // a newer move waited for this one
+    const next = q.next;
+    q.next = null;
+    sendMarkMove(id, q, next);
+    return;
+  }
+  S.moves.delete(id);
+  if (S.moveSeq.get(id) !== job.move) return;                // a later move of this mark decides
+  const { rec, fp, region } = job;
   if (!r.ok) showError(r);                                   // also after switching: the move was not saved
   if (!showing(rec)) { if (r.ok) refreshLibraryMarks(rec, fp); return; }
   if (r.ok) { replaceMark(r.mark); return; }
@@ -1102,6 +1139,9 @@ async function deleteMark(m) {
   if (!r.ok) { showError(r); return; }
   clearTimeout(S.markTimers.get(m.id));
   S.markTimers.delete(m.id);
+  const q = S.moves.get(m.id);
+  if (q) q.next = null;                                      // a waiting move of a deleted mark is dropped
+  S.moveSeq.set(m.id, (S.moveSeq.get(m.id) || 0) + 1);       // and the answer to one in flight is ignored
   const region = S.markRegions.get(m.id);
   if (region) region.remove();
   S.markRegions.delete(m.id);
