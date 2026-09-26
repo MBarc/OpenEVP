@@ -489,6 +489,27 @@ class LibraryTests(unittest.TestCase):
         self.assertFalse(again["indexing"])
         self.assertIsNotNone(again["files"][0]["fp"])
 
+    def test_read_only_store_uses_the_saved_index(self):
+        self.write("x.dvf", dvf_bytes())
+        self.write("y.wav", wav_bytes(b"y"))
+        with FakeDecoder().installed():
+            first = self.index(self.new_api())
+        fps = {f["id"]: f["fp"] for f in self.events.rows(first["scan_id"]).values()}
+        self.store.close()                                                    # index.json written
+        folder = os.path.join(self.tmp, "appdata")
+        holder = AppData(folder)                                              # another window holds the lock
+        self.addCleanup(holder.close)
+        reader = AppData(folder)
+        self.addCleanup(reader.close)
+        self.assertTrue(reader.read_only)
+        fake = FakeDecoder()
+        with fake.installed():
+            r = self.new_api(store=reader).list_library()
+        self.assertEqual(fake.calls, 0)
+        self.assertEqual((r["indexing"], r["pending"]), (False, 0))
+        self.assertEqual({f["id"]: f["fp"] for f in r["files"]}, fps)
+        self.assertTrue(all(fps.values()))
+
     def test_unreadable_subfolder_is_not_pruned(self):
         path = self.write("sub/s.wav", wav_bytes(b"s"))
         self.write("t.wav", wav_bytes(b"t"))

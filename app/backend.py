@@ -893,16 +893,17 @@ class Api:
 
     def _cached_fp(self, path, size, mtime_ns):
         """The cached index entry of a file (fp, or "error"), or None. A read-only
-        store (a second window) cannot be written, so there results are kept in
-        memory for this session instead."""
+        store (a second window) cannot be written, so its new results are kept in
+        memory for this session; its index.json (loaded all the same) is still
+        read."""
         store = self._store
         if store is None:
             return None
-        if not store.read_only:
-            return store.cached_fp(path, size, mtime_ns)
         with self._lib_lock:
             held = self._fp_session.get(os.path.normcase(os.path.abspath(path)))
-        return dict(held[2]) if held and held[:2] == (size, mtime_ns) else None
+        if held and held[:2] == (size, mtime_ns):
+            return dict(held[2])
+        return store.cached_fp(path, size, mtime_ns)
 
     def _remember_fp(self, path, size, mtime_ns, fp, seconds, error):
         """Cache one result. True if it went into the store's index (to be flushed)."""
