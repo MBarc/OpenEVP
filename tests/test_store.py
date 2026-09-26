@@ -5,9 +5,10 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from app.store import AppData, StoreReadOnly  # noqa: E402
+from app.store import AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _release_lock  # noqa: E402
 
 
 def _mp_probe_read_only(folder, queue):
@@ -238,6 +239,168 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(second.marks("fp1"), [])   # reads still work
             second.close()
             first.close()
+
+    # ---- Fix round 1 -----------------------------------------------------------
+
+    def test_import_marks_does_not_duplicate_when_marks_already_exist(self):
+        """A recorder recording whose backup WAV embeds the marks just made
+        (same fp) must not have them imported a second time, even though
+        `imported` was never explicitly set for a manually-marked recording."""
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "manual mark")
+            self.assertFalse(store.is_imported("fp1"))
+
+            markers = [{"start": 3.0, "end": 3.0, "note": "EVP A: get out"}]
+            added = store.import_marks("fp1", markers, "recording 1", 10.0)
+            self.assertEqual(added, 0)
+            self.assertTrue(store.is_imported("fp1"))       # flagged so it's never retried
+            self.assertEqual(len(store.marks("fp1")), 1)    # only the original manual mark
+            store.close()
+
+    def test_failed_set_aside_blocks_future_writes_and_leaves_file_untouched(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "marks.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("{not json")
+            real_replace = os.replace
+
+            def flaky_replace(src, dst):
+                if ".corrupt-" in os.path.basename(dst) or ".future-" in os.path.basename(dst):
+                    raise OSError("simulated: cannot rename")
+                return real_replace(src, dst)
+
+            with mock.patch("app.store.os.replace", side_effect=flaky_replace):
+                store = AppData(d)
+            problems = store.problems()
+            self.assertTrue(any("could not be set aside" in p for p in problems), problems)
+            with self.assertRaises(StoreUnavailable):
+                store.add_mark("fp1", 1.0, 2.0, "A", "note")
+            # the original corrupt file was never moved and never overwritten
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(f.read(), "{not json")
+            self.assertEqual([n for n in os.listdir(d) if "corrupt" in n], [])
+            store.close()
+
+    def test_read_only_instance_never_renames_bad_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
+                f.write("{not json")
+            lock_file, locked = _acquire_lock(os.path.join(d, ".lock"))  # hold the lock ourselves
+            self.assertTrue(locked)
+            try:
+                store = AppData(d)
+                self.assertTrue(store.read_only)
+                self.assertTrue(any("read-only" in p for p in store.problems()), store.problems())
+                self.assertEqual([n for n in os.listdir(d) if "corrupt" in n], [])
+                with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
+                    self.assertEqual(f.read(), "{not json")
+                store.close()
+            finally:
+                _release_lock(lock_file)
+
+    def test_permission_error_on_read_is_unavailable_not_corrupt(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "marks.json")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('{"version": 1, "recordings": {}}')
+            real_open = open
+
+            def flaky_open(file, *a, **kw):
+                if os.path.abspath(str(file)) == os.path.abspath(path):
+                    raise PermissionError("simulated: access denied")
+                return real_open(file, *a, **kw)
+
+            with mock.patch("builtins.open", side_effect=flaky_open):
+                store = AppData(d)
+            problems = store.problems()
+            self.assertTrue(any("could not be read right now" in p for p in problems), problems)
+            self.assertEqual([n for n in os.listdir(d) if "corrupt" in n or "future" in n], [])
+            with self.assertRaises(StoreUnavailable):
+                store.add_mark("fp1", 1.0, 2.0, "A", "note")
+            with open(path, encoding="utf-8") as f:
+                self.assertEqual(json.load(f), {"version": 1, "recordings": {}})
+            store.close()
+
+    def test_add_mark_never_shrinks_duration_below_existing_marks(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 8.0, 9.0, "A", "note", duration=10.0)
+            # A later, smaller duration must not drop below the furthest mark end (9.0)
+            # already on record, even though 3.0 alone would have been a valid bound
+            # for the mark just being added (end 2.0).
+            store.add_mark("fp1", 1.0, 2.0, "A", "note", duration=3.0)
+            self.assertGreaterEqual(store.recording("fp1")["duration"], 9.0)
+            self.assertEqual(len(store.marks("fp1")), 2)
+            store.close()
+
+            reloaded = AppData(d)
+            self.assertEqual(len(reloaded.marks("fp1")), 2)   # nothing lost on reload either
+            reloaded.close()
+
+    def test_load_epsilon_tolerance_for_duration_vs_mark_end(self):
+        with tempfile.TemporaryDirectory() as d:
+            marks_path = os.path.join(d, "marks.json")
+            blank_backup = {"status": None, "detail": ""}
+            data = {"version": 1, "recordings": {
+                "fp1": {"marks": [{"id": "a" * 12, "start": 1.0, "end": 5.004, "cls": "A",
+                                    "note": "", "created": "2024-01-01T00:00:00"}],
+                        "reviewed": False, "name": "", "duration": 5.0,
+                        "imported": False, "backup": blank_backup},
+                "fp2": {"marks": [{"id": "b" * 12, "start": 1.0, "end": 6.0, "cls": "A",
+                                    "note": "", "created": "2024-01-01T00:00:00"}],
+                        "reviewed": False, "name": "", "duration": 5.0,
+                        "imported": False, "backup": blank_backup},
+            }}
+            with open(marks_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+
+            store = AppData(d)
+            self.assertEqual(len(store.marks("fp1")), 1)   # 0.004s over: within epsilon, kept
+            self.assertEqual(len(store.marks("fp2")), 0)   # 1.0s over: dropped
+            self.assertEqual(len(store.problems()), 1)
+            store.close()
+
+    def test_index_can_cache_a_failure_and_survives_reload(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            path = os.path.join(d, "bad.dvf")
+            store.remember_fp(path, 123, 456, None, None, error="could not decode")
+            entry = store.cached_fp(path, 123, 456)
+            self.assertEqual(entry["error"], "could not decode")
+            self.assertIsNone(entry["fp"])
+            store.flush_index()
+            store.close()
+
+            reloaded = AppData(d)
+            entry2 = reloaded.cached_fp(path, 123, 456)
+            self.assertEqual(entry2["error"], "could not decode")
+            reloaded.close()
+
+    def test_prune_index_normalizes_seen_keys(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            path = os.path.join(d, "rec.wav")
+            store.remember_fp(path, 100, 1000, "abcd1234", 12.5)
+            store.prune_index(d, seen_keys={path.upper()})   # raw, differently-cased path
+            self.assertIsNotNone(store.cached_fp(path, 100, 1000))
+            store.close()
+
+    def test_failed_write_leaves_memory_unchanged_and_removes_temp_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "first")
+            before = store.marks("fp1")
+
+            with mock.patch("app.store.os.replace", side_effect=OSError("simulated disk full")):
+                with self.assertRaises(StoreUnavailable):
+                    store.add_mark("fp1", 5.0, 6.0, "B", "second")
+
+            self.assertEqual(store.marks("fp1"), before)     # memory unchanged
+            leftovers = [n for n in os.listdir(d)
+                         if n not in ("marks.json", "settings.json", "index.json", ".lock")]
+            self.assertEqual(leftovers, [])                  # no leftover temp file
+            store.close()
 
 
 class StoreMultiprocessTests(unittest.TestCase):

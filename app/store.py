@@ -31,6 +31,8 @@ else:
 CLASSES = ("A", "B", "C")
 MIN_MARK_LENGTH = 0.05      # seconds; new marks made in the UI must be at least this long
 MAX_NOTE_LENGTH = 500
+DURATION_EPSILON = 0.01    # seconds of float slack allowed when validating a mark against
+                            # a recording's duration at *load* time (not for new marks)
 _BACKUP_STATUSES = ("saved", "failed", None)
 _LABEL_RE = re.compile(r"^EVP ([ABC])(?::\s?(.*))?$")   # "EVP A: note" or bare "EVP A"
 
@@ -62,6 +64,24 @@ def _blank_recording():
             "imported": False, "backup": {"status": None, "detail": ""}}
 
 
+def _clamp_duration(duration, marks):
+    """A duration is never stored smaller than the furthest mark end already
+    present, so a shorter duration passed later can't make a load silently
+    drop marks (see DURATION_EPSILON for the load-time tolerance)."""
+    if not marks:
+        return duration
+    max_end = max(m["end"] for m in marks)
+    if duration is None or duration < max_end:
+        return max_end
+    return duration
+
+
+def _unavailable_message(basename):
+    """A fixed, plain-words message: never includes OS error text or a full
+    path (R3/R10 -- error messages use the file's name, not its path)."""
+    return f"Could not save {basename}. Check that the disk has space and the folder can be written to."
+
+
 def _write_json(path, obj):
     """Atomic write: temp file in the same folder, fsync, then os.replace."""
     folder = os.path.dirname(path) or "."
@@ -81,14 +101,35 @@ def _write_json(path, obj):
 
 
 def _set_aside(path, tag):
-    """Rename path to <path>.<tag>-<timestamp> (best effort). Returns the new basename."""
+    """Try to rename path to <path>.<tag>-<timestamp>. Returns (ok, basename);
+    on failure (path, e.g., can't be renamed) returns (False, None) and the
+    original file is left exactly where it was."""
     ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     new_path = f"{path}.{tag}-{ts}"
     try:
         os.replace(path, new_path)
     except OSError:
-        pass
-    return os.path.basename(new_path)
+        return False, None
+    return True, os.path.basename(new_path)
+
+
+def _read_json_raw(path):
+    """Read and parse one JSON file. Returns (status, data):
+    "missing" (no such file), "io_error" (couldn't even open/read it --
+    treated as transiently unavailable, never as corrupt), "bad_json"
+    (opened fine but isn't valid JSON), or "ok" (data is the parsed value).
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            text = f.read()
+    except FileNotFoundError:
+        return "missing", None
+    except OSError:
+        return "io_error", None
+    try:
+        return "ok", json.loads(text)
+    except ValueError:
+        return "bad_json", None
 
 
 def _check_common(start, end, cls, note):
@@ -151,7 +192,7 @@ def _clean_mark(m, duration):
         return None
     if start < 0 or end < start:
         return None
-    if duration is not None and end > duration:
+    if duration is not None and end > duration + DURATION_EPSILON:
         return None
     return {"id": mid, "start": float(start), "end": float(end), "cls": cls,
             "note": note, "created": created}
@@ -251,12 +292,19 @@ class AppData:
         self._settings_path = os.path.join(folder, "settings.json")
         self._marks_path = os.path.join(folder, "marks.json")
         self._index_path = os.path.join(folder, "index.json")
+        # The lock is taken *before* anything is loaded: only the lock holder
+        # (the single writer) may set a bad file aside. A read-only instance
+        # that loaded first and renamed the writer's files out from under it
+        # would be destructive, so loading must know its role first.
+        self._lock_file, locked = _acquire_lock(os.path.join(folder, ".lock"))
+        self.read_only = not locked
+        self._settings_blocked = False
+        self._marks_blocked = False
+        self._index_blocked = False
         self._settings = self._load_settings()
         self._data = self._load_marks()
         self._index = self._load_index()
         self._index_dirty = False
-        self._lock_file, locked = _acquire_lock(os.path.join(folder, ".lock"))
-        self.read_only = not locked
         self._closed = False
 
     def problems(self):
@@ -281,41 +329,61 @@ class AppData:
 
     # ---- loading --------------------------------------------------------------
 
+    def _handle_bad_file(self, path, basename, subject, blocked_attr, tag="corrupt", label=None):
+        """A file that was readable but is malformed (bad JSON, wrong shape, or
+        a future version). Only the lock holder may rename it aside; a
+        read-only instance leaves it untouched and just reports the problem
+        (the writing window will repair it)."""
+        label = label or "could not be read"
+        if self.read_only:
+            self._problems.append(f"{basename} {label} (read-only here); it will be repaired "
+                                   "the next time the main OpenEVP window loads it.")
+            return
+        ok, new_name = _set_aside(path, tag)
+        if ok:
+            self._problems.append(f"{basename} {label}; it was set aside as {new_name} and "
+                                   f"{subject} starts fresh.")
+        else:
+            self._problems.append(f"{basename} {label} and could not be set aside; "
+                                   f"{subject} cannot be saved until this is fixed.")
+            setattr(self, blocked_attr, True)
+
+    def _handle_unavailable_file(self, basename, subject, blocked_attr):
+        """The file itself could not even be opened/read (permissions, or a
+        transient sharing violation while the writer is mid-replace). This is
+        never treated as corrupt: nothing is renamed, in either role."""
+        self._problems.append(f"{basename} could not be read right now; {subject} is "
+                               "unavailable until this is fixed.")
+        setattr(self, blocked_attr, True)
+
     def _load_settings(self):
         path = self._settings_path
-        if not os.path.exists(path):
+        status, data = _read_json_raw(path)
+        if status == "missing":
             return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            data = None
-        if not isinstance(data, dict):
-            name = _set_aside(path, "corrupt")
-            self._problems.append(f"settings.json could not be read; it was set aside as {name} "
-                                   "and settings were reset.")
+        if status == "io_error":
+            self._handle_unavailable_file("settings.json", "settings", "_settings_blocked")
+            return {}
+        if status == "bad_json" or not isinstance(data, dict):
+            self._handle_bad_file(path, "settings.json", "settings", "_settings_blocked")
             return {}
         return data
 
     def _load_marks(self):
         path = self._marks_path
         default = {"version": 1, "recordings": {}}
-        if not os.path.exists(path):
+        status, data = _read_json_raw(path)
+        if status == "missing":
             return default
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            data = None
-        if not isinstance(data, dict) or not isinstance(data.get("recordings"), dict):
-            name = _set_aside(path, "corrupt")
-            self._problems.append(f"marks.json could not be read; it was set aside as {name} "
-                                   "and marking starts fresh.")
+        if status == "io_error":
+            self._handle_unavailable_file("marks.json", "marking", "_marks_blocked")
+            return default
+        if status == "bad_json" or not isinstance(data, dict) or not isinstance(data.get("recordings"), dict):
+            self._handle_bad_file(path, "marks.json", "marking", "_marks_blocked")
             return default
         if data.get("version") != 1:
-            name = _set_aside(path, "future")
-            self._problems.append(f"marks.json is from a newer version of OpenEVP; it was set "
-                                   f"aside as {name} and marking starts fresh.")
+            self._handle_bad_file(path, "marks.json", "marking", "_marks_blocked", tag="future",
+                                   label="is from a newer version of OpenEVP")
             return default
         cleaned, dropped = {}, 0
         for fp, rec in data["recordings"].items():
@@ -335,27 +403,31 @@ class AppData:
     def _load_index(self):
         path = self._index_path
         default = {"files": {}}
-        if not os.path.exists(path):
+        status, data = _read_json_raw(path)
+        if status == "missing":
             return default
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, ValueError):
-            data = None
-        if not isinstance(data, dict) or not isinstance(data.get("files"), dict):
-            name = _set_aside(path, "corrupt")
-            self._problems.append(f"index.json could not be read; it was set aside as {name} "
-                                   "and the fingerprint cache starts fresh.")
+        if status == "io_error":
+            self._handle_unavailable_file("index.json", "the fingerprint cache", "_index_blocked")
+            return default
+        if status == "bad_json" or not isinstance(data, dict) or not isinstance(data.get("files"), dict):
+            self._handle_bad_file(path, "index.json", "the fingerprint cache", "_index_blocked")
             return default
         files = {}
         for k, v in data["files"].items():
             if not isinstance(k, str) or not isinstance(v, dict):
                 continue
-            size, mtime_ns, fp, seconds = v.get("size"), v.get("mtime_ns"), v.get("fp"), v.get("seconds")
+            size, mtime_ns = v.get("size"), v.get("mtime_ns")
             if not isinstance(size, int) or isinstance(size, bool):
                 continue
             if not isinstance(mtime_ns, int) or isinstance(mtime_ns, bool):
                 continue
+            error = v.get("error")
+            if error is not None:
+                if not isinstance(error, str):
+                    continue
+                files[k] = {"size": size, "mtime_ns": mtime_ns, "fp": None, "seconds": None, "error": error}
+                continue
+            fp, seconds = v.get("fp"), v.get("seconds")
             if not isinstance(fp, str):
                 continue
             if seconds is not None and not _finite_number(seconds):
@@ -372,21 +444,25 @@ class AppData:
     def set_setting(self, name, value):
         with self._lock:
             self._require_writable()
+            if self._settings_blocked:
+                raise StoreUnavailable(_unavailable_message("settings.json"))
             new_settings = dict(self._settings)
             new_settings[name] = value
             try:
                 _write_json(self._settings_path, new_settings)
             except OSError as e:
-                raise StoreUnavailable(f"Could not save settings: {e}") from e
+                raise StoreUnavailable(_unavailable_message("settings.json")) from e
             self._settings = new_settings
 
     # ---- marks --------------------------------------------------------------
 
     def _save_marks(self, new_data):
+        if self._marks_blocked:
+            raise StoreUnavailable(_unavailable_message("marks.json"))
         try:
             _write_json(self._marks_path, new_data)
         except OSError as e:
-            raise StoreUnavailable(f"Could not save marks: {e}") from e
+            raise StoreUnavailable(_unavailable_message("marks.json")) from e
         self._data = new_data
 
     def marks(self, fp):
@@ -432,7 +508,7 @@ class AppData:
             if name:
                 rec["name"] = name
             if duration is not None:
-                rec["duration"] = float(duration)
+                rec["duration"] = _clamp_duration(float(duration), rec["marks"])
             self._save_marks(new_data)
             return dict(mark)
 
@@ -496,9 +572,22 @@ class AppData:
             return bool(rec["reviewed"]) if rec else False
 
     def import_marks(self, fp, marks, name, duration):
+        """Import embedded markers, once per fp (see ``imported``/R3).
+
+        Also refuses -- without ever raising -- when the recording already
+        has marks, even if ``imported`` wasn't set yet: this covers a
+        recorder recording whose backup WAV embeds the very marks the user
+        just made, so re-reading that WAV (via indexing or open_wav) must not
+        duplicate them. Either way, imported is set so it is never retried.
+        """
         with self._lock:
             self._require_writable()
-            if self.is_imported(fp):
+            existing = self._data["recordings"].get(fp)
+            if existing and (existing["imported"] or existing["marks"]):
+                if not existing["imported"]:
+                    new_data = copy.deepcopy(self._data)
+                    new_data["recordings"][fp]["imported"] = True
+                    self._save_marks(new_data)
                 return 0
             new_data = copy.deepcopy(self._data)
             rec = new_data["recordings"].setdefault(fp, _blank_recording())
@@ -512,7 +601,7 @@ class AppData:
             if name:
                 rec["name"] = name
             if duration is not None:
-                rec["duration"] = float(duration)
+                rec["duration"] = _clamp_duration(float(duration), rec["marks"])
             rec["imported"] = True
             self._save_marks(new_data)
             return added
@@ -569,11 +658,17 @@ class AppData:
                 return dict(entry)
             return None
 
-    def remember_fp(self, path, size, mtime_ns, fp, seconds):
+    def remember_fp(self, path, size, mtime_ns, fp, seconds, error=None):
+        """Cache one file's fingerprint result, or (if `error` is given, with
+        `fp` typically None) cache that fingerprinting it failed -- so the
+        library indexer doesn't retry a known-bad file every scan. cached_fp
+        returns whatever was stored; callers check for an "error" key."""
         with self._lock:
             self._require_writable()
-            self._index["files"][_index_key(path)] = {
-                "size": size, "mtime_ns": mtime_ns, "fp": fp, "seconds": seconds}
+            entry = {"size": size, "mtime_ns": mtime_ns, "fp": fp, "seconds": seconds}
+            if error is not None:
+                entry["error"] = error
+            self._index["files"][_index_key(path)] = entry
             self._index_dirty = True
 
     def flush_index(self):
@@ -581,18 +676,23 @@ class AppData:
             if not self._index_dirty:
                 return
             self._require_writable()
+            if self._index_blocked:
+                raise StoreUnavailable(_unavailable_message("index.json"))
             try:
                 _write_json(self._index_path, self._index)
             except OSError as e:
-                raise StoreUnavailable(f"Could not save the fingerprint index: {e}") from e
+                raise StoreUnavailable(_unavailable_message("index.json")) from e
             self._index_dirty = False
 
     def prune_index(self, folder, seen_keys):
-        """Drop cached entries under `folder` that were not in the latest scan."""
+        """Drop cached entries under `folder` that were not in the latest scan.
+        `seen_keys` may be raw paths -- they're normalized the same way keys
+        stored by remember_fp are, so callers don't have to know the key
+        format."""
         with self._lock:
             self._require_writable()
             prefix = os.path.normcase(os.path.abspath(folder))
-            seen = set(seen_keys)
+            seen = {_index_key(k) for k in seen_keys}
             to_delete = [k for k in self._index["files"]
                          if (k == prefix or k.startswith(prefix + os.sep)) and k not in seen]
             for k in to_delete:
