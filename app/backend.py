@@ -616,7 +616,9 @@ class Api:
             path, already = save_wav(marked, outdir, out_name)
         except OSError as e:
             return _fail(f"Could not save {out_name}: {_plain(e)}", DISK)
-        return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path)}
+        folder_name = os.path.basename(outdir) if outdir != self._dest else ""   # the subfolder's name, never a path
+        return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path),
+                "folder_name": folder_name}
 
     def _import_markers(self, path, info, name):
         """Import a WAV's embedded markers, once per recording (the store decides:

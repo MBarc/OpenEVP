@@ -480,11 +480,12 @@ class MarksApiTests(unittest.TestCase):
         self.api.add_mark(rec, 0.1, 0.4, "A", "hi")
         self.assertEqual(self.wait_event()[0], "backup-done")
         r = self.api.export_marked(rec)
-        self.assertEqual(r, {"ok": True, "saved": False, "already": True, "name": WAV_1})   # the backup's copy
+        self.assertEqual(r, {"ok": True, "saved": False, "already": True, "name": WAV_1,
+                             "folder_name": "A"})   # the backup's copy
         self.api.add_mark(rec, 0.5, 0.6, "B", "")
         r = self.api.export_marked(rec)
         self.assertEqual(r, {"ok": True, "saved": True, "already": False,
-                             "name": "001_A_001_Casey_2029_05_23 (2).wav"})
+                             "name": "001_A_001_Casey_2029_05_23 (2).wav", "folder_name": "A"})
         self.assertEqual(len(wavinfo.read_markers(os.path.join(self.dest, "A", r["name"]))), 2)
 
         path = os.path.join(self.tmp, "Old Jail", "cell 3.wav")
@@ -495,7 +496,8 @@ class MarksApiTests(unittest.TestCase):
         frec = api.open_wav()["rec"]
         api.add_mark(frec, 0.2, 0.3, "C", "knock")
         r = api.export_marked(frec)
-        self.assertEqual(r, {"ok": True, "saved": True, "already": False, "name": "cell 3.wav"})
+        self.assertEqual(r, {"ok": True, "saved": True, "already": False, "name": "cell 3.wav",
+                             "folder_name": "Old Jail"})
         out = os.path.join(self.dest, "Old Jail", "cell 3.wav")
         self.assertEqual([m["note"] for m in wavinfo.read_markers(out)], ["EVP C: knock"])
         self.assertEqual(wavinfo.read_markers(path), [])                    # the user's file is untouched

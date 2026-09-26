@@ -9,7 +9,8 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
             view: "device", saved: null, savedSeq: 0,     // view: "device" (a recorder) or "saved" (this PC)
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
-            formCls: "B", lastCls: "B", backup: null, backupRunning: false, exportingMarked: false };
+            formCls: "B", lastCls: "B", backup: null, backupRunning: false, exportingMarked: false,
+            backupEvents: new Map(), moveSeq: new Map() };   // rec -> backup events seen; mark id -> latest move
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -525,6 +526,8 @@ const NO_MARKS_TIP = "Marks are not available here.";
 function isMark(r) { return r.id.startsWith("mark-"); }
 function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
 function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? READ_ONLY_TIP : ""; }
+function showing(rec) { return !!S.current && S.current.rec === rec; }   // is this handle's recording still in the player?
+function backupEventsSeen(rec) { return S.backupEvents.get(rec) || 0; }
 function isPoint(m) { return m.end <= m.start; }        // imported point markers: no length to drag
 function typingIn(el) {
   return el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ||
@@ -548,6 +551,7 @@ function setupMarks() {
     if (e.key !== "m" && e.key !== "M") return;
     if (e.ctrlKey || e.altKey || e.metaKey || typingIn(e.target)) return;
     if (!S.region || S.markForm || !marksWritable() || $("player-loaded").hidden) return;
+    if (document.querySelector(".modal:not([hidden])")) return;        // the About or update dialog is open
     e.preventDefault();
     openMarkForm(null);
   });
@@ -622,14 +626,14 @@ async function saveMarkForm() {
   const form = S.markForm;
   if (!form || !S.current || $("mark-save").disabled) return;
   if (!form.id && !S.region) { closeMarkForm(); return; }
-  const { rec, duration } = S.current, seq = S.playSeq, cls = S.formCls;
+  const { rec, duration } = S.current, cls = S.formCls, events = backupEventsSeen(rec);
   const note = $("mark-note").value.trim();
   $("mark-save").disabled = true;
   const r = form.id
     ? await api().update_mark(rec, form.id, null, null, cls, note)
     : await api().add_mark(rec, S.region.start, Math.min(S.region.end, duration || S.region.end), cls, note);
-  if (seq !== S.playSeq) return;                         // another recording: its form was closed
   $("mark-save").disabled = false;
+  if (!showing(rec)) return;                              // another recording: its form was closed
   if (!r.ok) { showError(r); return; }                    // the form stays open: the note is not lost
   S.lastCls = cls;
   if (S.markForm === form) closeMarkForm();               // (it may have been cancelled meanwhile)
@@ -637,7 +641,8 @@ async function saveMarkForm() {
   clearSelection();
   S.marks = sortMarks([...S.marks, r.mark]);
   addMarkRegion(r.mark);
-  if (r.backup_queued) S.backupRunning = true;
+  // The backup's own event may have come before this answer: then it is over already.
+  if (r.backup_queued && backupEventsSeen(rec) === events) S.backupRunning = true;
   renderMarks();
 }
 
@@ -649,15 +654,17 @@ function scheduleMarkMove(region) {
   clearTimeout(S.markTimers.get(id));
   S.markTimers.delete(id);
   if (Math.abs(old.start - region.start) < 1e-6 && Math.abs(old.end - region.end) < 1e-6) return;   // a click, not a move
-  const { rec, duration } = S.current, seq = S.playSeq;
-  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, seq, id, region, duration); }, 300));
+  const { rec, duration } = S.current, move = (S.moveSeq.get(id) || 0) + 1;
+  S.moveSeq.set(id, move);                                   // answers to earlier moves are now stale
+  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, move, id, region, duration); }, 300));
 }
 
-async function saveMarkMove(rec, seq, id, region, duration) {
+async function saveMarkMove(rec, move, id, region, duration) {
   const end = Math.min(region.end, duration || region.end);
   const r = await api().update_mark(rec, id, region.start, end, null, null);
+  if (S.moveSeq.get(id) !== move) return;                    // a later move of this mark decides
   if (!r.ok) showError(r);                                   // also after switching: the move was not saved
-  if (seq !== S.playSeq) return;
+  if (!showing(rec)) return;
   if (r.ok) { replaceMark(r.mark); return; }
   const old = S.marks.find((m) => m.id === id);
   if (old) region.setOptions({ start: old.start, end: old.end });   // back to where it is stored
@@ -693,6 +700,7 @@ function markRow(m) {
   const writable = marksWritable(), tip = marksTip();
   const note = document.createElement("span");
   note.className = "mark-note" + (m.note ? "" : " empty") + (writable ? " editable" : "");
+  note.dataset.id = m.id;
   note.textContent = m.note || (writable ? "Add a note" : "No note");
   note.title = writable ? (m.note ? `${m.note}\n(click to edit)` : "Click to add a note") : [m.note, tip].filter(Boolean).join("\n");
   if (writable) note.onclick = () => editNoteInline(note, m);
@@ -709,9 +717,9 @@ function playMark(m) {
 }
 
 // Click a note to edit it in place: Enter or leaving the field saves, Escape cancels.
-function editNoteInline(span, m) {
+function editNoteInline(span, m, text = m.note) {
   const input = document.createElement("input");
-  input.type = "text"; input.maxLength = 500; input.value = m.note; input.className = "mark-note-edit";
+  input.type = "text"; input.maxLength = 500; input.value = text; input.className = "mark-note-edit";
   let done = false;
   const finish = (save) => {
     if (done) return;
@@ -729,18 +737,21 @@ function editNoteInline(span, m) {
 
 async function saveNote(m, note) {
   if (!S.current) return;
-  const rec = S.current.rec, seq = S.playSeq;
+  const rec = S.current.rec;
   const r = await api().update_mark(rec, m.id, null, null, null, note);
   if (!r.ok) showError(r);
-  if (seq !== S.playSeq) return;
-  if (r.ok) replaceMark(r.mark); else renderMarks();
+  if (!showing(rec)) return;
+  if (r.ok) { replaceMark(r.mark); return; }
+  renderMarks();                                             // the typed note stays in its field to try again
+  const span = $("marks-list").querySelector(`.mark-note[data-id="${m.id}"]`);
+  if (span) editNoteInline(span, m, note);
 }
 
 async function deleteMark(m) {
   if (!S.current || !confirm("Delete this mark?")) return;
-  const rec = S.current.rec, seq = S.playSeq;
+  const rec = S.current.rec;
   const r = await api().delete_mark(rec, m.id);
-  if (seq !== S.playSeq) return;
+  if (!showing(rec)) return;
   if (!r.ok) { showError(r); return; }
   clearTimeout(S.markTimers.get(m.id));
   S.markTimers.delete(m.id);
@@ -754,9 +765,9 @@ async function deleteMark(m) {
 
 async function setReviewed() {
   if (!S.current) return;
-  const want = $("reviewed").checked, rec = S.current.rec, seq = S.playSeq;
+  const want = $("reviewed").checked, rec = S.current.rec;
   const r = await api().set_reviewed(rec, want);
-  if (seq !== S.playSeq) return;
+  if (!showing(rec)) return;
   if (!r.ok) { $("reviewed").checked = !want; showError(r); }
 }
 
@@ -767,7 +778,7 @@ function renderBackup() {
   const failed = !S.backupRunning && b.status === "failed";
   el.className = saved ? "ok" : failed ? "warn" : "";
   el.textContent = S.backupRunning ? "Backing up…" : saved ? "Backed up to your save folder"
-    : failed ? `Backup failed: ${b.detail}` : "";
+    : failed ? b.detail || "The backup failed." : "";      // the detail names the recording and why
   el.title = saved ? b.detail : "";
   el.hidden = !el.textContent;
   $("retry-backup").hidden = !failed;
@@ -777,6 +788,7 @@ function renderBackup() {
 
 function backupEvent(event, p) {
   const done = event === "backup-done";
+  S.backupEvents.set(p.rec, backupEventsSeen(p.rec) + 1);
   if (done) banner(`✓ Backed up ${p.label} so this EVP is safe even if the recorder is wiped. ${p.detail}`, "ok");
   else banner(p.detail, "warn", marksWritable() ? { label: "Retry backup", run: () => retryBackup(p.rec) } : null);
   if (done) loadSaved();
@@ -788,20 +800,22 @@ function backupEvent(event, p) {
 }
 
 async function refreshBackup() {
-  const rec = S.current.rec, seq = S.playSeq;
+  const rec = S.current.rec;
   const r = await api().get_marks(rec);
-  if (seq !== S.playSeq || !r.ok) return;
+  if (!showing(rec) || !r.ok) return;
   S.backup = r.backup;
   renderBackup();
 }
 
 async function retryBackup(rec) {
   if (!rec) return;
+  const events = backupEventsSeen(rec);
   const r = await api().retry_backup(rec);
   if (!r.ok) { showError(r); return; }
   banner("");
-  if (!S.current || S.current.rec !== rec) return;
-  if (r.queued) { S.backupRunning = true; renderBackup(); } else refreshBackup();
+  if (!showing(rec)) return;
+  if (!r.queued) refreshBackup();
+  else if (backupEventsSeen(rec) === events) { S.backupRunning = true; renderBackup(); }   // unless it already ended
 }
 
 async function exportMarked() {
@@ -811,7 +825,8 @@ async function exportMarked() {
   const r = await api().export_marked(rec);
   S.exportingMarked = false; status(""); renderMarks();
   if (!r.ok) { showError(r); return; }
-  banner(r.already ? `✓ ${r.name} with these marks was already saved in ${S.dest}.`
-                   : `✓ Saved ${r.name} with its EVP marks to ${S.dest}.`, "ok");
+  const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
+  banner(r.already ? `✓ ${r.name} with these marks was already saved in ${where}.`
+                   : `✓ Saved ${r.name} with its EVP marks in ${where}.`, "ok");
   loadSaved();
 }
