@@ -1,0 +1,20 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+# never commit recordings or captures
+*.dvf
+*.msv
+*.wav
+*.raw
+probe-out/
+out*/
+.superpowers/
+# extracted LPEC tables, pending legal review (tools/import_lpec_tables.py)
+st25/lpec/data/
+# LPEC C core, built by tools/build_lpec_core.py
+st25/lpec/lpec_core.dll
+# decoder test vectors: synthetic audio only (see tests/vectors/*.json)
+!tests/vectors/*.dvf
+driver-setup/

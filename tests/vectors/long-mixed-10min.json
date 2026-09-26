@@ -1,0 +1,15 @@
+{
+ "name": "long-mixed-10min",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(8000, 6000, 0))",
+ "frames": 9375,
+ "frame_sizes": {
+  "36": 133,
+  "48": 9108,
+  "60": 134
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(8000, 6000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness; matches DVE 20/20 on real recordings",
+ "pcm_samples": 4800000,
+ "pcm_sha256": "f8871890a7b662978b070f31e2cd730d34c4c80f239346fd0696f4493e7eed4a",
+ "pcm_file": null
+}

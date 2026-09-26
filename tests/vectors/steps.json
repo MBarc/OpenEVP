@@ -1,0 +1,15 @@
+{
+ "name": "steps",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(8000, 6000, 0))",
+ "frames": 40,
+ "frame_sizes": {
+  "36": 1,
+  "48": 38,
+  "60": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(8000, 6000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness; matches DVE 20/20 on real recordings",
+ "pcm_samples": 20480,
+ "pcm_sha256": "014b5623f38f9f05a90962d3bf837112b0dc9550edd94514bf64d9d1715176a2",
+ "pcm_file": "steps.pcm"
+}

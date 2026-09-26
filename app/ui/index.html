@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenEVP</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<script src="vendor/wavesurfer.min.js"></script>
+<script src="vendor/regions.min.js"></script>
+</head>
+<body>
+<header class="toolbar">
+  <strong>OpenEVP</strong>
+  <button id="version" class="link muted" title="About OpenEVP"></button>
+  <button id="check-update" class="link">Check for updates</button>
+  <span class="spacer"></span>
+  <span>Save to <button id="dest" class="link" title="Choose where recordings are saved"></button></span>
+  <select id="format">
+    <option value="dvf">.dvf (Sony original)</option>
+    <option value="wav">WAV</option>
+  </select>
+  <button id="export" disabled>Export selected</button>
+</header>
+<div id="progress" hidden><div id="progress-fill"></div></div>
+<div id="banner" hidden><span id="banner-text"></span><button id="banner-action" hidden></button></div>
+<main>
+  <nav id="sidebar">
+    <div class="nav-title">Recorders</div>
+    <div id="devices"><p class="muted">Looking for recorders…</p></div>
+    <div class="nav-title">On this PC</div>
+    <div id="saved-entry" class="device-name">Saved recordings <span id="saved-count" class="muted"></span></div>
+  </nav>
+  <section id="list">
+    <table id="device-table">
+      <thead><tr><th><input type="checkbox" id="all" title="Select all"></th><th>No.</th><th>Recorded</th><th>Length</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <table id="saved-table" hidden>
+      <thead><tr><th>Name</th><th>Folder</th><th>Type</th><th>Length</th><th>Saved</th></tr></thead>
+      <tbody id="saved-rows"></tbody>
+    </table>
+    <p id="empty" class="muted">Plug in an ICD-ST25 and select it on the left.</p>
+  </section>
+</main>
+<footer id="player">
+  <div id="player-empty">
+    <p id="player-hint">Open a WAV file to analyze it here.</p>
+    <button id="open-wav">Open WAV file…</button>
+  </div>
+  <div id="player-loaded" hidden>
+    <button id="play" disabled title="Play / pause">▶</button>
+    <div id="player-main">
+      <div id="now-playing"></div>
+      <div id="waveform"></div>
+      <div id="selection-bar">
+        <span id="selection-hint" class="muted">Drag across the waveform to select a part.</span>
+        <span id="selection-controls" hidden>
+          <button id="play-selection" title="Play only the selected part">▶ Selection</button>
+          <label title="Repeat the selected part"><input type="checkbox" id="loop-selection"> Loop</label>
+          <span id="selection-range" class="muted"></span>
+          <button id="clear-selection" class="link">Clear</button>
+        </span>
+      </div>
+    </div>
+    <span id="time">0:00 / 0:00</span>
+    <div id="view-controls">
+      <label title="Stretch the waveform sideways (or scroll the mouse wheel over it)">Zoom
+        <input id="zoom" type="range" min="0" max="400" step="any" value="0"></label>
+      <label title="Make quiet parts taller (or hold Shift and scroll over the waveform)">Height
+        <input id="height" type="range" min="1" max="30" step="any" value="1"></label>
+    </div>
+    <button id="open-wav-2" class="link" title="Open another WAV file">Open WAV file…</button>
+  </div>
+</footer>
+<div id="status"></div>
+<div id="about-dialog" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-labelledby="about-title">
+    <h2 id="about-title">About OpenEVP <span id="about-version" class="muted"></span></h2>
+    <p>Gets the recordings off ghost-hunting voice recorders and onto a modern PC.</p>
+    <p class="legal">OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony. "Sony", "ICD-ST25" and "Digital Voice Editor" are trademarks of Sony Corporation.</p>
+    <p class="legal">To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio format. They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly.</p>
+    <p class="legal">OpenEVP is provided "as is", without warranty of any kind.</p>
+    <div class="modal-buttons"><button id="about-close" class="primary">Close</button></div>
+  </div>
+</div>
+<div id="update-dialog" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-labelledby="update-title">
+    <h2 id="update-title"></h2>
+    <div id="update-notes"></div>
+    <p id="update-status" class="muted"></p>
+    <div class="modal-buttons">
+      <button id="update-later">Not now</button>
+      <button id="update-now" class="primary">Update now</button>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

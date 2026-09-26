@@ -1,0 +1,13 @@
+{
+ "name": "single-frame",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(8000, 6000, 0))",
+ "frames": 1,
+ "frame_sizes": {
+  "48": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(8000, 6000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness; matches DVE 20/20 on real recordings",
+ "pcm_samples": 512,
+ "pcm_sha256": "7671908753b9cbe954e8da0e48bb092c28e0922318a2c38f3a5d04e6deb6e532",
+ "pcm_file": "single-frame.pcm"
+}

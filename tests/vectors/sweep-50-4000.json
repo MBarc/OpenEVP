@@ -1,0 +1,15 @@
+{
+ "name": "sweep-50-4000",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(8000, 6000, 0))",
+ "frames": 79,
+ "frame_sizes": {
+  "36": 2,
+  "48": 75,
+  "60": 2
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(8000, 6000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness; matches DVE 20/20 on real recordings",
+ "pcm_samples": 40448,
+ "pcm_sha256": "0c57d52a3a90ac10838fc34c3fe06a03b044d435cca4a28604ab479972041d04",
+ "pcm_file": "sweep-50-4000.pcm"
+}
