@@ -133,6 +133,19 @@ class MarkerTests(unittest.TestCase):
         wav = _append_chunk(make_wav(), lying)
         self.assertEqual(wavinfo.read_markers(io.BytesIO(wav)), [])
 
+    def test_zeroed_sample_rate_with_a_cue_chunk_does_not_crash(self):
+        """A fmt chunk with a zeroed (garbage) sample rate must not blow up
+        the start/rate, end/rate division once a real cue chunk is present."""
+        wav = bytearray(wavinfo.with_markers(make_wav(), [{"start": 0.1, "end": 0.2, "cls": "A", "note": "x"}]))
+        fmt_payload = wav.index(b"fmt ") + 8
+        struct.pack_into("<I", wav, fmt_payload + 4, 0)          # zero nSamplesPerSec
+        self.assertEqual(wavinfo.read_markers(io.BytesIO(bytes(wav))), [])
+
+    def test_missing_path_returns_no_markers_not_an_exception(self):
+        with tempfile.TemporaryDirectory() as d:
+            missing = os.path.join(d, "does-not-exist.wav")
+            self.assertEqual(wavinfo.read_markers(missing), [])
+
     def test_non_ascii_note_round_trips(self):
         out = wavinfo.with_markers(make_wav(), [{"start": 0.1, "end": 0.2, "cls": "A", "note": "café ☕ günther"}])
         got = wavinfo.read_markers(io.BytesIO(out))

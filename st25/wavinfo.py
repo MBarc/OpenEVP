@@ -96,7 +96,10 @@ def read_markers(f):
     lying chunk size, a corrupt cue/LIST chunk -- is treated as "no markers
     found"; this never raises.
     """
-    fobj, opened = _as_file(f)
+    try:
+        fobj, opened = _as_file(f)
+    except OSError:
+        return []                                     # e.g. a missing path
     try:
         return _read_markers(fobj)
     except (OSError, struct.error):
@@ -145,8 +148,8 @@ def _read_markers(fobj):
         # 'data' and anything else: never read, just skip past it below
         pos = payload + size + (size & 1)
 
-    if rate is None:
-        return []
+    if not rate:
+        return []                                     # no fmt chunk, or a zeroed/garbage sample rate
     marks = []
     for cue_id in sorted(points, key=lambda k: points[k]):
         start = points[cue_id]
