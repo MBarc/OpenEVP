@@ -288,6 +288,7 @@ class AppData:
         os.makedirs(folder, exist_ok=True)
         self._folder = folder
         self._lock = threading.RLock()
+        self._closed = False
         self._problems = []
         self._settings_path = os.path.join(folder, "settings.json")
         self._marks_path = os.path.join(folder, "marks.json")
@@ -305,7 +306,6 @@ class AppData:
         self._data = self._load_marks()
         self._index = self._load_index()
         self._index_dirty = False
-        self._closed = False
 
     def problems(self):
         return list(self._problems)
@@ -324,6 +324,8 @@ class AppData:
             self._closed = True
 
     def _require_writable(self):
+        if self._closed:
+            raise StoreUnavailable("OpenEVP is closing; the change was not saved.")
         if self.read_only:
             raise StoreReadOnly("Another OpenEVP window is open; marks can only be changed there.")
 
@@ -505,6 +507,10 @@ class AppData:
             new_data = copy.deepcopy(self._data)
             rec = new_data["recordings"].setdefault(fp, _blank_recording())
             rec["marks"].append(mark)
+            # A recording marked in the app never auto-imports markers later:
+            # the WAVs OpenEVP writes carry these marks, and re-importing them
+            # would bring back marks the user has since deleted.
+            rec["imported"] = True
             if name:
                 rec["name"] = name
             if duration is not None:

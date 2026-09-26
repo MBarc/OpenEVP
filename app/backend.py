@@ -9,9 +9,10 @@ between recordings and waits for it, so closing the window never abandons one
 half-way through a file.
 
 EVP marks live in the app data store (app.store.AppData), keyed by the audio
-fingerprint of the decoded samples. The page never holds a fingerprint or a
-path: every loaded recording gets an opaque "rec" handle, and the marks calls
-take that handle. For a recording on a recorder the handle also holds the
+fingerprint of the decoded samples. The page never receives a file's path, and
+it never names a recording by fingerprint: every loaded recording gets an
+opaque "rec" handle, and the marks calls take that handle (the fingerprint
+itself does reach the page, only to group copies of one recording). For a recording on a recorder the handle also holds the
 exact .dvf bytes that were decoded for playback, so the backup made when the
 recording is first marked saves exactly the audio that was marked. Backups run
 on one background worker (registered with the export worker, so shutdown()
@@ -83,6 +84,19 @@ def _plain(e):
     if isinstance(e, OSError) and e.filename:
         return f"{e.strerror or type(e).__name__} ({os.path.basename(e.filename)})"
     return str(e) or type(e).__name__
+
+
+def _investigation(path, library):
+    """The investigation a file belongs to: the first folder under the library
+    folder ("" for a file directly in it, or for one outside the library)."""
+    try:
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(library))
+    except ValueError:                          # another drive
+        return ""
+    parts = rel.split(os.sep)
+    if parts[0] == os.pardir or len(parts) < 2:
+        return ""
+    return parts[0]
 
 
 def _bounded_put(cache, key, value, limit=HANDLES):
@@ -338,13 +352,20 @@ class Api:
                  "source": source}
         with self._recs_lock:
             _bounded_put(self._recs, rec, entry)
-        return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"])}
+        return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"], source)}
 
-    def _marks_state(self, fp):
+    def _marks_state(self, fp, source=None):
+        """marks, reviewed, backup; backup_needed is True for a marked recorder
+        recording whose backup is not saved (never queued, refused, or failed), so
+        the page can offer Retry backup even when no backup event will come."""
         r = self._store.recording(fp) if self._store is not None and fp else None
         if r is None:
-            return {"marks": [], "reviewed": False, "backup": {"status": None, "detail": ""}}
-        return {"marks": r["marks"], "reviewed": r["reviewed"], "backup": r["backup"]}
+            return {"marks": [], "reviewed": False, "backup": {"status": None, "detail": ""},
+                    "backup_needed": False}
+        needed = bool(source is not None and source.get("kind") == "device" and r["marks"]
+                      and r["backup"]["status"] != "saved")
+        return {"marks": r["marks"], "reviewed": r["reviewed"], "backup": r["backup"],
+                "backup_needed": needed}
 
     def _entry(self, rec):
         if not isinstance(rec, str):
@@ -370,7 +391,7 @@ class Api:
             return _fail(f"{type(e).__name__}: {e}")
 
     def get_marks(self, rec):
-        return self._with_mark_store(rec, lambda e: {"ok": True, **self._marks_state(e["fp"])})
+        return self._with_mark_store(rec, lambda e: {"ok": True, **self._marks_state(e["fp"], e["source"])})
 
     def add_mark(self, rec, start, end, cls, note=""):
         """Add a mark. The first mark on a recorder recording (or the next one after a
@@ -411,36 +432,54 @@ class Api:
         if entry["source"]["kind"] != "device" or self._store.read_only:
             return False
         fp = entry["fp"]
-        if self._store.backup(fp)["status"] == "saved":
-            return False
+        label = entry["source"]["label"]
         with self._backup_lock:
-            # Not while closing or while an update installs (the installer replaces the
-            # app): the status stays "not saved", so the next mark queues it again.
-            if self._stop.is_set() or self._updating:
+            # The status is read under the lock: a backup finishing meanwhile records
+            # "saved" before it releases _backup_running, so it is never queued twice.
+            if self._store.backup(fp)["status"] == "saved":
                 return False
             if fp in self._backup_queue or fp == self._backup_running:
                 return False
-            self._backup_queue[fp] = (rec, entry)
-            if self._backup_thread is None:
-                thread = threading.Thread(target=self._backup_worker, name="backup")
-                try:
-                    thread.start()
-                except Exception:
-                    self._backup_queue.pop(fp)        # retried on the next mark
-                    return False
-                self._backup_thread = thread
-                self._add_worker(thread)
+            # Not while closing or while an update installs (the installer replaces the
+            # app). The mark is kept and shows as not backed up (backup_needed); the
+            # next mark or Retry backup queues it again.
+            if self._stop.is_set():
+                refused = f"{label} was not backed up because the app is closing."
+            elif self._updating:
+                refused = f"{label} was not backed up because an update is being installed."
+            else:
+                refused = None
+                self._backup_queue[fp] = (rec, entry)
+                if self._backup_thread is None:
+                    thread = threading.Thread(target=self._backup_worker, name="backup")
+                    try:
+                        thread.start()
+                    except Exception as e:
+                        self._backup_queue.pop(fp)
+                        refused = f"{label} was not backed up: {_plain(e)}"
+                    else:
+                        self._backup_thread = thread
+                        self._add_worker(thread)
+        if refused is None:
             return True
+        self._record_backup(fp, "failed", refused)
+        return False
 
     def _backup_worker(self):
+        me = threading.current_thread()
         try:
             while True:
                 with self._backup_lock:
+                    # The worker gives up its slot in the same locked step that finds
+                    # nothing left to do: a backup queued a moment later then starts a
+                    # new worker instead of joining a queue nobody reads any more.
                     if self._stop.is_set():
                         dropped = list(self._backup_queue.items())
                         self._backup_queue.clear()
+                        self._backup_thread = None
                         break
                     if not self._backup_queue:
+                        self._backup_thread = None
                         return
                     fp, (rec, entry) = self._backup_queue.popitem(last=False)
                     self._backup_running = fp
@@ -458,10 +497,22 @@ class Api:
             for fp, (rec, entry) in dropped:
                 self._closed_before_backup(fp, rec, entry)
         finally:
+            # Only a worker that died unexpectedly still owns the slot. Then every
+            # backup still queued is recorded as failed (shown with Retry backup),
+            # never silently dropped.
+            left = []
             with self._backup_lock:
-                self._backup_queue.clear()
-                self._backup_thread = None
-                self._backup_running = None
+                if self._backup_thread is me:
+                    left = list(self._backup_queue.items())
+                    self._backup_queue.clear()
+                    self._backup_thread = None
+                    self._backup_running = None
+            for fp, (rec, entry) in left:
+                detail = f"{entry['source']['label']} was not backed up: the backup stopped unexpectedly."
+                try:
+                    self._backup_result(fp, rec, entry, "failed", detail)
+                except Exception:
+                    self._record_backup(fp, "failed", detail)
 
     def _closed_before_backup(self, fp, rec, entry):
         self._backup_result(fp, rec, entry, "failed",
@@ -526,11 +577,16 @@ class Api:
                 detail += f", but the WAV copy failed: {_plain(e)}"
         self._backup_result(fp, rec, entry, "saved", detail + ".")
 
-    def _backup_result(self, fp, rec, entry, status, detail):
+    def _record_backup(self, fp, status, detail):
+        """Record a backup status; returns detail, extended if it could not be recorded."""
         try:
             self._store.set_backup(fp, status, detail)
         except (StoreReadOnly, StoreUnavailable, ValueError) as e:
             detail += f" (This could not be recorded: {e})"
+        return detail
+
+    def _backup_result(self, fp, rec, entry, status, detail):
+        detail = self._record_backup(fp, status, detail)
         self._emit("backup-done" if status == "saved" else "backup-failed",
                    {"rec": rec, "label": entry["source"]["label"], "detail": detail})
 
@@ -553,8 +609,9 @@ class Api:
 
     def export_marked(self, rec):
         """Save a WAV with the current marks of the loaded recording into the Save-to
-        folder: <letter>/ for a recorder recording, else the folder named like the
-        file's own folder (its investigation). Never replaces a file: identical bytes
+        folder: <letter>/ for a recorder recording; for a file in the library, the
+        folder named like its investigation (the first folder under the library);
+        any other file goes into the Save-to folder itself. Never replaces a file: identical bytes
         count as already saved, anything else gets a numbered name."""
         if self._store is None:
             return _fail(NO_MARKS)
@@ -597,7 +654,7 @@ class Api:
                     same = False
                 if not same:
                     return _fail(f"{name} has changed since it was loaded. Load it again.")
-                investigation = os.path.basename(os.path.dirname(path))
+                investigation = _investigation(path, self._library_path())
                 outdir = os.path.join(self._dest, investigation) if investigation else self._dest
                 out_name = os.path.splitext(name)[0] + ".wav"
             marked = wavinfo.with_markers(wav, marks)
@@ -626,7 +683,7 @@ class Api:
         if self._store is None or not fp or self._store.read_only:
             return 0
         try:
-            if self._store.is_imported(fp) or self._store.marks(fp):
+            if self._store.is_imported(fp):     # import_marks refuses (and flags) a marked one
                 return 0
             found = wavinfo.read_markers(path)
             if not found:
@@ -1174,7 +1231,7 @@ class Api:
                     failed(_fail("Stopped because the app is closing."))
                     return
                 except OSError as e:
-                    failed(_fail(f"Could not save {dl.label}: {e}", DISK))
+                    failed(_fail(f"Could not save {dl.label}: {_plain(e)}", DISK))
                     return
                 except Exception as e:             # the decoder rejected this recording
                     notes.append(f"{dl.label}: not converted ({e})")

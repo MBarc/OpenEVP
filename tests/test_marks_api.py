@@ -356,7 +356,10 @@ class MarksApiTests(unittest.TestCase):
         self.assertEqual((seen[0]["ok"], seen[0]["backup_queued"]), (True, False))   # the mark itself is kept
         self.assertEqual(calls, [("mutex dropped",), ("launch", "setup.exe")])
         self.assertFalse(self.api.backing_up())
-        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], None)          # retried on the next mark
+        state = self.api.get_marks(rec)                                           # shown, and retried later
+        self.assertEqual(state["backup"], {"status": "failed", "detail":
+                         "A-001 was not backed up because an update is being installed."})
+        self.assertTrue(state["backup_needed"])
         self.assertEqual([e for e, _ in self.events if e.startswith("backup")], [])
 
     def test_update_rechecks_for_a_backup_before_handing_over(self):
@@ -488,11 +491,13 @@ class MarksApiTests(unittest.TestCase):
                              "name": "001_A_001_Casey_2029_05_23 (2).wav", "folder_name": "A"})
         self.assertEqual(len(wavinfo.read_markers(os.path.join(self.dest, "A", r["name"]))), 2)
 
-        path = os.path.join(self.tmp, "Old Jail", "cell 3.wav")
+        library = os.path.join(self.tmp, "Library")
+        path = os.path.join(library, "Old Jail", "Night 2", "cell 3.wav")   # a sub-folder of the investigation
         os.makedirs(os.path.dirname(path))
         with open(path, "wb") as f:
             f.write(wav_bytes(b"jail"))
         api = self.new_api(pick_wav=lambda start: path)
+        api._lib_folder = library
         frec = api.open_wav()["rec"]
         api.add_mark(frec, 0.2, 0.3, "C", "knock")
         r = api.export_marked(frec)
@@ -508,7 +513,128 @@ class MarksApiTests(unittest.TestCase):
         self.assertIn("cell 3.wav", r["error"])
         self.assertNotIn(self.tmp, r["error"])
 
+    def test_export_marked_outside_an_investigation_goes_to_the_save_to_root(self):
+        library = os.path.join(self.tmp, "Library")
+        os.makedirs(library)
+        root_file = os.path.join(library, "loose.wav")
+        outside = os.path.join(self.tmp, "Elsewhere", "far.wav")
+        os.makedirs(os.path.dirname(outside))
+        for path, seed in ((root_file, b"loose"), (outside, b"far")):
+            with open(path, "wb") as f:
+                f.write(wav_bytes(seed))
+        for path in (root_file, outside):
+            api = self.new_api(pick_wav=lambda start, p=path: p)
+            api._lib_folder = library
+            rec = api.open_wav()["rec"]
+            api.add_mark(rec, 0.2, 0.3, "C", "")
+            r = api.export_marked(rec)
+            self.assertEqual((r["ok"], r["folder_name"]), (True, ""), r)
+            self.assertTrue(os.path.isfile(os.path.join(self.dest, os.path.basename(path))))
+
+    def test_investigation_of_a_path(self):
+        lib = os.path.join(self.tmp, "Library")
+        self.assertEqual(backend._investigation(os.path.join(lib, "Case1", "Night2", "x.wav"), lib), "Case1")
+        self.assertEqual(backend._investigation(os.path.join(lib, "Case1", "x.wav"), lib), "Case1")
+        self.assertEqual(backend._investigation(os.path.join(lib, "x.wav"), lib), "")
+        self.assertEqual(backend._investigation(os.path.join(self.tmp, "Other", "x.wav"), lib), "")
+        self.assertEqual(backend._investigation(os.path.join(self.tmp, "Library2", "C", "x.wav"), lib), "")
+
+    # ---- backups: races and visibility ------------------------------------------
+
+    def test_a_backup_queued_as_the_worker_exits_is_never_lost(self):
+        """The worker releases the backup lock after finding the queue empty; a
+        backup queued right then must still run. Deterministic: the queueing
+        happens inside exactly that gap."""
+        first = self.load(1)["rec"]
+        second = self.load(2)
+        api = self.api
+        real_lock = api._backup_lock
+        fired = []
+
+        class GapLock:
+            """Wraps the backup lock: right after the worker's release that saw an
+            empty queue, queue the second recording's backup."""
+            def __enter__(self):
+                real_lock.acquire()
+                self.saw_empty = (threading.current_thread().name == "backup" and not api._backup_queue
+                                  and api._backup_running is None)
+                return self
+
+            def __exit__(self, *exc):
+                saw_empty = self.saw_empty
+                real_lock.release()
+                if saw_empty and not fired:
+                    fired.append(None)                  # once (_queue_backup takes this lock too)
+                    fired[0] = api._queue_backup(second["rec"], api._entry(second["rec"]))
+                return False
+        api._backup_lock = GapLock()
+        # Mark the second recording in the store directly (add_mark would queue its backup).
+        self.store.add_mark(second["fp"], 0.1, 0.4, "B", "")
+        api.add_mark(first, 0.1, 0.4, "A", "")
+        deadline = threading.Event()
+        for _ in range(100):
+            if len([e for e, _ in self.events if e.startswith("backup")]) >= 2:
+                break
+            deadline.wait(0.05)
+        self.assertEqual(fired, [True])
+        api.shutdown()
+        self.assertEqual(self.store.backup(second["fp"])["status"], "saved")
+        self.assertEqual(sorted(p["rec"] for e, p in self.events if e == "backup-done"),
+                         sorted([first, second["rec"]]))
+        self.assertIsNone(api._backup_thread)
+        self.assertFalse(api._backup_queue)
+
+    def test_marked_but_not_backed_up_is_reported(self):
+        rec = self.load()["rec"]
+        self.assertFalse(self.api.get_marks(rec)["backup_needed"])      # nothing marked
+        self.api.request_stop()                                          # closing: the backup is refused
+        r = self.api.add_mark(rec, 0.1, 0.4, "A", "")
+        self.assertEqual((r["ok"], r["backup_queued"]), (True, False))
+        state = self.api.get_marks(rec)
+        self.assertEqual(state["backup"]["status"], "failed")
+        self.assertTrue(state["backup_needed"])
+
+    def test_a_fresh_load_shows_a_missing_backup(self):
+        rec = self.load()["rec"]
+        with mock.patch.object(self.api, "_queue_backup", return_value=False):
+            self.api.add_mark(rec, 0.1, 0.4, "A", "")                    # status stays None
+        r = self.load()
+        self.assertEqual((r["backup"]["status"], r["backup_needed"]), (None, True))
+
+    def test_a_failed_worker_start_is_recorded(self):
+        rec = self.load()["rec"]
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("cannot start a thread")):
+            r = self.api.add_mark(rec, 0.1, 0.4, "A", "")
+        self.assertEqual((r["ok"], r["backup_queued"]), (True, False))
+        state = self.api.get_marks(rec)
+        self.assertEqual(state["backup"], {"status": "failed",
+                                           "detail": "A-001 was not backed up: cannot start a thread"})
+        self.assertTrue(state["backup_needed"])
+        self.assertFalse(self.api.backing_up())
+        self.assertIsNone(self.api._backup_thread)
+
     # ---- import of embedded markers ------------------------------------------
+
+    def test_deleted_marks_never_come_back_from_the_apps_own_wavs(self):
+        rec = self.load()["rec"]
+        self.api.add_mark(rec, 0.1, 0.4, "A", "hello")
+        self.assertEqual(self.wait_event()[0], "backup-done")
+        self.api.add_mark(rec, 0.5, 0.6, "B", "")
+        exported = self.api.export_marked(rec)                        # a numbered copy with both marks
+        self.assertTrue(exported["ok"], exported)
+        backup_wav = os.path.join(self.dest, "A", WAV_1)
+        export_wav = os.path.join(self.dest, "A", exported["name"])
+        for m in self.api.get_marks(rec)["marks"]:
+            self.api.delete_mark(rec, m["id"])
+        for path in (backup_wav, export_wav):
+            self.assertTrue(wavinfo.read_markers(path))                # the files do carry markers
+            info = self.server.prepare_file(path)
+            self.assertEqual(self.api._import_markers(path, info, os.path.basename(path)), 0)
+            api = self.new_api(pick_wav=lambda start, p=path: p)
+            r = api.open_wav()
+            self.assertEqual((r["imported"], r["marks"]), (0, []))
+        self.assertEqual(self.api.get_marks(rec)["marks"], [])
+
 
     def test_open_wav_imports_embedded_markers_once(self):
         path = os.path.join(self.tmp, "marked.wav")

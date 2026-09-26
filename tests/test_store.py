@@ -192,13 +192,15 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(rec["name"], "Rec 1")
             self.assertEqual(rec["duration"], 10.0)
             self.assertFalse(rec["reviewed"])
-            self.assertFalse(rec["imported"])
+            self.assertTrue(rec["imported"])            # marked in the app: never auto-imports
             self.assertEqual(rec["backup"], {"status": None, "detail": ""})
             self.assertEqual(len(rec["marks"]), 1)
             self.assertIsNone(store.recording("nope"))
 
-            store.set_imported("fp1")
-            self.assertTrue(store.is_imported("fp1"))
+            store.set_reviewed("fp2", True)
+            self.assertFalse(store.recording("fp2")["imported"])
+            store.set_imported("fp2")
+            self.assertTrue(store.is_imported("fp2"))
 
             store.set_backup("fp1", "failed", "disk full")
             self.assertEqual(store.backup("fp1"), {"status": "failed", "detail": "disk full"})
@@ -228,6 +230,35 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(total, 200)
             reloaded.close()
 
+    def test_a_closed_store_refuses_writes(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "")
+            store.close()
+            for write in (lambda: store.add_mark("fp1", 3.0, 4.0, "B", ""),
+                          lambda: store.set_reviewed("fp1", True),
+                          lambda: store.set_setting("save_folder", d),
+                          lambda: store.remember_fp(os.path.join(d, "x.wav"), 1, 1, "fp", 1.0)):
+                with self.assertRaises(StoreUnavailable) as cm:
+                    write()
+                self.assertNotIn(d, str(cm.exception))
+            store.close()                                   # closing twice is fine
+            reloaded = AppData(d)
+            self.assertEqual(len(reloaded.marks("fp1")), 1)
+            reloaded.close()
+
+    def test_a_marked_recording_never_imports_embedded_markers(self):
+        """Deleting every mark must not let the markers in OpenEVP's own WAVs
+        (backup, export) bring them back."""
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            mark = store.add_mark("fp1", 1.0, 2.0, "A", "manual")
+            store.delete_mark("fp1", mark["id"])
+            markers = [{"start": 1.0, "end": 2.0, "note": "EVP A: manual"}]
+            self.assertEqual(store.import_marks("fp1", markers, "x.wav", 10.0), 0)
+            self.assertEqual(store.marks("fp1"), [])
+            store.close()
+
     def test_second_appdata_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             first = AppData(d)
@@ -243,12 +274,13 @@ class StoreTests(unittest.TestCase):
     # ---- Fix round 1 -----------------------------------------------------------
 
     def test_import_marks_does_not_duplicate_when_marks_already_exist(self):
-        """A recorder recording whose backup WAV embeds the marks just made
-        (same fp) must not have them imported a second time, even though
-        `imported` was never explicitly set for a manually-marked recording."""
+        """A recording with marks but no `imported` flag (marks.json written
+        before add_mark set the flag) must not have embedded markers imported
+        on top of its marks."""
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)
             store.add_mark("fp1", 1.0, 2.0, "A", "manual mark")
+            store._data["recordings"]["fp1"]["imported"] = False     # as older data had it
             self.assertFalse(store.is_imported("fp1"))
 
             markers = [{"start": 3.0, "end": 3.0, "note": "EVP A: get out"}]
