@@ -203,7 +203,7 @@ class MarksApiTests(unittest.TestCase):
 
     def test_first_mark_backs_up_once_with_the_captured_bytes(self):
         rec = self.load()["rec"]
-        captured = self.api._dvfs[(ID, "A", 1)].dvf
+        captured = self.api._dvfs[(ID, "A", 1)][0].dvf
         sessions = self.sessions
         self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "hello")["ok"])
         event, p = self.wait_event()
@@ -325,6 +325,129 @@ class MarksApiTests(unittest.TestCase):
         self.assertFalse(self.api.backing_up())
         self.assertIn(DVF_1, os.listdir(os.path.join(self.dest, "A")))
         self.assertTrue(self.store._closed)
+
+    # ---- fix round 1: update, closing, capture pairing, worker bookkeeping ------
+
+    def updating_api(self, during_download):
+        """self.api set up to install an update; during_download() runs mid-download."""
+        calls = []
+
+        class Updater:
+            def download(self, info, progress, cancelled):
+                during_download()
+                return "setup.exe"
+
+            def launch(self, path):
+                calls.append(("launch", path))
+
+            def discard(self, path):
+                calls.append(("discard", path))
+        self.api._updater = Updater()
+        self.api._update = {"version": "9.0.0"}
+        self.api._can_install = True
+        self.api._before_install = lambda: calls.append(("mutex dropped",))
+        return calls
+
+    def test_no_backup_is_queued_while_an_update_installs(self):
+        rec = self.load()["rec"]
+        seen = []
+        calls = self.updating_api(lambda: seen.append(self.api.add_mark(rec, 0.1, 0.4, "A", "")))
+        self.assertEqual(self.api.install_update(), {"ok": True})
+        self.assertEqual((seen[0]["ok"], seen[0]["backup_queued"]), (True, False))   # the mark itself is kept
+        self.assertEqual(calls, [("mutex dropped",), ("launch", "setup.exe")])
+        self.assertFalse(self.api.backing_up())
+        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], None)          # retried on the next mark
+        self.assertEqual([e for e, _ in self.events if e.startswith("backup")], [])
+
+    def test_update_rechecks_for_a_backup_before_handing_over(self):
+        calls = self.updating_api(lambda: None)
+        with mock.patch.object(self.api, "backing_up", return_value=True):
+            r = self.api.install_update()
+        self.assertEqual((r["ok"], r["error"]), (False, backend.BACKUP_RUNNING))
+        self.assertEqual(calls, [("discard", "setup.exe")])                        # never handed over
+        self.assertFalse(self.api.updating())
+        self.assertFalse(self.api.exporting())                                     # the lock was released
+
+    def test_closing_records_queued_backups_as_not_made(self):
+        entered, go = threading.Event(), threading.Event()
+        real = backend.save_dvf
+
+        def slow(*a):
+            entered.set()
+            go.wait(5)
+            return real(*a)
+        first = self.load(1)["rec"]
+        second = self.load(2)
+        with mock.patch.object(backend, "save_dvf", slow):
+            self.api.add_mark(first, 0.1, 0.4, "A", "")
+            self.assertTrue(entered.wait(5))
+            self.assertTrue(self.api.add_mark(second["rec"], 0.1, 0.4, "B", "")["backup_queued"])
+            self.api.request_stop()                         # the user confirmed closing
+            go.set()
+            self.api.shutdown()
+        got = {p["rec"]: (e, p["detail"]) for e, p in self.events if e.startswith("backup")}
+        self.assertEqual(got[first][0], "backup-done")
+        self.assertEqual(got[second["rec"]], ("backup-failed", "A-002 was not backed up because the app closed."))
+        self.assertEqual(self.store.backup(second["fp"])["status"], "failed")
+
+    def test_a_verification_stopped_by_closing_is_recorded(self):
+        self.load()
+        self.api._dvfs.clear()
+        rec = self.load()["rec"]
+
+        class Stopped(Exception):
+            pass
+
+        def stopped(data, should_stop=None):
+            raise Stopped("closing")
+        mod = fake_decoder(stopped)
+        mod.Cancelled = Stopped
+        with mock.patch.dict(sys.modules, {"st25.lpec": mod}):
+            self.api.add_mark(rec, 0.1, 0.4, "A", "")
+            event, p = self.wait_event()
+        self.assertEqual((event, p["detail"]), ("backup-failed", "A-001 was not backed up because the app closed."))
+        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], "failed")
+
+    def test_a_capture_is_used_only_with_the_audio_it_decoded_to(self):
+        first = self.load()
+        self.assertIsNotNone(self.api._recs[first["rec"]]["source"]["dvf"])
+        dl, _ = self.api._dvfs[(ID, "A", 1)]
+        self.api._dvfs[(ID, "A", 1)] = (dl, "another recording's fp")   # e.g. after a replug
+        again = self.load()                                            # the server's cached decode
+        self.assertIsNone(self.api._recs[again["rec"]]["source"]["dvf"])
+
+    def test_workers_are_registered_under_a_lock(self):
+        class Alive:
+            def is_alive(self):
+                return True
+
+        def add():
+            for _ in range(300):
+                self.api._add_worker(Alive())
+        threads = [threading.Thread(target=add) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(len(self.api._workers), 8 * 300)
+        self.api._workers = []                              # the fakes cannot be joined
+
+    def test_a_crashing_backup_never_leaves_backing_up_set(self):
+        rec = self.load()["rec"]
+        crashed = threading.Event()
+        with mock.patch.object(self.api, "_backup", side_effect=RuntimeError("boom")), \
+                mock.patch.object(self.api, "_backup_result", side_effect=RuntimeError("emit failed")), \
+                mock.patch.object(threading, "excepthook", lambda args: crashed.set()):
+            self.api.add_mark(rec, 0.1, 0.4, "A", "")
+            self.assertTrue(crashed.wait(5))
+            with self.api._workers_lock:
+                workers = list(self.api._workers)
+            for t in workers:
+                t.join(5)
+        self.assertFalse(self.api.backing_up())
+        self.assertIsNone(self.api._backup_thread)
+        self.assertTrue(self.api.add_mark(rec, 0.5, 0.7, "B", "")["backup_queued"])   # a new worker starts
+        self.assertEqual(self.wait_event()[0], "backup-done")
 
     # ---- WAV exports --------------------------------------------------------
 

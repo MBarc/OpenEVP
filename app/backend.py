@@ -50,6 +50,11 @@ HANDLES = 32                 # recording handles (and captured .dvf bytes) kept 
 NO_MARKS = "Marks are not available here."
 RELOAD = "Load the recording again."
 CLOSING = "The app is closing."
+BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
+
+
+class _BackupRunning(Exception):
+    """install_update: a backup is running when the installer would take over."""
 
 
 def _download(manager, key):
@@ -171,11 +176,12 @@ class Api:
         self._busy = threading.Lock()      # held while an export runs
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
+        self._workers_lock = threading.Lock()
         self._store = store                   # app.store.AppData, or None: no marks
         self._store_problems = list(store_problems)   # why the store could not be opened (from main.py)
         self._recs_lock = threading.Lock()
         self._recs = OrderedDict()            # rec handle -> {"fp", "duration", "name", "label", "source"}
-        self._dvfs = OrderedDict()            # (device_id, letter, number) -> the Download last decoded for it
+        self._dvfs = OrderedDict()            # (device_id, letter, number) -> (Download, fp of its decode)
         self._backup_lock = threading.Lock()
         self._backup_queue = OrderedDict()    # fp -> (rec, entry): one pending backup per recording
         self._backup_running = None           # fp being backed up right now
@@ -216,21 +222,28 @@ class Api:
         key = (device_id, *work[0])
         letter, number = work[0]
 
+        made = []
+
         def make():                      # runs only when the audio server has no decode cached
             dl = _download(self._manager, key)
-            with self._recs_lock:
-                _bounded_put(self._dvfs, key, dl)
+            made.append(dl)
             return audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
         try:
             info = self._server.prepare(key, make=make)
         except Exception as e:
             return _error(e)
+        fp = info.get("fp")
         with self._recs_lock:
-            dl = self._dvfs.get(key)
-            if dl is not None:
-                self._dvfs.move_to_end(key)
-        # Without the captured bytes (evicted meanwhile) a backup downloads once more
-        # and checks the audio is still the same before trusting it (_device_audio).
+            if made:                     # decoded by this call: info describes exactly these bytes
+                dl = made[-1]
+                _bounded_put(self._dvfs, key, (dl, fp))
+            else:                        # a cached decode: trust a capture only with the same audio
+                held = self._dvfs.get(key)
+                dl = held[0] if held is not None and fp is not None and held[1] == fp else None
+                if dl is not None:
+                    self._dvfs.move_to_end(key)
+        # Without the captured bytes (evicted meanwhile, or not matching) a backup downloads
+        # once more and checks the audio is still the same before trusting it (_device_audio).
         label = f"{letter}-{number:03d}"
         source = {"kind": "device", "device": device_id, "letter": letter, "number": number, "label": label,
                   "dvf": dl.dvf if dl else None, "dvf_name": dl.name if dl else None}
@@ -321,7 +334,11 @@ class Api:
         if self._store.backup(fp)["status"] == "saved":
             return False
         with self._backup_lock:
-            if self._stop.is_set() or fp in self._backup_queue or fp == self._backup_running:
+            # Not while closing or while an update installs (the installer replaces the
+            # app): the status stays "not saved", so the next mark queues it again.
+            if self._stop.is_set() or self._updating:
+                return False
+            if fp in self._backup_queue or fp == self._backup_running:
                 return False
             self._backup_queue[fp] = (rec, entry)
             if self._backup_thread is None:
@@ -336,22 +353,39 @@ class Api:
             return True
 
     def _backup_worker(self):
-        while True:
-            with self._backup_lock:
-                if self._stop.is_set() or not self._backup_queue:
-                    self._backup_queue.clear()        # not started: the next mark queues it again
-                    self._backup_thread = None
-                    return
-                fp, (rec, entry) = self._backup_queue.popitem(last=False)
-                self._backup_running = fp
-            try:
-                self._backup(fp, rec, entry)
-            except Exception as e:                    # never let the worker die silently
-                self._backup_result(fp, rec, entry, "failed",
-                                    f"{entry['source']['label']} was not backed up: {_plain(e)}")
-            finally:
+        try:
+            while True:
                 with self._backup_lock:
-                    self._backup_running = None
+                    if self._stop.is_set():
+                        dropped = list(self._backup_queue.items())
+                        self._backup_queue.clear()
+                        break
+                    if not self._backup_queue:
+                        return
+                    fp, (rec, entry) = self._backup_queue.popitem(last=False)
+                    self._backup_running = fp
+                try:
+                    self._backup(fp, rec, entry)
+                except Exception as e:                # never let the worker die silently
+                    self._backup_result(fp, rec, entry, "failed",
+                                        f"{entry['source']['label']} was not backed up: {_plain(e)}")
+                finally:
+                    with self._backup_lock:
+                        self._backup_running = None
+            # The app is closing (shutdown() closes the store only after this thread
+            # ends): record every backup that never started, so it shows as failed
+            # and is retried the next time that recording is marked.
+            for fp, (rec, entry) in dropped:
+                self._closed_before_backup(fp, rec, entry)
+        finally:
+            with self._backup_lock:
+                self._backup_queue.clear()
+                self._backup_thread = None
+                self._backup_running = None
+
+    def _closed_before_backup(self, fp, rec, entry):
+        self._backup_result(fp, rec, entry, "failed",
+                            f"{entry['source']['label']} was not backed up because the app closed.")
 
     def _device_audio(self, entry):
         """(dvf bytes, dvf name, WAV or None) for a recorder recording's handle. When
@@ -384,8 +418,9 @@ class Api:
         label = src["label"]
         try:
             data, dvf_name, wav = self._device_audio(entry)
-        except audio.Cancelled:
-            return                                    # the app is closing; retried on the next mark
+        except audio.Cancelled:                       # the app is closing; retried on the next mark
+            self._closed_before_backup(fp, rec, entry)
+            return
         except ValueError as e:
             self._backup_result(fp, rec, entry, "failed", f"{label} was not backed up: {e}")
             return
@@ -632,11 +667,13 @@ class Api:
             return _fail("Updates install only in the installed app, not when running from source.")
         if self._stop.is_set():
             return _fail(CLOSING)
-        if self.backing_up():
-            return _fail("Wait for the backup of a marked recording to finish, then update.")
         if not self._busy.acquire(blocking=False):      # held from here on: no export can start
             return _fail("Wait for the export to finish, then update.")
-        self._updating = True
+        with self._backup_lock:                         # from here on no backup can be queued
+            if self._backup_queue or self._backup_running is not None:
+                self._busy.release()
+                return _fail(BACKUP_RUNNING)
+            self._updating = True
         shown = [-1]
 
         def progress(fraction):                         # whole percents only: each is a JS call
@@ -649,14 +686,19 @@ class Api:
             path = self._updater.download(info, progress=progress, cancelled=self._stop.is_set)
             if self._stop.is_set():                     # the window was closed while downloading
                 raise UpdateCancelled()
+            if self.backing_up():                       # never hand over while a backup is writing
+                raise _BackupRunning()
             if self._before_install:
                 self._before_install()
             self._updater.launch(path)
         except Exception as e:
             if path:                                    # downloaded but not started: don't keep it
                 self._updater.discard(path)
-            self._updating = False
+            with self._backup_lock:
+                self._updating = False
             self._busy.release()
+            if isinstance(e, _BackupRunning):
+                return _fail(BACKUP_RUNNING)
             if isinstance(e, UpdateCancelled):
                 return _fail("The update was cancelled.")
             return _fail(_update_problem(e, "The update was not installed"))
@@ -727,7 +769,8 @@ class Api:
 
     def _add_worker(self, thread):
         """Register a started background thread for shutdown() to wait for."""
-        self._workers = [t for t in self._workers if t.is_alive()] + [thread]
+        with self._workers_lock:
+            self._workers = [t for t in self._workers if t.is_alive()] + [thread]
 
     def exporting(self):
         return self._busy.locked() and not self._updating
@@ -742,12 +785,15 @@ class Api:
         self._stop.set()
 
     def shutdown(self):
-        """Stop background work and wait for it (an export stops between recordings,
-        a backup finishes the file it is writing), then close the store."""
+        """Stop background work and wait for it (an export stops between recordings;
+        a backup finishes the file it is writing, and queued backups are recorded as
+        not made), then close the store."""
         self._stop.set()
         with self._backup_lock:                 # no backup worker can start after this
             pass
-        for t in list(self._workers):
+        with self._workers_lock:
+            workers = list(self._workers)
+        for t in workers:
             if t.is_alive():
                 t.join()
         if self._store is not None:

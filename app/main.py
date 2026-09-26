@@ -110,7 +110,8 @@ def _open_store():
 
 def _close_question(exporting, backing_up):
     """(title, text) for the close prompt while work is still running, or None."""
-    backup = "A backup of a marked recording is still being saved; it finishes before the app closes."
+    backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
+              "a backup that did not finish is shown as failed and can be retried later.")
     if exporting:
         text = "An export is still running. Stop it after the current recording and close?"
         return "Export in progress", f"{text} {backup}" if backing_up else text
