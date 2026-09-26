@@ -147,6 +147,16 @@ def _file_id(path):
     return hashlib.sha1(os.path.normcase(path).encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+def _folder_id(rel_parts):
+    """The opaque id the page uses for a library folder (never its path):
+    "root" for the library folder itself, else the first 16 hex of the sha1 of
+    the normcased relative path (its parts joined by os.sep)."""
+    if not rel_parts:
+        return "root"
+    return hashlib.sha1(os.path.normcase(os.sep.join(rel_parts))
+                        .encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
 def _wav_length(f):
     """Exact length in seconds of a PCM WAV (a path or a file object)."""
     with wave.open(f) as w:
@@ -154,19 +164,24 @@ def _wav_length(f):
 
 
 def _scan_library(folder):
-    """([(investigation, name, kind, path, stat)], truncated, complete): every
-    .dvf/.wav in folder and all its subfolders -- a folder's files first (by
-    name), then its subfolders in name order. Walking stops as soon as more than
-    SAVED_LIMIT files were found. Symlinked folders and junctions are not
-    followed (no loops); names starting with "." (Mac "._x.wav" companions, temp
-    files, hidden folders) are skipped. complete is False when a folder could
-    not be read (its files are missing from the list). investigation is the
-    first folder under `folder` ("" for files directly in it)."""
+    """([(investigation, name, kind, path, stat, folder_rel)], [folder_rel, ...],
+    truncated, complete): every .dvf/.wav in folder and all its subfolders -- a
+    folder's files first (by name), then its subfolders in name order. Walking
+    stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
+    and junctions are not followed (no loops); names starting with "." (Mac
+    "._x.wav" companions, temp files, hidden folders) are skipped. complete is
+    False when a folder could not be read (its files are missing from the
+    list). investigation is the first folder under `folder` ("" for files
+    directly in it). The folders list holds every subfolder walked (including
+    empty ones), each as a tuple of relative path parts from `folder`;
+    folder_rel is that same tuple for the folder directly containing the file
+    (empty for a file in `folder` itself)."""
     found = []
+    folders = []
     complete = True
-    stack = [(folder, "")]
+    stack = [(folder, "", ())]
     while stack:
-        where, investigation = stack.pop()
+        where, investigation, rel = stack.pop()
         try:
             with os.scandir(where) as it:
                 entries = sorted(it, key=lambda e: e.name.lower())
@@ -189,12 +204,14 @@ def _scan_library(folder):
                 st = e.stat()
             except OSError:
                 continue
-            found.append((investigation, e.name, kind, e.path, st))
+            found.append((investigation, e.name, kind, e.path, st, rel))
             if len(found) > SAVED_LIMIT:
-                return found[:SAVED_LIMIT], True, complete
+                return found[:SAVED_LIMIT], folders, True, complete
+        for d in subdirs:
+            folders.append(rel + (d.name,))
         for d in reversed(subdirs):
-            stack.append((d.path, investigation or d.name))
-    return found, False, complete
+            stack.append((d.path, investigation or d.name, rel + (d.name,)))
+    return found, folders, False, complete
 
 
 def _marks_row(counts, reviewed, notes):
@@ -283,6 +300,7 @@ class Api:
         self._backup_thread = None
         self._lib_lock = threading.Lock()
         self._library = {}                    # id -> path, from the last list_library()
+        self._library_folders = {}            # folder id -> path, from the last list_library()
         self._scan_id = 0                     # bumped by every list_library(); in every library-* event
         self._lib_job = None                  # (scan_id, files to fingerprint) waiting for the indexer
         self._indexer = None                  # the one library indexer thread, while it runs
@@ -856,18 +874,19 @@ class Api:
             scan_id = self._scan_id
             self._scan_folder = os.path.normcase(os.path.abspath(folder))   # another folder: cancel
         result = {"ok": True, "folder": folder, "scan_id": scan_id, "exists": os.path.isdir(folder),
-                  "truncated": False, "indexing": False, "pending": 0, "files": []}
+                  "truncated": False, "indexing": False, "pending": 0, "files": [], "folders": []}
         if not result["exists"]:
             with self._lib_lock:
                 if scan_id == self._scan_id:
                     self._library = {}
+                    self._library_folders = {}
                     self._lib_job = None
             return result
-        found, truncated, complete = _scan_library(folder)
+        found, folders, truncated, complete = _scan_library(folder)
         store = self._store
         summary = store.summary() if store is not None else {}
         table, files, pending = {}, [], []
-        for investigation, name, kind, path, st in found:
+        for investigation, name, kind, path, st, rel in found:
             fid = _file_id(path)
             table[fid] = path
             fp = error = seconds = None
@@ -884,7 +903,15 @@ class Api:
                           "seconds": seconds,
                           "modified": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                           "fp": fp, **_marks_row(s or {}, s and s["reviewed"], s and s["notes"]),
-                          "error": error})
+                          "error": error, "folder_id": _folder_id(rel)})
+        folder_table = {"root": folder}
+        folder_rows = [{"id": "root", "parent": None, "name": os.path.basename(os.path.normpath(folder)),
+                        "rel": []}]
+        for parts in sorted(folders, key=lambda p: tuple(part.lower() for part in p)):
+            fid = _folder_id(parts)
+            folder_table[fid] = os.path.join(folder, *parts)
+            folder_rows.append({"id": fid, "parent": _folder_id(parts[:-1]), "name": parts[-1],
+                                "rel": list(parts)})
         if store is not None and not store.read_only:
             try:
                 # Files past the limit, or in a folder that could not be read, were
@@ -895,11 +922,12 @@ class Api:
                     store.flush_index()
             except (StoreReadOnly, StoreUnavailable):
                 pass
-        result.update(truncated=truncated, files=files)
+        result.update(truncated=truncated, files=files, folders=folder_rows)
         with self._lib_lock:
             if scan_id != self._scan_id:        # a newer list_library() overtook this one
                 return result
             self._library = table
+            self._library_folders = folder_table
             self._lib_job = None
             if not pending or self._stop.is_set():
                 return result

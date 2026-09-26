@@ -174,7 +174,7 @@ class LibraryTests(unittest.TestCase):
                                ("Old Mill", "y.wav", "wav"), ("Old Mill", "x.dvf", "dvf")])
         for f in r["files"]:
             self.assertEqual(set(f), {"id", "name", "investigation", "type", "seconds", "modified", "fp",
-                                      "marks", "reviewed", "notes", "error"})
+                                      "marks", "reviewed", "notes", "error", "folder_id"})
             self.assertEqual((f["fp"], f["marks"], f["reviewed"], f["notes"], f["error"]),
                              (None, {"A": 0, "B": 0, "C": 0}, False, "", None))
             self.assertRegex(f["id"], "^[0-9a-f]{16}$")
@@ -215,6 +215,58 @@ class LibraryTests(unittest.TestCase):
         self.picked = None
         self.assertIsNone(api.choose_library_folder())                      # cancelled: unchanged
         self.assertEqual(api.library_folder()["folder"], other)
+
+    # ---- folders -----------------------------------------------------------------
+
+    def test_folders_nested_empty_dot_and_true_tree_order(self):
+        self.populate()
+        os.makedirs(os.path.join(self.lib, "Empty"))
+        os.makedirs(os.path.join(self.lib, ".hidden"))
+        r = self.new_api(store=None).list_library()
+        self.assertEqual(r["folders"][0], {"id": "root", "parent": None, "name": "OpenEVP", "rel": []})
+        order = [tuple(f["rel"]) for f in r["folders"][1:]]
+        self.assertEqual(order, [("a",), ("a", "b"), ("a", "b", "c"), ("a", "b", "c", "d"),
+                                 ("Empty",), ("Old Mill",), ("Old Mill", "A")])
+        for f in r["folders"]:
+            if f["id"] != "root":
+                self.assertRegex(f["id"], "^[0-9a-f]{16}$")
+        by_rel = {tuple(f["rel"]): f for f in r["folders"]}
+        self.assertNotIn((".hidden",), by_rel)                               # dot folders are not listed
+        root_id = r["folders"][0]["id"]
+        self.assertEqual(by_rel[("a",)]["parent"], root_id)
+        self.assertEqual(by_rel[("a", "b")]["parent"], by_rel[("a",)]["id"])
+        self.assertEqual(by_rel[("a", "b", "c")]["parent"], by_rel[("a", "b")]["id"])
+        self.assertEqual(by_rel[("a", "b", "c", "d")]["parent"], by_rel[("a", "b", "c")]["id"])
+        self.assertEqual(by_rel[("Empty",)]["parent"], root_id)
+        self.assertEqual(by_rel[("Old Mill",)]["parent"], root_id)
+        self.assertEqual(by_rel[("Old Mill", "A")]["parent"], by_rel[("Old Mill",)]["id"])
+        self.assertEqual(by_rel[("a",)]["name"], "a")
+        self.assertEqual(by_rel[("Old Mill", "A")]["name"], "A")
+        for f in r["folders"]:
+            self.assertNotIn("depth", f)
+            self.assertEqual(set(f), {"id", "parent", "name", "rel"})
+
+    def test_folder_ids_are_stable_across_scans(self):
+        self.populate()
+        api = self.new_api(store=None)
+        first = api.list_library()
+        second = api.list_library()
+        self.assertEqual({tuple(f["rel"]): f["id"] for f in first["folders"]},
+                         {tuple(f["rel"]): f["id"] for f in second["folders"]})
+
+    def test_files_carry_the_right_folder_id(self):
+        self.populate()
+        r = self.new_api(store=None).list_library()
+        by_rel = {tuple(f["rel"]): f["id"] for f in r["folders"]}
+        got = {f["name"]: f["folder_id"] for f in r["files"]}
+        self.assertEqual(got["z.wav"], "root")
+        self.assertEqual(got["deep.wav"], by_rel[("a", "b", "c", "d")])
+        self.assertEqual(got["y.wav"], by_rel[("Old Mill",)])
+        self.assertEqual(got["x.dvf"], by_rel[("Old Mill", "A")])
+
+    def test_missing_folder_has_no_folders(self):
+        r = self.new_api().list_library()
+        self.assertEqual(r["folders"], [])
 
     # ---- indexing ----------------------------------------------------------------
 
