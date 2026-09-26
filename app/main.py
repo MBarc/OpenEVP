@@ -97,7 +97,18 @@ def _hand_over(running):
         raise updater.UpdateError("another OpenEVP window is open; close it, then update")
 
 
+def _own_taskbar_identity():
+    """Group the window under OpenEVP (with its icon) in the taskbar, not under
+    python.exe when running from source."""
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("MBarc.OpenEVP")
+        except (AttributeError, OSError):
+            pass
+
+
 def main():
+    _own_taskbar_identity()
     running = _announce_running()   # keeps the mutex handles alive until the app closes
     cache = tempfile.mkdtemp(prefix="st25-audio-")
     manager = None

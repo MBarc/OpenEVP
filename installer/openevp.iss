@@ -73,8 +73,8 @@ Source: "..\dist\openevp-st25.exe"; DestDir: "{app}\command-line"; Flags: ignore
 Source: "..\vendor\webview2\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]
-Name: "{autoprograms}\OpenEVP"; Filename: "{app}\OpenEVP.exe"
-Name: "{autodesktop}\OpenEVP"; Filename: "{app}\OpenEVP.exe"; Tasks: desktopicon
+Name: "{autoprograms}\OpenEVP"; Filename: "{app}\OpenEVP.exe"; AppUserModelID: "MBarc.OpenEVP"
+Name: "{autodesktop}\OpenEVP"; Filename: "{app}\OpenEVP.exe"; AppUserModelID: "MBarc.OpenEVP"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\OpenEVP.exe"; Description: "Start OpenEVP"; Flags: postinstall nowait skipifsilent; Check: HasWebView2
