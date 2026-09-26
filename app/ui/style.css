@@ -1,6 +1,8 @@
 :root { --bg: #f7f7f5; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #deded8;
         --accent: #2f6f5e; --accent-soft: #d8ebe4; --warn-bg: #fff3cd; --warn: #7a5b00;
-        --ok-bg: #d8ebe4; --ok: #1f5a4a; }
+        --ok-bg: #d8ebe4; --ok: #1f5a4a;
+        /* EVP mark classes: the same bands as on the waveform, readable in both themes */
+        --mark-a: rgba(220, 60, 60, .30); --mark-b: rgba(230, 150, 30, .30); --mark-c: rgba(70, 130, 220, .30); }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #161615; --panel: #1f1f1d; --text: #ecece8; --muted: #9a9a94; --line: #34342f;
           --accent: #6cc3a7; --accent-soft: #23372f; --warn-bg: #3a3218; --warn: #f0d58a;
@@ -49,12 +51,44 @@ td.note { color: var(--warn); }
 #player-hint { margin: 0; }
 #player-loaded { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 12px; align-items: center; }
 #player-main { min-width: 0; }
-#now-playing { font-size: 12px; color: var(--muted); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#now-line { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; font-size: 12px; }
+#now-playing { flex: 1; min-width: 0; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#reviewed-label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
+#reviewed-label[hidden] { display: none; }
 #waveform { min-height: 80px; }
 #selection-bar { display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
 #selection-bar .muted { padding: 0; }
 #selection-controls { display: inline-flex; align-items: center; gap: 10px; }
 #selection-controls[hidden] { display: none; }
+#waveform ::part(region-content) { font-weight: 700; }
+/* The mark form (in the selection bar) and the marks list under it */
+#mark-form { display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+#mark-form[hidden] { display: none; }
+.cls-toggle { display: inline-flex; gap: 2px; }
+.cls-toggle button, .cls-chip { min-width: 24px; text-align: center; font-weight: 700; border-radius: 4px;
+                                border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+.cls-toggle button { cursor: pointer; padding: 1px 6px; }
+.cls-toggle button[aria-pressed="true"] { border-color: var(--text); }
+.cls-toggle button[data-cls="A"][aria-pressed="true"], .cls-chip.cls-A { background: var(--mark-a); }
+.cls-toggle button[data-cls="B"][aria-pressed="true"], .cls-chip.cls-B { background: var(--mark-b); }
+.cls-toggle button[data-cls="C"][aria-pressed="true"], .cls-chip.cls-C { background: var(--mark-c); }
+#mark-note, .mark-note-edit { flex: 1; min-width: 120px; font: inherit; padding: 2px 6px; border-radius: 4px;
+                              border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+#marks { font-size: 12px; }
+#marks[hidden], #marks-list[hidden] { display: none; }
+#marks-list { max-height: 112px; overflow: auto; border-top: 1px solid var(--line); }
+.mark-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--line); }
+.cls-chip { display: inline-block; padding: 0 4px; }
+.mark-time { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+.mark-note { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mark-note.editable { cursor: text; }
+.mark-note.empty { color: var(--muted); font-style: italic; }
+.mark-row button { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0 4px; }
+.mark-row button:disabled { color: var(--muted); cursor: default; opacity: .6; }
+#marks-footer { display: flex; align-items: center; gap: 8px; min-height: 26px; color: var(--muted); }
+#marks-empty[hidden], #backup-status[hidden] { display: none; }
+#backup-status.ok { color: var(--ok); }
+#backup-status.warn { color: var(--warn); }
 #play { width: 40px; height: 40px; border-radius: 50%; }
 #status { padding: 4px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); min-height: 24px; }
 .setup { margin: 4px 6px 0 20px; }

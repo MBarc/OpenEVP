@@ -6,7 +6,10 @@ const $ = (id) => document.getElementById(id);
 const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: false },
             dest: "", selected: new Set(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: false, settingUp: false,
-            view: "device", saved: null, savedSeq: 0 };   // view: "device" (a recorder) or "saved" (this PC)
+            view: "device", saved: null, savedSeq: 0,     // view: "device" (a recorder) or "saved" (this PC)
+            // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
+            current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
+            formCls: "B", lastCls: "B", backup: null, backupRunning: false, exportingMarked: false };
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -46,7 +49,6 @@ window.addEventListener("pywebviewready", async () => {
   if (S.caps.wav) {
     $("player-hint").textContent = "Select a recording, or open a WAV file, to analyze it here.";
     $("device-table").classList.add("playable");
-    if (S.caps.wav_status) banner(wavStatus());   // works, but in slow mode
   } else {
     $("player-hint").textContent = "Open a WAV file to analyze it here. Recordings can't be played " +
                                    "here. " + wavStatus();
@@ -55,6 +57,9 @@ window.addEventListener("pywebviewready", async () => {
     wav.textContent = "WAV (unavailable)";
     wav.title = wavStatus();
   }
+  // Said once: slow-mode decoding, and a damaged marks file that was set aside.
+  const notes = [S.caps.wav && S.caps.wav_status ? wavStatus() : "", ...(S.caps.store_problems || [])];
+  if (notes.some(Boolean)) banner(notes.filter(Boolean).join(" "));
   poll();
   checkForUpdate(false);                   // quietly: only speaks up if there is an update
 });
@@ -116,7 +121,7 @@ function deviceLabel(d, i) {
 
 function leaveDevice() {
   S.device = null; S.folders = {}; S.selected.clear(); S.loadSeq++;
-  if (S.playing) { S.playSeq++; S.ws.empty(); S.playing = null; showPlayerEmpty(); }  // a file stays loaded
+  if (S.playing) { S.playSeq++; S.ws.empty(); S.playing = null; setCurrent(null); showPlayerEmpty(); }  // a file stays loaded
   renderMain();
 }
 
@@ -139,6 +144,7 @@ const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;          // 30 minutes of ST25 audio
 async function loadIntoPlayer(seq, label, r, autoplay) {
   showPlayerLoaded(label);
   clearSelection();
+  setCurrent(label, r);
   const full = r.rate && r.duration * r.rate <= FULL_DETAIL_SAMPLES;
   const zoom = $("zoom");
   zoom.max = full ? Math.min(r.rate, 8000) : 400;   // px per second; at 8000 one pixel is one ST25 sample
@@ -151,6 +157,8 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   }
   if (seq !== S.playSeq) return;
   status("");
+  drawMarks(seq);
+  if (r.imported) banner(`Loaded ${plural(r.imported, "EVP mark")} stored in this file.`, "ok");
   if (autoplay) S.ws.play();
 }
 
@@ -377,6 +385,7 @@ window.onBackendEvent = (event, p) => {
     $("update-status").textContent = `Downloading… ${p.percent}%`;
     return;
   }
+  if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;
@@ -416,6 +425,7 @@ function setupPlayer() {
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSelection();                         // once: the plugin stays registered across loads
+  setupMarks();
   $("open-wav").onclick = openWav;
   $("open-wav-2").onclick = openWav;
 }
@@ -457,14 +467,18 @@ function setupSelection() {
   S.regions.enableDragSelection({ color: "rgba(108, 195, 167, 0.28)" });
   S.region = null;
   S.regions.on("region-created", (r) => {
-    for (const other of S.regions.getRegions()) if (other !== r) other.remove();   // one selection at a time
+    if (isMark(r)) return;                                  // marks live beside the selection
+    for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
     S.region = r; showSelection();
   });
-  S.regions.on("region-updated", (r) => { if (r === S.region) showSelection(); });
+  S.regions.on("region-updated", (r) => {
+    if (r === S.region) showSelection();
+    else if (isMark(r)) scheduleMarkMove(r);
+  });
   S.regions.on("region-out", (r) => {
     if (r === S.region && $("loop-selection").checked) r.play();
   });
-  S.regions.on("region-clicked", (r, e) => { e.stopPropagation(); r.play(); });
+  S.regions.on("region-clicked", (r, e) => { e.stopPropagation(); isMark(r) ? r.play(true) : r.play(); });
   $("play-selection").onclick = () => { if (S.region) S.region.play(); };
   $("clear-selection").onclick = clearSelection;
   document.addEventListener("keydown", (e) => {
@@ -476,13 +490,13 @@ function setupSelection() {
 
 function showSelection() {
   const r = S.region;
-  $("selection-hint").hidden = !!r;
-  $("selection-controls").hidden = !r;
+  $("selection-hint").hidden = !!r || !!S.markForm;       // the mark form takes the bar while open
+  $("selection-controls").hidden = !r || !!S.markForm;
   if (r) $("selection-range").textContent = `${fmtPrecise(r.start)} – ${fmtPrecise(r.end)} (${(r.end - r.start).toFixed(1)} s)`;
 }
 
-function clearSelection() {
-  if (S.regions) S.regions.clearRegions();
+function clearSelection() {                                 // the selection only: marks stay
+  if (S.region) S.region.remove();
   S.region = null;
   $("loop-selection").checked = false;
   showSelection();
@@ -500,4 +514,304 @@ async function play(device, folder, number) {
   if (!r.ok) { status(""); showError(r); return; }
   S.playing = key(device, folder, number); renderMain();
   await loadIntoPlayer(seq, `Recording ${label}`, r, true);
+}
+
+// ---- EVP marks: a selection saved as an EVP (class A/B/C + note), kept per recording ----
+const MARK_COLORS = { A: "rgba(220, 60, 60, .30)", B: "rgba(230, 150, 30, .30)", C: "rgba(70, 130, 220, .30)" };
+const MIN_MARK = 0.05;                        // seconds; the backend refuses shorter marks
+const READ_ONLY_TIP = "Another OpenEVP window is open; marks can only be changed there.";
+const NO_MARKS_TIP = "Marks are not available here.";
+
+function isMark(r) { return r.id.startsWith("mark-"); }
+function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
+function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? READ_ONLY_TIP : ""; }
+function isPoint(m) { return m.end <= m.start; }        // imported point markers: no length to drag
+function typingIn(el) {
+  return el.isContentEditable || el.tagName === "TEXTAREA" || el.tagName === "SELECT" ||
+         (el.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test(el.type));
+}
+
+function setupMarks() {
+  $("reviewed-label").hidden = !S.caps.marks;
+  $("reviewed").disabled = $("mark-evp").disabled = !marksWritable();
+  $("reviewed-label").title = marksTip() || $("reviewed-label").title;
+  $("mark-evp").title = marksTip() || $("mark-evp").title;
+  $("mark-evp").onclick = () => openMarkForm(null);
+  $("mark-save").onclick = saveMarkForm;
+  $("mark-cancel").onclick = closeMarkForm;
+  for (const b of document.querySelectorAll(".cls-toggle button")) b.onclick = () => pickClass(b.dataset.cls);
+  $("mark-form").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); closeMarkForm(); }
+    else if (e.key === "Enter" && e.target.tagName !== "BUTTON") { e.preventDefault(); saveMarkForm(); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "m" && e.key !== "M") return;
+    if (e.ctrlKey || e.altKey || e.metaKey || typingIn(e.target)) return;
+    if (!S.region || S.markForm || !marksWritable() || $("player-loaded").hidden) return;
+    e.preventDefault();
+    openMarkForm(null);
+  });
+  $("reviewed").onchange = setReviewed;
+  $("retry-backup").onclick = () => retryBackup(S.current && S.current.rec);
+  $("export-marked").onclick = exportMarked;
+}
+
+// The recording now in the player (its label and the backend's audio result), or none (null).
+function setCurrent(label, r) {
+  closeMarkForm();
+  for (const region of S.markRegions.values()) region.remove();
+  S.markRegions.clear();
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration } : null;
+  S.marks = r ? sortMarks(r.marks || []) : [];
+  S.backup = r ? r.backup : null;
+  S.backupRunning = false;
+  $("reviewed").checked = !!(r && r.reviewed);
+  renderMarks();
+}
+
+function sortMarks(marks) { return marks.slice().sort((a, b) => a.start - b.start); }
+
+// Draw the marks once the audio is loaded; a newer load (seq) wins.
+function drawMarks(seq) {
+  if (!S.ws.getDuration()) { S.ws.once("ready", () => { if (seq === S.playSeq) drawMarks(seq); }); return; }
+  for (const m of S.marks) if (!S.markRegions.has(m.id)) addMarkRegion(m);
+}
+
+function addMarkRegion(m) {
+  const movable = marksWritable() && !isPoint(m);
+  const region = S.regions.addRegion({ id: "mark-" + m.id, start: m.start, end: m.end, color: MARK_COLORS[m.cls],
+                                       content: m.cls, drag: movable, resize: movable, minLength: MIN_MARK });
+  S.markRegions.set(m.id, region);
+}
+
+// A saved mark replaces the old one in the list and on the waveform.
+function replaceMark(mark) {
+  S.marks = sortMarks(S.marks.map((m) => (m.id === mark.id ? mark : m)));
+  const region = S.markRegions.get(mark.id);
+  if (region) region.setOptions({ start: mark.start, end: mark.end, color: MARK_COLORS[mark.cls], content: mark.cls });
+  renderMarks();
+}
+
+// ---- the form in the selection bar: a new mark (mark = null) or editing one ----
+function openMarkForm(mark) {
+  if (!S.current || !marksWritable() || (!mark && !S.region)) return;
+  S.markForm = { id: mark ? mark.id : null };
+  pickClass(mark ? mark.cls : S.lastCls);
+  $("mark-note").value = mark ? mark.note : "";
+  $("mark-form-label").textContent = mark ? `Edit the EVP at ${fmtPrecise(mark.start)}:` : "Mark as EVP:";
+  $("mark-save").disabled = false;
+  $("mark-form").hidden = false;
+  showSelection();
+  $("mark-note").focus();
+}
+
+function closeMarkForm() {
+  if (!S.markForm) return;
+  S.markForm = null;
+  $("mark-form").hidden = true;
+  if ($("mark-form").contains(document.activeElement)) document.activeElement.blur();
+  showSelection();
+}
+
+function pickClass(cls) {
+  S.formCls = cls;
+  for (const b of document.querySelectorAll(".cls-toggle button")) b.setAttribute("aria-pressed", String(b.dataset.cls === cls));
+}
+
+async function saveMarkForm() {
+  const form = S.markForm;
+  if (!form || !S.current || $("mark-save").disabled) return;
+  if (!form.id && !S.region) { closeMarkForm(); return; }
+  const { rec, duration } = S.current, seq = S.playSeq, cls = S.formCls;
+  const note = $("mark-note").value.trim();
+  $("mark-save").disabled = true;
+  const r = form.id
+    ? await api().update_mark(rec, form.id, null, null, cls, note)
+    : await api().add_mark(rec, S.region.start, Math.min(S.region.end, duration || S.region.end), cls, note);
+  if (seq !== S.playSeq) return;                         // another recording: its form was closed
+  $("mark-save").disabled = false;
+  if (!r.ok) { showError(r); return; }                    // the form stays open: the note is not lost
+  S.lastCls = cls;
+  if (S.markForm === form) closeMarkForm();               // (it may have been cancelled meanwhile)
+  if (form.id) { replaceMark(r.mark); return; }
+  clearSelection();
+  S.marks = sortMarks([...S.marks, r.mark]);
+  addMarkRegion(r.mark);
+  if (r.backup_queued) S.backupRunning = true;
+  renderMarks();
+}
+
+// ---- dragging a mark's band (or an edge) saves the new times after a short pause ----
+function scheduleMarkMove(region) {
+  const id = region.id.slice("mark-".length);
+  const old = S.marks.find((m) => m.id === id);
+  if (!S.current || !old) return;
+  clearTimeout(S.markTimers.get(id));
+  S.markTimers.delete(id);
+  if (Math.abs(old.start - region.start) < 1e-6 && Math.abs(old.end - region.end) < 1e-6) return;   // a click, not a move
+  const { rec, duration } = S.current, seq = S.playSeq;
+  S.markTimers.set(id, setTimeout(() => { S.markTimers.delete(id); saveMarkMove(rec, seq, id, region, duration); }, 300));
+}
+
+async function saveMarkMove(rec, seq, id, region, duration) {
+  const end = Math.min(region.end, duration || region.end);
+  const r = await api().update_mark(rec, id, region.start, end, null, null);
+  if (!r.ok) showError(r);                                   // also after switching: the move was not saved
+  if (seq !== S.playSeq) return;
+  if (r.ok) { replaceMark(r.mark); return; }
+  const old = S.marks.find((m) => m.id === id);
+  if (old) region.setOptions({ start: old.start, end: old.end });   // back to where it is stored
+}
+
+// ---- the marks list under the selection bar ----
+function renderMarks() {
+  $("marks").hidden = !S.current || !S.caps.marks;
+  const list = $("marks-list");
+  list.innerHTML = "";
+  list.hidden = !S.marks.length;
+  for (const m of S.marks) list.appendChild(markRow(m));
+  $("marks-empty").hidden = S.marks.length > 0;
+  $("export-marked").disabled = !S.marks.length || S.exportingMarked;
+  renderBackup();
+}
+
+function markButton(text, title, run, enabled = true) {
+  const b = document.createElement("button");
+  b.textContent = text; b.title = title; b.disabled = !enabled;
+  b.onclick = (e) => { e.stopPropagation(); run(); };
+  return b;
+}
+
+function markRow(m) {
+  const row = document.createElement("div");
+  row.className = "mark-row";
+  const chip = document.createElement("span");
+  chip.className = `cls-chip cls-${m.cls}`; chip.textContent = m.cls; chip.title = `Class ${m.cls}`;
+  const time = document.createElement("span");
+  time.className = "mark-time";
+  time.textContent = isPoint(m) ? fmtPrecise(m.start) : `${fmtPrecise(m.start)} – ${fmtPrecise(m.end)}`;
+  const writable = marksWritable(), tip = marksTip();
+  const note = document.createElement("span");
+  note.className = "mark-note" + (m.note ? "" : " empty") + (writable ? " editable" : "");
+  note.textContent = m.note || (writable ? "Add a note" : "No note");
+  note.title = writable ? (m.note ? `${m.note}\n(click to edit)` : "Click to add a note") : [m.note, tip].filter(Boolean).join("\n");
+  if (writable) note.onclick = () => editNoteInline(note, m);
+  row.append(chip, time, note,
+    markButton("▶", "Play this EVP", () => playMark(m)),
+    markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
+    markButton("✕", tip || "Delete this mark", () => deleteMark(m), writable));
+  return row;
+}
+
+function playMark(m) {
+  const region = S.markRegions.get(m.id);
+  if (region) region.play(true); else S.ws.play(m.start, isPoint(m) ? undefined : m.end);
+}
+
+// Click a note to edit it in place: Enter or leaving the field saves, Escape cancels.
+function editNoteInline(span, m) {
+  const input = document.createElement("input");
+  input.type = "text"; input.maxLength = 500; input.value = m.note; input.className = "mark-note-edit";
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    if (save && input.value.trim() !== m.note) saveNote(m, input.value.trim()); else renderMarks();
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "Enter") { e.preventDefault(); finish(true); }
+    else if (e.key === "Escape") { e.preventDefault(); finish(false); }
+  };
+  input.onblur = () => finish(true);
+  span.replaceWith(input);
+  input.focus();
+}
+
+async function saveNote(m, note) {
+  if (!S.current) return;
+  const rec = S.current.rec, seq = S.playSeq;
+  const r = await api().update_mark(rec, m.id, null, null, null, note);
+  if (!r.ok) showError(r);
+  if (seq !== S.playSeq) return;
+  if (r.ok) replaceMark(r.mark); else renderMarks();
+}
+
+async function deleteMark(m) {
+  if (!S.current || !confirm("Delete this mark?")) return;
+  const rec = S.current.rec, seq = S.playSeq;
+  const r = await api().delete_mark(rec, m.id);
+  if (seq !== S.playSeq) return;
+  if (!r.ok) { showError(r); return; }
+  clearTimeout(S.markTimers.get(m.id));
+  S.markTimers.delete(m.id);
+  const region = S.markRegions.get(m.id);
+  if (region) region.remove();
+  S.markRegions.delete(m.id);
+  S.marks = S.marks.filter((x) => x.id !== m.id);
+  if (S.markForm && S.markForm.id === m.id) closeMarkForm();
+  renderMarks();
+}
+
+async function setReviewed() {
+  if (!S.current) return;
+  const want = $("reviewed").checked, rec = S.current.rec, seq = S.playSeq;
+  const r = await api().set_reviewed(rec, want);
+  if (seq !== S.playSeq) return;
+  if (!r.ok) { $("reviewed").checked = !want; showError(r); }
+}
+
+// ---- backup of a marked recorder recording, and the WAV export with marks ----
+function renderBackup() {
+  const el = $("backup-status"), b = S.backup || { status: null, detail: "" };
+  const saved = !S.backupRunning && b.status === "saved";
+  const failed = !S.backupRunning && b.status === "failed";
+  el.className = saved ? "ok" : failed ? "warn" : "";
+  el.textContent = S.backupRunning ? "Backing up…" : saved ? "Backed up to your save folder"
+    : failed ? `Backup failed: ${b.detail}` : "";
+  el.title = saved ? b.detail : "";
+  el.hidden = !el.textContent;
+  $("retry-backup").hidden = !failed;
+  $("retry-backup").disabled = !marksWritable();
+  $("retry-backup").title = marksTip();
+}
+
+function backupEvent(event, p) {
+  const done = event === "backup-done";
+  if (done) banner(`✓ Backed up ${p.label} so this EVP is safe even if the recorder is wiped. ${p.detail}`, "ok");
+  else banner(p.detail, "warn", marksWritable() ? { label: "Retry backup", run: () => retryBackup(p.rec) } : null);
+  if (done) loadSaved();
+  if (!S.current) return;
+  if (p.rec !== S.current.rec) { refreshBackup(); return; }   // the same recording may be loaded again under a new handle
+  S.backupRunning = false;
+  S.backup = { status: done ? "saved" : "failed", detail: p.detail };
+  renderBackup();
+}
+
+async function refreshBackup() {
+  const rec = S.current.rec, seq = S.playSeq;
+  const r = await api().get_marks(rec);
+  if (seq !== S.playSeq || !r.ok) return;
+  S.backup = r.backup;
+  renderBackup();
+}
+
+async function retryBackup(rec) {
+  if (!rec) return;
+  const r = await api().retry_backup(rec);
+  if (!r.ok) { showError(r); return; }
+  banner("");
+  if (!S.current || S.current.rec !== rec) return;
+  if (r.queued) { S.backupRunning = true; renderBackup(); } else refreshBackup();
+}
+
+async function exportMarked() {
+  if (!S.current) return;
+  const rec = S.current.rec;
+  S.exportingMarked = true; renderMarks(); status("Saving a WAV with the marks…");
+  const r = await api().export_marked(rec);
+  S.exportingMarked = false; status(""); renderMarks();
+  if (!r.ok) { showError(r); return; }
+  banner(r.already ? `✓ ${r.name} with these marks was already saved in ${S.dest}.`
+                   : `✓ Saved ${r.name} with its EVP marks to ${S.dest}.`, "ok");
+  loadSaved();
 }
