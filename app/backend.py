@@ -7,15 +7,27 @@ downloads still go through the DeviceManager's single USB thread, and files
 are written only after each download has finished. shutdown() stops an export
 between recordings and waits for it, so closing the window never abandons one
 half-way through a file.
+
+EVP marks live in the app data store (app.store.AppData), keyed by the audio
+fingerprint of the decoded samples. The page never holds a fingerprint or a
+path: every loaded recording gets an opaque "rec" handle, and the marks calls
+take that handle. For a recording on a recorder the handle also holds the
+exact .dvf bytes that were decoded for playback, so the backup made when the
+recording is first marked saves exactly the audio that was marked. Backups run
+on one background worker (registered with the export worker, so shutdown()
+waits for both) and report through "backup-done" / "backup-failed" events.
 """
 import datetime
 import hashlib
+import io
 import os
+import secrets
 import struct
 import threading
 import wave
+from collections import OrderedDict
 
-from st25 import __version__, audio
+from st25 import __version__, audio, wavinfo
 from st25.cli import open_folder
 from st25.export import save_dvf, save_wav
 
@@ -26,6 +38,7 @@ from st25.session import LETTERS
 from st25.usb import DriverMissing, UsbError
 
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
+from .store import StoreReadOnly, StoreUnavailable
 
 REPLUG = "Unplug the recorder's USB cable, wait a few seconds and plug it back in."
 # Stage 4 (installer) replaces this with a "Set up recorder" button.
@@ -33,14 +46,39 @@ DRIVER = "Click \"Set up recorder\" to install its driver (Windows will ask for 
 DISK = "Check free disk space and that the folder can be written to."
 
 
-def recording_wav(manager, key, should_stop=None):
-    """WAV bytes for one recording (the AudioServer provider). ``should_stop``
-    lets app shutdown interrupt a long decode (see audio.dvf_to_wav)."""
+HANDLES = 32                 # recording handles (and captured .dvf bytes) kept at once
+NO_MARKS = "Marks are not available here."
+RELOAD = "Load the recording again."
+CLOSING = "The app is closing."
+
+
+def _download(manager, key):
+    """The session's Download for one recording; raises if it cannot be played."""
     device_id, letter, number = key
     dl = manager.with_session(device_id, lambda s: s.download(letter, number))
     if dl.error:
         raise ValueError(f"{dl.label} cannot be played: {dl.error}")
-    return audio.dvf_to_wav(dl.dvf, should_stop=should_stop)
+    return dl
+
+
+def recording_wav(manager, key, should_stop=None):
+    """WAV bytes for one recording (the AudioServer provider). ``should_stop``
+    lets app shutdown interrupt a long decode (see audio.dvf_to_wav)."""
+    return audio.dvf_to_wav(_download(manager, key).dvf, should_stop=should_stop)
+
+
+def _plain(e):
+    """An error in plain words that names a file, never its full path."""
+    if isinstance(e, OSError) and e.filename:
+        return f"{e.strerror or type(e).__name__} ({os.path.basename(e.filename)})"
+    return str(e) or type(e).__name__
+
+
+def _bounded_put(cache, key, value, limit=HANDLES):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > limit:
+        cache.popitem(last=False)
 
 
 def _fail(message, advice="", state=READY):
@@ -114,7 +152,8 @@ def _parse_items(items):
 
 class Api:
     def __init__(self, manager, emit, pick_folder, default_dest, audio_server, driver_setup=None,
-                 pick_wav=None, updater=None, quit_app=None, can_install=False, before_install=None):
+                 pick_wav=None, updater=None, quit_app=None, can_install=False, before_install=None,
+                 store=None, store_problems=()):
         self._manager = manager            # private attributes are not exposed to JS
         self._emit = emit
         self._pick = pick_folder             # (start_dir) -> path or None (a folder dialog)
@@ -131,10 +170,28 @@ class Api:
         self._updating = False
         self._busy = threading.Lock()      # held while an export runs
         self._stop = threading.Event()
-        self._thread = None
+        self._workers = []                    # every background thread (export, backup); shutdown joins them
+        self._store = store                   # app.store.AppData, or None: no marks
+        self._store_problems = list(store_problems)   # why the store could not be opened (from main.py)
+        self._recs_lock = threading.Lock()
+        self._recs = OrderedDict()            # rec handle -> {"fp", "duration", "name", "label", "source"}
+        self._dvfs = OrderedDict()            # (device_id, letter, number) -> the Download last decoded for it
+        self._backup_lock = threading.Lock()
+        self._backup_queue = OrderedDict()    # fp -> (rec, entry): one pending backup per recording
+        self._backup_running = None           # fp being backed up right now
+        self._backup_thread = None
+        if store is not None:
+            saved = store.get_setting("save_folder")
+            if isinstance(saved, str) and saved and os.path.isdir(saved):
+                self._dest = saved
 
     def capabilities(self):
-        return {"wav": audio.available(), "wav_status": audio.status(), "version": __version__}
+        """What this app can do. Store problems (a damaged marks file set aside, a
+        second window) are reported here, once, for the page to show."""
+        store = self._store
+        return {"wav": audio.available(), "wav_status": audio.status(), "version": __version__,
+                "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
+                "store_problems": self._store_problems + (store.problems() if store is not None else [])}
 
     def devices(self):
         try:
@@ -156,10 +213,310 @@ class Api:
         work = _parse_items([{"folder": letter, "number": number}])
         if work is None:
             return _fail("No such recording.")
+        key = (device_id, *work[0])
+        letter, number = work[0]
+
+        def make():                      # runs only when the audio server has no decode cached
+            dl = _download(self._manager, key)
+            with self._recs_lock:
+                _bounded_put(self._dvfs, key, dl)
+            return audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
         try:
-            return {"ok": True, **self._server.prepare((device_id, *work[0]))}
+            info = self._server.prepare(key, make=make)
         except Exception as e:
             return _error(e)
+        with self._recs_lock:
+            dl = self._dvfs.get(key)
+            if dl is not None:
+                self._dvfs.move_to_end(key)
+        # Without the captured bytes (evicted meanwhile) a backup downloads once more
+        # and checks the audio is still the same before trusting it (_device_audio).
+        label = f"{letter}-{number:03d}"
+        source = {"kind": "device", "device": device_id, "letter": letter, "number": number, "label": label,
+                  "dvf": dl.dvf if dl else None, "dvf_name": dl.name if dl else None}
+        return self._loaded(info, dl.name if dl else label, label, source)
+
+    # ---- recording handles and marks ------------------------------------------
+    def _loaded(self, info, name, label, source, extra=None):
+        """The player's result for a loaded recording: the audio server's info, a new
+        rec handle, and the recording's marks, reviewed flag and backup status."""
+        rec = secrets.token_hex(8)
+        entry = {"fp": info.get("fp"), "duration": info.get("duration"), "name": name, "label": label,
+                 "source": source}
+        with self._recs_lock:
+            _bounded_put(self._recs, rec, entry)
+        return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"])}
+
+    def _marks_state(self, fp):
+        r = self._store.recording(fp) if self._store is not None and fp else None
+        if r is None:
+            return {"marks": [], "reviewed": False, "backup": {"status": None, "detail": ""}}
+        return {"marks": r["marks"], "reviewed": r["reviewed"], "backup": r["backup"]}
+
+    def _entry(self, rec):
+        if not isinstance(rec, str):
+            return None
+        with self._recs_lock:
+            entry = self._recs.get(rec)
+            if entry is not None:
+                self._recs.move_to_end(rec)
+            return entry
+
+    def _with_mark_store(self, rec, action):
+        """Run action(entry) for a marks call, turning every failure into _fail()."""
+        if self._store is None:
+            return _fail(NO_MARKS)
+        entry = self._entry(rec)
+        if entry is None or not entry["fp"]:
+            return _fail(RELOAD)
+        try:
+            return action(entry)
+        except (StoreReadOnly, StoreUnavailable, ValueError) as e:
+            return _fail(str(e))
+        except Exception as e:
+            return _fail(f"{type(e).__name__}: {e}")
+
+    def get_marks(self, rec):
+        return self._with_mark_store(rec, lambda e: {"ok": True, **self._marks_state(e["fp"])})
+
+    def add_mark(self, rec, start, end, cls, note=""):
+        """Add a mark. The first mark on a recorder recording (or the next one after a
+        failed backup) also queues a backup into the Save-to folder; its result comes
+        as a "backup-done" / "backup-failed" event, never by delaying the mark."""
+        def act(e):
+            mark = self._store.add_mark(e["fp"], start, end, cls, note, name=e["name"], duration=e["duration"])
+            return {"ok": True, "mark": mark, "backup_queued": self._queue_backup(rec, e)}
+        return self._with_mark_store(rec, act)
+
+    def update_mark(self, rec, mark_id, start=None, end=None, cls=None, note=None):
+        return self._with_mark_store(rec, lambda e: {"ok": True, "mark": self._store.update_mark(
+            e["fp"], mark_id, cls=cls, note=note, start=start, end=end)})
+
+    def delete_mark(self, rec, mark_id):
+        return self._with_mark_store(rec, lambda e: {"ok": True, "deleted": self._store.delete_mark(e["fp"], mark_id)})
+
+    def set_reviewed(self, rec, reviewed):
+        def act(e):
+            self._store.set_reviewed(e["fp"], reviewed)
+            return {"ok": True, "reviewed": reviewed}
+        return self._with_mark_store(rec, act)
+
+    def retry_backup(self, rec):
+        """Back up a marked recorder recording whose backup failed (the marks list's
+        Retry backup). {"ok", "queued"}: queued is False when nothing needs doing."""
+        return self._with_mark_store(rec, lambda e: {"ok": True, "queued": self._queue_backup(rec, e)})
+
+    # ---- backups of marked recorder recordings ----------------------------------
+    def backing_up(self):
+        """True while a backup is queued or being written."""
+        with self._backup_lock:
+            return bool(self._backup_queue) or self._backup_running is not None
+
+    def _queue_backup(self, rec, entry):
+        """Queue one backup of a recorder recording unless it is saved already or
+        already queued/running. Returns True if a backup was queued."""
+        if entry["source"]["kind"] != "device" or self._store.read_only:
+            return False
+        fp = entry["fp"]
+        if self._store.backup(fp)["status"] == "saved":
+            return False
+        with self._backup_lock:
+            if self._stop.is_set() or fp in self._backup_queue or fp == self._backup_running:
+                return False
+            self._backup_queue[fp] = (rec, entry)
+            if self._backup_thread is None:
+                thread = threading.Thread(target=self._backup_worker, name="backup")
+                try:
+                    thread.start()
+                except Exception:
+                    self._backup_queue.pop(fp)        # retried on the next mark
+                    return False
+                self._backup_thread = thread
+                self._add_worker(thread)
+            return True
+
+    def _backup_worker(self):
+        while True:
+            with self._backup_lock:
+                if self._stop.is_set() or not self._backup_queue:
+                    self._backup_queue.clear()        # not started: the next mark queues it again
+                    self._backup_thread = None
+                    return
+                fp, (rec, entry) = self._backup_queue.popitem(last=False)
+                self._backup_running = fp
+            try:
+                self._backup(fp, rec, entry)
+            except Exception as e:                    # never let the worker die silently
+                self._backup_result(fp, rec, entry, "failed",
+                                    f"{entry['source']['label']} was not backed up: {_plain(e)}")
+            finally:
+                with self._backup_lock:
+                    self._backup_running = None
+
+    def _device_audio(self, entry):
+        """(dvf bytes, dvf name, WAV or None) for a recorder recording's handle. When
+        the handle has no captured bytes, the recording is downloaded once more, and
+        trusted only if it decodes to the same audio that was loaded (then the WAV
+        from that check is returned too). Raises ValueError in plain words."""
+        src = entry["source"]
+        with self._recs_lock:
+            if src["dvf"] is not None:
+                return src["dvf"], src["dvf_name"], None
+        try:
+            dl = _download(self._manager, (src["device"], src["letter"], src["number"]))
+        except ValueError:
+            raise
+        except Exception as e:
+            raise ValueError(_error(e)["error"]) from e
+        wav = audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
+        if wavinfo.wav_fingerprint(io.BytesIO(wav)) != entry["fp"]:
+            raise ValueError(f"{src['label']} on the recorder is no longer the recording that was marked. "
+                             "Load it again, then retry.")
+        with self._recs_lock:
+            src["dvf"], src["dvf_name"] = dl.dvf, dl.name
+        return dl.dvf, dl.name, wav
+
+    def _backup(self, fp, rec, entry):
+        """Save the recording's .dvf into <Save to>/<letter>/, then (with the decoder)
+        a WAV copy with the marks. "saved" once the .dvf is there; a failed WAV copy
+        is reported in the detail, not as a failed backup."""
+        src = entry["source"]
+        label = src["label"]
+        try:
+            data, dvf_name, wav = self._device_audio(entry)
+        except audio.Cancelled:
+            return                                    # the app is closing; retried on the next mark
+        except ValueError as e:
+            self._backup_result(fp, rec, entry, "failed", f"{label} was not backed up: {e}")
+            return
+        outdir = os.path.join(self._dest, src["letter"])
+        try:
+            os.makedirs(outdir, exist_ok=True)
+            path, already = save_dvf(data, outdir, dvf_name)
+        except OSError as e:
+            self._backup_result(fp, rec, entry, "failed", f"{label} was not backed up: {_plain(e)}")
+            return
+        name = os.path.basename(path)
+        detail = f"{name} was already saved" if already else f"Saved as {name}"
+        if audio.available():
+            wav_name = os.path.splitext(dvf_name)[0] + ".wav"
+            try:
+                if wav is None:
+                    wav = audio.dvf_to_wav(data, should_stop=self._stop.is_set)
+                wav_path, _ = save_wav(wavinfo.with_markers(wav, self._store.marks(fp)), outdir, wav_name)
+                detail += f", with a WAV copy ({os.path.basename(wav_path)})"
+            except audio.Cancelled:
+                detail += ", but the WAV copy was not made because the app is closing"
+            except Exception as e:
+                detail += f", but the WAV copy failed: {_plain(e)}"
+        self._backup_result(fp, rec, entry, "saved", detail + ".")
+
+    def _backup_result(self, fp, rec, entry, status, detail):
+        try:
+            self._store.set_backup(fp, status, detail)
+        except (StoreReadOnly, StoreUnavailable, ValueError) as e:
+            detail += f" (This could not be recorded: {e})"
+        self._emit("backup-done" if status == "saved" else "backup-failed",
+                   {"rec": rec, "label": entry["source"]["label"], "detail": detail})
+
+    # ---- WAV with marks ----------------------------------------------------------
+    def _marked_wav(self, wav):
+        """(wav, note): a freshly decoded WAV with the marks of its recording written
+        in, or unchanged when it has none. note says why marks were left out."""
+        if self._store is None:
+            return wav, None
+        try:
+            marks = self._store.marks(wavinfo.wav_fingerprint(io.BytesIO(wav)))
+        except ValueError:
+            return wav, None
+        if not marks:
+            return wav, None
+        try:
+            return wavinfo.with_markers(wav, marks), None
+        except ValueError as e:
+            return wav, f"saved without its marks ({e})"
+
+    def export_marked(self, rec):
+        """Save a WAV with the current marks of the loaded recording into the Save-to
+        folder: <letter>/ for a recorder recording, else the folder named like the
+        file's own folder (its investigation). Never replaces a file: identical bytes
+        count as already saved, anything else gets a numbered name."""
+        if self._store is None:
+            return _fail(NO_MARKS)
+        entry = self._entry(rec)
+        if entry is None or not entry["fp"]:
+            return _fail(RELOAD)
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        marks = self._store.marks(entry["fp"])
+        if not marks:
+            return _fail("This recording has no marks yet.")
+        src = entry["source"]
+        try:
+            if src["kind"] == "device":
+                if not audio.available():
+                    return _fail(f"WAV export: {audio.status()}.")
+                try:
+                    data, dvf_name, wav = self._device_audio(entry)
+                except ValueError as e:
+                    return _fail(str(e))
+                if wav is None:
+                    wav = audio.dvf_to_wav(data, should_stop=self._stop.is_set)
+                outdir = os.path.join(self._dest, src["letter"])
+                out_name = os.path.splitext(dvf_name)[0] + ".wav"
+            else:
+                path = src["path"]
+                name = os.path.basename(path)
+                with open(path, "rb") as f:
+                    raw = f.read()
+                if name.lower().endswith(".dvf"):
+                    if not audio.available():
+                        return _fail(f"WAV export: {audio.status()}.")
+                    wav = audio.dvf_to_wav(raw, should_stop=self._stop.is_set)
+                else:
+                    wav = raw
+                del raw
+                try:
+                    same = wavinfo.wav_fingerprint(io.BytesIO(wav)) == entry["fp"]
+                except ValueError:
+                    same = False
+                if not same:
+                    return _fail(f"{name} has changed since it was loaded. Load it again.")
+                investigation = os.path.basename(os.path.dirname(path))
+                outdir = os.path.join(self._dest, investigation) if investigation else self._dest
+                out_name = os.path.splitext(name)[0] + ".wav"
+            marked = wavinfo.with_markers(wav, marks)
+        except audio.Cancelled:
+            return _fail(CLOSING)
+        except OSError as e:
+            return _fail(f"Could not read {entry['name']}: {_plain(e)}")
+        except ValueError as e:
+            return _fail(f"Could not add the marks to {entry['name']}: {e}")
+        except Exception as e:
+            return _error(e)
+        del wav
+        try:
+            os.makedirs(outdir, exist_ok=True)
+            path, already = save_wav(marked, outdir, out_name)
+        except OSError as e:
+            return _fail(f"Could not save {out_name}: {_plain(e)}", DISK)
+        return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path)}
+
+    def _import_markers(self, path, info, name):
+        """Import a WAV's embedded markers, once per recording (the store decides:
+        never when it was imported before or already has marks). Returns the count."""
+        fp = info.get("fp")
+        if self._store is None or not fp or self._store.read_only:
+            return 0
+        try:
+            if self._store.is_imported(fp) or self._store.marks(fp):
+                return 0
+            found = wavinfo.read_markers(path)
+            if not found:
+                return 0
+            return self._store.import_marks(fp, found, name, info.get("duration"))
+        except (StoreReadOnly, StoreUnavailable, ValueError):
+            return 0
 
     def default_destination(self):
         return self._dest
@@ -212,9 +569,12 @@ class Api:
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
         name = os.path.basename(path)
+        source = {"kind": "file", "path": path}
         try:
             if name.lower().endswith(".wav"):
-                return {"ok": True, "name": name, **self._server.prepare_file(path)}
+                info = self._server.prepare_file(path)
+                imported = self._import_markers(path, info, name)
+                return self._loaded(info, name, name, source, {"name": name, "imported": imported})
             if not audio.available():
                 return _fail(f"Playing .dvf files: {audio.status()}.")
             st = os.stat(path)
@@ -223,7 +583,7 @@ class Api:
             def decode():
                 with open(path, "rb") as f:
                     return audio.dvf_to_wav(f.read(), should_stop=self._stop.is_set)
-            return {"ok": True, "name": name, **self._server.prepare(key, make=decode)}
+            return self._loaded(self._server.prepare(key, make=decode), name, name, source, {"name": name})
         except Exception as e:
             return _fail(f"Could not play {name}: {e}")
 
@@ -241,8 +601,10 @@ class Api:
         try:
             info = self._server.prepare_file(path)
         except (OSError, ValueError) as e:
-            return _fail(f"Could not open {os.path.basename(path)}: {e}")
-        return {"ok": True, "name": os.path.basename(path), **info}
+            return _fail(f"Could not open {os.path.basename(path)}: {_plain(e)}")
+        name = os.path.basename(path)
+        imported = self._import_markers(path, info, name)
+        return self._loaded(info, name, name, {"kind": "file", "path": path}, {"name": name, "imported": imported})
 
     # ---- updates ------------------------------------------------------------------
     def check_update(self):
@@ -269,7 +631,9 @@ class Api:
         if not self._can_install:
             return _fail("Updates install only in the installed app, not when running from source.")
         if self._stop.is_set():
-            return _fail("The app is closing.")
+            return _fail(CLOSING)
+        if self.backing_up():
+            return _fail("Wait for the backup of a marked recording to finish, then update.")
         if not self._busy.acquire(blocking=False):      # held from here on: no export can start
             return _fail("Wait for the export to finish, then update.")
         self._updating = True
@@ -324,18 +688,23 @@ class Api:
 
     def choose_destination(self):
         """Let the user pick the save folder, starting in the current one; returns it
-        (or None if cancelled)."""
+        (or None if cancelled). The choice is remembered for the next start."""
         try:
             picked = self._pick(self._start_folder())
         except Exception:                       # the dialog failed; keep the current folder
             return None
         if picked:
             self._dest = picked
+            if self._store is not None:
+                try:
+                    self._store.set_setting("save_folder", picked)
+                except (StoreReadOnly, StoreUnavailable):
+                    pass                        # used for this session; not remembered
         return picked
 
     def export(self, device_id, items, fmt, dest, job):
         if self._stop.is_set():
-            return _fail("The app is closing.")
+            return _fail(CLOSING)
         if fmt not in ("dvf", "wav"):
             return _fail(f"Unknown format {fmt!r}.")
         if fmt == "wav" and not audio.available():
@@ -353,8 +722,12 @@ class Api:
         except Exception as e:
             self._busy.release()
             return _fail(f"Could not start the export: {e}")
-        self._thread = thread
+        self._add_worker(thread)
         return {"ok": True, "job": job}
+
+    def _add_worker(self, thread):
+        """Register a started background thread for shutdown() to wait for."""
+        self._workers = [t for t in self._workers if t.is_alive()] + [thread]
 
     def exporting(self):
         return self._busy.locked() and not self._updating
@@ -369,10 +742,16 @@ class Api:
         self._stop.set()
 
     def shutdown(self):
+        """Stop background work and wait for it (an export stops between recordings,
+        a backup finishes the file it is writing), then close the store."""
         self._stop.set()
-        t = self._thread
-        if t is not None and t.is_alive():
-            t.join()
+        with self._backup_lock:                 # no backup worker can start after this
+            pass
+        for t in list(self._workers):
+            if t.is_alive():
+                t.join()
+        if self._store is not None:
+            self._store.close()
 
     def _export(self, device_id, work, fmt, dest, job):
         saved = skipped = 0
@@ -401,6 +780,9 @@ class Api:
                         _, done = save_dvf(dl.dvf, outdir, dl.name)
                     else:
                         wav = audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
+                        wav, problem = self._marked_wav(wav)
+                        if problem:
+                            notes.append(f"{dl.label}: {problem}")
                         _, done = save_wav(wav, outdir, dl.name[:-4] + ".wav")
                         del wav
                 except audio.Cancelled:            # the window was closed during a long decode

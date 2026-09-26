@@ -1,0 +1,419 @@
+"""EVP marks through the Api: recording handles, backups of marked recorder
+recordings, WAV exports that carry the marks, marker import, Save-to."""
+import hashlib
+import io
+import os
+import sys
+import tempfile
+import threading
+import types
+import unittest
+import wave
+from unittest import mock
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from fixtures import DATE, FakeRecorderDevice  # noqa: E402
+from app import backend  # noqa: E402
+from app.devices import DeviceManager  # noqa: E402
+from app.store import AppData  # noqa: E402
+from st25 import wavinfo  # noqa: E402
+from st25.protocol import Recorder  # noqa: E402
+from st25.session import RecorderSession  # noqa: E402
+
+FOLDERS = {1: [(0, 100, 0x1000, 2958, DATE, "Casey"), (1, 900, 0x3000, 4000, DATE, "Casey")]}
+ID = "1-4@7"
+DVF_1 = "001_A_001_Casey_2029_05_23.dvf"
+WAV_1 = "001_A_001_Casey_2029_05_23.wav"
+
+
+def wav_bytes(seed, seconds=1.0, rate=8000):
+    """A small valid PCM WAV whose samples depend on seed."""
+    n = int(seconds * rate)
+    pcm = (hashlib.sha256(seed).digest() * (2 * n // 32 + 1))[:2 * n]
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(pcm)
+    return out.getvalue()
+
+
+def fake_decoder(decode=None):
+    mod = types.ModuleType("st25.lpec")
+    mod.dvf_to_wav = decode or (lambda data, should_stop=None: wav_bytes(data))
+    return mod
+
+
+class FakeServer:
+    """Caches decodes by key like the real AudioServer and fingerprints them."""
+
+    def __init__(self):
+        self.cache = {}
+        self.made = 0
+
+    def prepare(self, key, make=None):
+        if key not in self.cache:
+            wav = make()
+            self.made += 1
+            with wave.open(io.BytesIO(wav)) as w:
+                duration = w.getnframes() / w.getframerate()
+            self.cache[key] = {"url": "http://x/a.wav", "peaks": [0.5], "duration": duration, "rate": 8000,
+                               "fp": wavinfo.wav_fingerprint(io.BytesIO(wav))}
+        return dict(self.cache[key])
+
+    def prepare_file(self, path):
+        with wave.open(path) as w:
+            duration = w.getnframes() / w.getframerate()
+        return {"url": "http://x/f.wav", "peaks": [0.1], "duration": duration, "rate": 8000,
+                "fp": wavinfo.wav_fingerprint(path)}
+
+
+class MarksApiTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = tmp.name
+        self.dest = os.path.join(self.tmp, "save")
+        self.store = AppData(os.path.join(self.tmp, "appdata"))
+        self.addCleanup(self.store.close)
+        self.dev = FakeRecorderDevice(FOLDERS)
+
+        def open_fn(device_id):
+            r = Recorder.__new__(Recorder)
+            r.dev = self.dev
+            s = RecorderSession(r)
+            s.connect()
+            return s
+
+        self.m = DeviceManager(lambda: [ID], open_fn)
+        self.addCleanup(self.m.close)
+        self.sessions = 0
+        real = self.m.with_session
+
+        def counting(device_id, fn):
+            self.sessions += 1
+            return real(device_id, fn)
+        self.m.with_session = counting
+        self.events = []
+        self.event = threading.Event()
+
+        def emit(event, payload):
+            self.events.append((event, payload))
+            if event.startswith("backup-") or event in ("export-done", "export-failed"):
+                self.event.set()
+
+        self.emit = emit
+        self.server = FakeServer()
+        self.decoder = mock.patch.dict(sys.modules, {"st25.lpec": fake_decoder()})
+        self.decoder.start()
+        self.addCleanup(self.decoder.stop)
+        self.api = self.new_api()
+        self.api.devices()
+
+    def new_api(self, store=None, pick_folder=lambda start: None, pick_wav=None):
+        api = backend.Api(self.m, self.emit, pick_folder, self.dest, self.server,
+                          pick_wav=pick_wav, store=store or self.store)
+        self.addCleanup(api.shutdown)
+        return api
+
+    def wait_event(self):
+        self.assertTrue(self.event.wait(5), "no event arrived")
+        self.event.clear()
+        return self.events[-1]
+
+    def load(self, number=1):
+        r = self.api.audio(ID, "A", number)
+        self.assertTrue(r["ok"], r)
+        return r
+
+    # ---- handles and the marks round trip -------------------------------------
+
+    def test_audio_result_carries_a_handle_and_the_marks_state(self):
+        r = self.load()
+        self.assertRegex(r["rec"], r"^[0-9a-f]{16}$")
+        self.assertEqual((r["marks"], r["reviewed"]), ([], False))
+        self.assertEqual(r["backup"], {"status": None, "detail": ""})
+        self.assertIn("fp", r)
+        self.assertNotIn("dvf", str(r.keys()))
+
+    def test_round_trip(self):
+        rec = self.load()["rec"]
+        added = self.api.add_mark(rec, 0.1, 0.4, "A", "a voice")
+        self.assertTrue(added["ok"], added)
+        mark_id = added["mark"]["id"]
+        got = self.api.get_marks(rec)
+        self.assertEqual([(m["id"], m["cls"], m["note"]) for m in got["marks"]], [(mark_id, "A", "a voice")])
+        r = self.api.update_mark(rec, mark_id, cls="B", note="two words", start=0.2, end=0.5)
+        self.assertEqual((r["ok"], r["mark"]["cls"], r["mark"]["start"]), (True, "B", 0.2))
+        self.assertEqual(self.api.set_reviewed(rec, True)["ok"], True)
+        again = self.load()                                   # a new handle sees the same marks
+        self.assertNotEqual(again["rec"], rec)
+        self.assertEqual([m["note"] for m in again["marks"]], ["two words"])
+        self.assertTrue(again["reviewed"])
+        self.assertEqual(self.api.delete_mark(rec, mark_id), {"ok": True, "deleted": True})
+        self.assertEqual(self.api.get_marks(rec)["marks"], [])
+
+    def test_invalid_class_and_unknown_handle_fail_plainly(self):
+        rec = self.load()["rec"]
+        r = self.api.add_mark(rec, 0.1, 0.4, "D", "")
+        self.assertFalse(r["ok"])
+        self.assertIn("Class must be one of A, B, C", r["error"])
+        self.assertEqual(self.api.get_marks(rec)["marks"], [])
+        for bad in ("0123456789abcdef", None, 5):
+            r = self.api.get_marks(bad)
+            self.assertEqual((r["ok"], r["error"]), (False, "Load the recording again."))
+
+    def test_handles_are_bounded(self):
+        first = self.load()["rec"]
+        for _ in range(backend.HANDLES):
+            self.load()
+        self.assertEqual(self.api.get_marks(first)["error"], "Load the recording again.")
+
+    def test_no_store_means_no_marks(self):
+        api = backend.Api(self.m, self.emit, lambda s: None, self.dest, self.server)
+        self.addCleanup(api.shutdown)
+        rec = api.audio(ID, "A", 1)["rec"]
+        r = api.add_mark(rec, 0.1, 0.4, "A", "")
+        self.assertEqual((r["ok"], r["error"]), (False, "Marks are not available here."))
+        self.assertFalse(api.export_marked(rec)["ok"])
+
+    def test_read_only_store_fails_marks_plainly(self):
+        second = AppData(os.path.join(self.tmp, "appdata"))      # the first holds the lock
+        self.addCleanup(second.close)
+        api = self.new_api(store=second)
+        self.assertTrue(api.capabilities()["marks_read_only"])
+        rec = api.audio(ID, "A", 1)["rec"]
+        r = api.add_mark(rec, 0.1, 0.4, "A", "")
+        self.assertFalse(r["ok"])
+        self.assertIn("Another OpenEVP window is open", r["error"])
+        self.assertTrue(api.get_marks(rec)["ok"])                  # reading still works
+
+    def test_capabilities_report_store_problems(self):
+        caps = self.api.capabilities()
+        self.assertEqual((caps["store_problems"], caps["marks_read_only"], caps["marks"]), ([], False, True))
+        api = backend.Api(self.m, self.emit, lambda s: None, self.dest, self.server,
+                          store_problems=["Marks are off: the folder could not be created."])
+        self.addCleanup(api.shutdown)
+        caps = api.capabilities()
+        self.assertEqual(caps["store_problems"], ["Marks are off: the folder could not be created."])
+        self.assertFalse(caps["marks"])
+
+    # ---- backups -------------------------------------------------------------
+
+    def test_first_mark_backs_up_once_with_the_captured_bytes(self):
+        rec = self.load()["rec"]
+        captured = self.api._dvfs[(ID, "A", 1)].dvf
+        sessions = self.sessions
+        self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "hello")["ok"])
+        event, p = self.wait_event()
+        self.assertEqual(event, "backup-done", p)
+        self.assertEqual((p["rec"], p["label"]), (rec, "A-001"))
+        self.assertIn(DVF_1, p["detail"])
+        self.assertNotIn(self.dest, p["detail"])                     # names only, never paths
+        self.assertEqual(self.sessions, sessions)                   # never downloaded again
+        folder = os.path.join(self.dest, "A")
+        self.assertEqual(sorted(os.listdir(folder)), [DVF_1, WAV_1])
+        with open(os.path.join(folder, DVF_1), "rb") as f:
+            self.assertEqual(f.read(), captured)
+        self.assertEqual([m["note"] for m in wavinfo.read_markers(os.path.join(folder, WAV_1))], ["EVP A: hello"])
+        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], "saved")
+        self.assertTrue(self.api.add_mark(rec, 0.5, 0.7, "B", "")["ok"])   # a second mark: no second backup
+        self.api.shutdown()
+        self.assertEqual([e for e, _ in self.events if e.startswith("backup")], ["backup-done"])
+        self.assertEqual(sorted(os.listdir(folder)), [DVF_1, WAV_1])
+
+    def test_file_recordings_are_not_backed_up(self):
+        path = os.path.join(self.tmp, "Hotel", "session.wav")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"file"))
+        api = self.new_api(pick_wav=lambda start: path)
+        rec = api.open_wav()["rec"]
+        r = api.add_mark(rec, 0.1, 0.4, "C", "")
+        self.assertEqual((r["ok"], r["backup_queued"]), (True, False))
+        api.shutdown()
+        self.assertFalse(os.path.exists(self.dest))
+
+    def test_a_missing_capture_is_downloaded_once_and_verified(self):
+        self.load()
+        self.api._dvfs.clear()                           # as if evicted while the decode stays cached
+        rec = self.load()["rec"]                         # served from the (fake) audio server's cache
+        sessions = self.sessions
+        self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
+        event, p = self.wait_event()
+        self.assertEqual(event, "backup-done", p)
+        self.assertEqual(self.sessions, sessions + 1)
+        self.assertIn(DVF_1, os.listdir(os.path.join(self.dest, "A")))
+
+    def test_a_capture_that_no_longer_matches_is_not_backed_up(self):
+        self.load()
+        self.api._dvfs.clear()
+        rec = self.load()["rec"]
+        with mock.patch.dict(sys.modules, {"st25.lpec": fake_decoder(lambda d, should_stop=None: wav_bytes(b"x"))}):
+            self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
+            event, p = self.wait_event()
+        self.assertEqual(event, "backup-failed")
+        self.assertIn("no longer", p["detail"])
+        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], "failed")
+        self.assertFalse(os.path.exists(os.path.join(self.dest, "A", DVF_1)))
+
+    def test_failed_backup_keeps_the_mark_and_retries_on_the_next_mark(self):
+        os.makedirs(self.dest)
+        blocker = os.path.join(self.dest, "A")
+        open(blocker, "w").close()                       # a file where the folder should go
+        rec = self.load()["rec"]
+        self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "first")["ok"])
+        event, p = self.wait_event()
+        self.assertEqual(event, "backup-failed")
+        self.assertIn("A-001", p["detail"])
+        self.assertNotIn(self.tmp, p["detail"])
+        state = self.api.get_marks(rec)
+        self.assertEqual([m["note"] for m in state["marks"]], ["first"])
+        self.assertEqual(state["backup"]["status"], "failed")
+        os.remove(blocker)
+        self.assertTrue(self.api.add_mark(rec, 0.5, 0.7, "B", "")["ok"])
+        self.assertEqual(self.wait_event()[0], "backup-done")
+        self.assertIn(DVF_1, os.listdir(blocker))
+
+    def test_retry_backup(self):
+        os.makedirs(self.dest)
+        blocker = os.path.join(self.dest, "A")
+        open(blocker, "w").close()
+        rec = self.load()["rec"]
+        self.api.add_mark(rec, 0.1, 0.4, "A", "")
+        self.assertEqual(self.wait_event()[0], "backup-failed")
+        os.remove(blocker)
+        self.assertEqual(self.api.retry_backup(rec), {"ok": True, "queued": True})
+        self.assertEqual(self.wait_event()[0], "backup-done")
+        self.assertEqual(self.api.retry_backup(rec), {"ok": True, "queued": False})   # already saved
+
+    def test_wav_copy_failure_is_reported_separately(self):
+        rec = self.load()["rec"]
+        with mock.patch.object(backend, "save_wav", side_effect=OSError(28, "No space left on device",
+                                                                       os.path.join(self.dest, "A", WAV_1))):
+            self.api.add_mark(rec, 0.1, 0.4, "A", "")
+            event, p = self.wait_event()
+        self.assertEqual(event, "backup-done")
+        self.assertIn("WAV copy failed", p["detail"])
+        self.assertIn(WAV_1, p["detail"])
+        self.assertNotIn(self.dest, p["detail"])
+        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], "saved")
+        self.assertEqual(os.listdir(os.path.join(self.dest, "A")), [DVF_1])
+
+    def test_shutdown_joins_the_backup_worker(self):
+        entered, go = threading.Event(), threading.Event()
+        real = backend.save_dvf
+
+        def slow(*a):
+            entered.set()
+            go.wait(5)
+            return real(*a)
+        rec = self.load()["rec"]
+        with mock.patch.object(backend, "save_dvf", slow):
+            self.api.add_mark(rec, 0.1, 0.4, "A", "")
+            self.assertTrue(entered.wait(5))
+            self.assertTrue(self.api.backing_up())
+            self.assertFalse(self.api.install_update()["ok"])
+            closer = threading.Thread(target=self.api.shutdown)
+            closer.start()
+            closer.join(0.3)
+            self.assertTrue(closer.is_alive())                  # waiting for the backup
+            go.set()
+            closer.join(5)
+        self.assertFalse(closer.is_alive())
+        self.assertFalse(self.api.backing_up())
+        self.assertIn(DVF_1, os.listdir(os.path.join(self.dest, "A")))
+        self.assertTrue(self.store._closed)
+
+    # ---- WAV exports --------------------------------------------------------
+
+    def test_wav_export_carries_marks_and_unmarked_has_none(self):
+        rec = self.load()["rec"]
+        self.api.add_mark(rec, 0.1, 0.4, "A", "hello")
+        self.api.add_mark(rec, 0.5, 0.9, "B", "")
+        self.assertEqual(self.wait_event()[0], "backup-done")
+        out = os.path.join(self.tmp, "export")
+        items = [{"folder": "A", "number": 1}, {"folder": "A", "number": 2}]
+        self.assertTrue(self.api.export(ID, items, "wav", out, 1)["ok"])
+        event, p = self.wait_event()
+        self.assertEqual((event, p["saved"], p["notes"]), ("export-done", 2, []))
+        marked = wavinfo.read_markers(os.path.join(out, "A", WAV_1))
+        self.assertEqual([(round(m["start"], 3), round(m["end"], 3), m["note"]) for m in marked],
+                         [(0.1, 0.4, "EVP A: hello"), (0.5, 0.9, "EVP B")])
+        self.assertEqual(wavinfo.read_markers(os.path.join(out, "A", "001_A_002_Casey_2029_05_23.wav")), [])
+        self.api.add_mark(rec, 0.95, 1.0, "C", "")               # different marks: a numbered copy
+        self.api.export(ID, items[:1], "wav", out, 2)
+        event, p = self.wait_event()
+        self.assertEqual((p["saved"], p["skipped"]), (1, 0))
+        self.api.export(ID, items[:1], "wav", out, 3)            # same marks again: already saved
+        event, p = self.wait_event()
+        self.assertEqual((p["saved"], p["skipped"]), (0, 1))
+        self.assertIn("001_A_001_Casey_2029_05_23 (2).wav", os.listdir(os.path.join(out, "A")))
+
+    def test_export_marked_device_and_file(self):
+        rec = self.load()["rec"]
+        self.assertEqual(self.api.export_marked(rec)["ok"], False)          # nothing marked yet
+        self.api.add_mark(rec, 0.1, 0.4, "A", "hi")
+        self.assertEqual(self.wait_event()[0], "backup-done")
+        r = self.api.export_marked(rec)
+        self.assertEqual(r, {"ok": True, "saved": False, "already": True, "name": WAV_1})   # the backup's copy
+        self.api.add_mark(rec, 0.5, 0.6, "B", "")
+        r = self.api.export_marked(rec)
+        self.assertEqual(r, {"ok": True, "saved": True, "already": False,
+                             "name": "001_A_001_Casey_2029_05_23 (2).wav"})
+        self.assertEqual(len(wavinfo.read_markers(os.path.join(self.dest, "A", r["name"]))), 2)
+
+        path = os.path.join(self.tmp, "Old Jail", "cell 3.wav")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"jail"))
+        api = self.new_api(pick_wav=lambda start: path)
+        frec = api.open_wav()["rec"]
+        api.add_mark(frec, 0.2, 0.3, "C", "knock")
+        r = api.export_marked(frec)
+        self.assertEqual(r, {"ok": True, "saved": True, "already": False, "name": "cell 3.wav"})
+        out = os.path.join(self.dest, "Old Jail", "cell 3.wav")
+        self.assertEqual([m["note"] for m in wavinfo.read_markers(out)], ["EVP C: knock"])
+        self.assertEqual(wavinfo.read_markers(path), [])                    # the user's file is untouched
+        with open(path, "wb") as f:                                          # changed since it was loaded
+            f.write(wav_bytes(b"other"))
+        r = api.export_marked(frec)
+        self.assertFalse(r["ok"])
+        self.assertIn("cell 3.wav", r["error"])
+        self.assertNotIn(self.tmp, r["error"])
+
+    # ---- import of embedded markers ------------------------------------------
+
+    def test_open_wav_imports_embedded_markers_once(self):
+        path = os.path.join(self.tmp, "marked.wav")
+        with open(path, "wb") as f:
+            f.write(wavinfo.with_markers(wav_bytes(b"m"), [
+                {"start": 0.1, "end": 0.3, "cls": "A", "note": "yes"},
+                {"start": 0.5, "end": 0.6, "cls": "B", "note": ""}]))
+        api = self.new_api(pick_wav=lambda start: path)
+        r = api.open_wav()
+        self.assertEqual((r["ok"], r["name"], r["imported"]), (True, "marked.wav", 2))
+        self.assertEqual([(m["cls"], m["note"]) for m in r["marks"]], [("A", "yes"), ("B", "")])
+        for m in r["marks"]:
+            api.delete_mark(r["rec"], m["id"])
+        r = api.open_wav()
+        self.assertEqual((r["imported"], r["marks"]), (0, []))           # never imported again
+
+    # ---- Save-to ----------------------------------------------------------------
+
+    def test_save_to_persists(self):
+        chosen = os.path.join(self.tmp, "Investigations")
+        os.mkdir(chosen)
+        api = self.new_api(pick_folder=lambda start: chosen)
+        self.assertEqual(api.choose_destination(), chosen)
+        self.store.close()
+        store = AppData(os.path.join(self.tmp, "appdata"))
+        self.addCleanup(store.close)
+        self.assertEqual(self.new_api(store=store).default_destination(), chosen)
+        os.rmdir(chosen)                                               # gone: back to the default
+        self.assertEqual(self.new_api(store=store).default_destination(), self.dest)
+
+
+if __name__ == "__main__":
+    unittest.main()

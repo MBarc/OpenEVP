@@ -22,8 +22,10 @@ class FakeAudioServer:
     def __init__(self):
         self.prepared = []
 
-    def prepare(self, key):
+    def prepare(self, key, make=None):
         self.prepared.append(key)
+        if make is not None:
+            make()
         return {"url": f"http://x/{key[1]}{key[2]}.wav", "peaks": [0.5], "duration": 1.0}
 
 
@@ -103,8 +105,10 @@ class BackendTests(unittest.TestCase):
         def api_with(pick):
             return backend.Api(self.m, self.events.append, lambda: None, "DEST", Server(), pick_wav=pick)
 
-        self.assertEqual(api_with(lambda start: r"C:\rec\dr60.wav").open_wav(),
-                         {"ok": True, "name": "dr60.wav", "url": "http://x/f.wav", "peaks": [0.1], "duration": 2.0})
+        r = api_with(lambda start: r"C:\rec\dr60.wav").open_wav()
+        self.assertRegex(r.pop("rec"), r"^[0-9a-f]{16}$")
+        self.assertEqual(r, {"ok": True, "name": "dr60.wav", "url": "http://x/f.wav", "peaks": [0.1], "duration": 2.0,
+                             "imported": 0, "marks": [], "reviewed": False, "backup": {"status": None, "detail": ""}})
         self.assertEqual(api_with(lambda start: None).open_wav(), {"ok": False, "cancelled": True})
         r = api_with(lambda start: r"C:\rec\bad.wav").open_wav()
         self.assertFalse(r["ok"])
@@ -209,8 +213,10 @@ class BackendTests(unittest.TestCase):
             self.api.export(ID, [{"folder": "A", "number": 1}], "wav", d, 1)
             self.assertEqual(self.wait()[0], "export-done")
             self.assertEqual(os.listdir(os.path.join(d, "A")), ["001_A_001_Casey_2029_05_23.wav"])
-            self.assertEqual(self.api.audio(ID, "A", 1),
-                             {"ok": True, "url": "http://x/A1.wav", "peaks": [0.5], "duration": 1.0})
+            r = self.api.audio(ID, "A", 1)
+            self.assertRegex(r.pop("rec"), r"^[0-9a-f]{16}$")
+            self.assertEqual(r, {"ok": True, "url": "http://x/A1.wav", "peaks": [0.5], "duration": 1.0,
+                                 "marks": [], "reviewed": False, "backup": {"status": None, "detail": ""}})
             self.assertEqual(self.server.prepared, [(ID, "A", 1)])
             self.assertEqual(backend.recording_wav(self.m, (ID, "A", 1))[:4], b"RIFF")
 

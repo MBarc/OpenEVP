@@ -107,5 +107,9 @@ def save_dvf(data, outdir, name):
 
 
 def save_wav(wav, outdir, name):
-    """Save a WAV unless an identical file is already there. Returns (path, already_saved)."""
+    """Save a WAV unless an identical file is already there. Returns (path, already_saved).
+
+    Identical means byte-identical: the same audio with different EVP markers is a
+    different file and gets a numbered name, so re-exporting after the marks
+    changed never silently keeps the old marks."""
     return save_unique(wav, outdir, name, lambda existing: existing == wav)

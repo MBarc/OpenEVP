@@ -19,6 +19,7 @@ from .backend import Api, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
 from .pnp import needs_setup, present_instances
+from .store import AppData
 
 WEBVIEW2 = ("OpenEVP needs the Microsoft Edge WebView2 Runtime, which is part of "
             "Windows 11 and most Windows 10 PCs. Install it from "
@@ -97,6 +98,27 @@ def _hand_over(running):
         raise updater.UpdateError("another OpenEVP window is open; close it, then update")
 
 
+def _open_store():
+    """(AppData or None, [problem]): the app's own data folder (%APPDATA%\\OpenEVP).
+    If it cannot be created the app still runs, without EVP marks, and says why."""
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    try:
+        return AppData(os.path.join(base, "OpenEVP")), []
+    except OSError as e:
+        return None, [f"EVP marks are off: OpenEVP could not create its data folder ({e.strerror or e})."]
+
+
+def _close_question(exporting, backing_up):
+    """(title, text) for the close prompt while work is still running, or None."""
+    backup = "A backup of a marked recording is still being saved; it finishes before the app closes."
+    if exporting:
+        text = "An export is still running. Stop it after the current recording and close?"
+        return "Export in progress", f"{text} {backup}" if backing_up else text
+    if backing_up:
+        return "Backup in progress", f"{backup} Close?"
+    return None
+
+
 def _own_taskbar_identity():
     """Group the window under OpenEVP (with its icon) in the taskbar, not under
     python.exe when running from source."""
@@ -114,6 +136,7 @@ def main():
     manager = None
     server = None
     api = None
+    store = None
     try:
         # A playback decode stops early (audio.Cancelled) once the app is closing.
         server = AudioServer(lambda key: recording_wav(
@@ -148,13 +171,14 @@ def main():
             window.destroy()
 
         default_dest, _warning = default_output()      # Documents\OpenEVP; created by the first export
+        store, store_problems = _open_store()           # the remembered Save-to folder replaces default_dest
         frozen = getattr(sys, "frozen", False)
         if frozen:
             updater.clean_old_downloads()
         api = Api(manager, emit, pick_folder, default_dest, server,
                   driver_setup=set_up_driver if sys.platform == "win32" else None, pick_wav=pick_wav,
                   updater=updater, quit_app=quit_for_update, can_install=frozen and sys.platform == "win32",
-                  before_install=lambda: _hand_over(running))
+                  before_install=lambda: _hand_over(running), store=store, store_problems=store_problems)
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
         window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,
@@ -169,10 +193,9 @@ def main():
                 if proceed:
                     api.request_stop()
                 return proceed
-            if api.exporting():
-                proceed = window.create_confirmation_dialog(
-                    "Export in progress",
-                    "An export is still running. Stop it after the current recording and close?")
+            question = _close_question(api.exporting(), api.backing_up())
+            if question:
+                proceed = window.create_confirmation_dialog(*question)
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the
                     # api.shutdown() after it) may not return for a while yet.
@@ -189,7 +212,9 @@ def main():
             _fatal(f"{WEBVIEW2}\n\n({e})")
     finally:
         if api is not None:
-            api.shutdown()
+            api.shutdown()                              # joins the workers, then closes the store
+        elif store is not None:
+            store.close()
         if server is not None:
             server.stop()
         if manager is not None:
