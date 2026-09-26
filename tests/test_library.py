@@ -87,7 +87,7 @@ class FakeServer:
         with wave.open(path) as w:
             duration = w.getnframes() / w.getframerate()
         return {"url": "http://x/f.wav", "peaks": [0.1], "duration": duration,
-                "fp": wavinfo.wav_fingerprint(path)}
+                "fp": wavinfo.wav_fingerprint(path), "stat": (os.stat(path).st_size, os.stat(path).st_mtime_ns)}
 
     def prepare(self, key, make=None):
         wav = make()

@@ -226,6 +226,36 @@ class PickedFileTests(unittest.TestCase):
                     f.write("hello")
                 s.prepare_file(bad)
 
+    def test_a_file_changed_on_disk_is_refused_not_served_under_the_old_handle(self):
+        with tempfile.TemporaryDirectory() as cache, tempfile.TemporaryDirectory() as mine:
+            s = AudioServer(lambda key: WAV, cache)
+            s.start()
+            self.addCleanup(s.stop)
+            p = os.path.join(mine, "take.wav")
+            pcm_wav(p, 2, 1, 4800)
+            info = s.prepare_file(p)
+            st = os.stat(p)
+            self.assertEqual(info["stat"], (st.st_size, st.st_mtime_ns))
+            self.assertEqual(urllib.request.urlopen(info["url"], timeout=5).status, 200)
+            pcm_wav(p, 2, 1, 9600)                                   # another recording at the same path
+            os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(info["url"], timeout=5)
+            self.assertEqual(cm.exception.code, 409)
+            cm.exception.close()
+            # Same size, only the time changed (an in-place edit): refused as well.
+            pcm_wav(p, 2, 1, 4800)
+            info = s.prepare_file(p)
+            os.utime(p, ns=(st.st_atime_ns, os.stat(p).st_mtime_ns + 10**9))
+            with self.assertRaises(urllib.error.HTTPError) as cm:
+                urllib.request.urlopen(info["url"], timeout=5)
+            self.assertEqual(cm.exception.code, 409)
+            cm.exception.close()
+            # Loading it again gives a new handle for the new version, which plays.
+            again = s.prepare_file(p)
+            self.assertNotEqual(again["url"], info["url"])
+            self.assertEqual(urllib.request.urlopen(again["url"], timeout=5).status, 200)
+
 
 if __name__ == "__main__":
     unittest.main()

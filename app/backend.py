@@ -135,6 +135,11 @@ DVF_MAX_BYTES = 512 << 20   # far beyond any ICD-ST25 recording (~200 hours of L
 SESSION_CACHE = 20000       # fingerprints kept in memory while the store is read-only
 
 
+def _stat_of(st):
+    """(size, mtime_ns) of an os.stat result: one version of a file on disk."""
+    return st.st_size, st.st_mtime_ns
+
+
 def _file_id(path):
     """The opaque id the page uses for a file on disk (never its path)."""
     return hashlib.sha1(os.path.normcase(path).encode("utf-8", "surrogatepass")).hexdigest()[:16]
@@ -681,21 +686,43 @@ class Api:
         return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path),
                 "folder_name": folder_name}
 
-    def _import_markers(self, path, info, name):
+    def _import_markers(self, path, info, name, stat):
         """Import a WAV's embedded markers, once per recording (the store decides:
-        never when it was imported before or already has marks). Returns the count."""
+        never when it was imported before or already has marks). Returns the count.
+        stat is the (size, mtime_ns) of the file when info["fp"] was computed: the
+        markers are read only from that same version of the file, never from one
+        that was replaced or edited since (they would land on the wrong recording)."""
         fp = info.get("fp")
-        if self._store is None or not fp or self._store.read_only:
+        if self._store is None or not fp or self._store.read_only or stat is None:
             return 0
         try:
             if self._store.is_imported(fp):     # import_marks refuses (and flags) a marked one
                 return 0
-            found = wavinfo.read_markers(path)
+            with open(path, "rb") as f:
+                if _stat_of(os.fstat(f.fileno())) != tuple(stat):
+                    return 0
+                found = wavinfo.read_markers(f)
+                if _stat_of(os.fstat(f.fileno())) != tuple(stat):
+                    return 0
             if not found:
                 return 0
             return self._store.import_marks(fp, found, name, info.get("duration"))
-        except (StoreReadOnly, StoreUnavailable, ValueError):
+        except (StoreReadOnly, StoreUnavailable, ValueError, OSError):
             return 0
+
+    def recording_changed(self, rec):
+        """Is a loaded file no longer the version that was fingerprinted (edited,
+        replaced or removed)? The page asks when the player fails to load it."""
+        entry = self._entry(rec)
+        if entry is None:
+            return {"ok": True, "changed": False}
+        src = entry["source"]
+        if src.get("kind") != "file" or src.get("stat") is None:
+            return {"ok": True, "changed": False}
+        try:
+            return {"ok": True, "changed": _stat_of(os.stat(src["path"])) != tuple(src["stat"])}
+        except OSError:
+            return {"ok": True, "changed": True}
 
     def default_destination(self):
         return self._dest
@@ -719,7 +746,8 @@ class Api:
         try:
             if name.lower().endswith(".wav"):
                 info = self._server.prepare_file(path)
-                imported = self._import_markers(path, info, name)
+                source["stat"] = info.pop("stat", None)
+                imported = self._import_markers(path, info, name, source["stat"])
                 return self._loaded(info, name, name, source, {"name": name, "imported": imported})
             if not audio.available():
                 return _fail(f"Playing .dvf files: {audio.status()}.")
@@ -749,8 +777,10 @@ class Api:
         except (OSError, ValueError) as e:
             return _fail(f"Could not open {os.path.basename(path)}: {_plain(e)}")
         name = os.path.basename(path)
-        imported = self._import_markers(path, info, name)
-        return self._loaded(info, name, name, {"kind": "file", "path": path}, {"name": name, "imported": imported})
+        stat = info.pop("stat", None)
+        imported = self._import_markers(path, info, name, stat)
+        return self._loaded(info, name, name, {"kind": "file", "path": path, "stat": stat},
+                            {"name": name, "imported": imported})
 
     # ---- the EVP library (a folder of recordings, fingerprinted in the background) ----
     def _library_path(self):
@@ -1000,7 +1030,7 @@ class Api:
         seconds = round(length, 1) if length else _seconds(path, kind)
         stored = cacheable and self._remember_fp(path, size, mtime_ns, fp, seconds, error)
         if kind == "wav" and fp and length:     # an empty WAV gets no marks (no identity of its own)
-            self._import_markers(path, {"fp": fp, "duration": length}, name)
+            self._import_markers(path, {"fp": fp, "duration": length}, name, (size, mtime_ns))
         return {"fp": fp, "seconds": seconds, "error": error, **self._fp_marks(fp)}, stored
 
     def _fp_marks(self, fp):

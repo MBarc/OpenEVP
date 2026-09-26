@@ -66,7 +66,7 @@ class FakeServer:
         with wave.open(path) as w:
             duration = w.getnframes() / w.getframerate()
         return {"url": "http://x/f.wav", "peaks": [0.1], "duration": duration, "rate": 8000,
-                "fp": wavinfo.wav_fingerprint(path)}
+                "fp": wavinfo.wav_fingerprint(path), "stat": (os.stat(path).st_size, os.stat(path).st_mtime_ns)}
 
 
 class MarksApiTests(unittest.TestCase):
@@ -645,7 +645,7 @@ class MarksApiTests(unittest.TestCase):
         for path in (backup_wav, export_wav):
             self.assertTrue(wavinfo.read_markers(path))                # the files do carry markers
             info = self.server.prepare_file(path)
-            self.assertEqual(self.api._import_markers(path, info, os.path.basename(path)), 0)
+            self.assertEqual(self.api._import_markers(path, info, os.path.basename(path), info["stat"]), 0)
             api = self.new_api(pick_wav=lambda start, p=path: p)
             r = api.open_wav()
             self.assertEqual((r["imported"], r["marks"]), (0, []))
@@ -666,6 +666,39 @@ class MarksApiTests(unittest.TestCase):
             api.delete_mark(r["rec"], m["id"])
         r = api.open_wav()
         self.assertEqual((r["imported"], r["marks"]), (0, []))           # never imported again
+
+    def test_markers_are_imported_only_from_the_version_that_was_fingerprinted(self):
+        path = os.path.join(self.tmp, "take.wav")
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"x"))
+        info = self.server.prepare_file(path)                             # fingerprinted: no markers yet
+        stat = info.pop("stat")
+        # Replaced before the import reads it: a marked file of the same name.
+        with open(path, "wb") as f:
+            f.write(wavinfo.with_markers(wav_bytes(b"y"), [{"start": 0.1, "end": 0.3, "cls": "A", "note": "no"}]))
+        os.utime(path, ns=(stat[1], stat[1] + 10**9))
+        self.assertEqual(self.api._import_markers(path, info, "take.wav", stat), 0)
+        self.assertEqual(self.store.marks(info["fp"]), [])
+        self.assertEqual(self.api._import_markers(path, info, "take.wav", None), 0)   # unknown version: never
+        # The same version as fingerprinted imports.
+        fresh = self.server.prepare_file(path)
+        self.assertEqual(self.api._import_markers(path, fresh, "take.wav", fresh["stat"]), 1)
+
+    def test_recording_changed_reports_a_file_edited_after_loading(self):
+        path = os.path.join(self.tmp, "take.wav")
+        with open(path, "wb") as f:
+            f.write(wav_bytes(b"x"))
+        api = self.new_api(pick_wav=lambda start: path)
+        r = api.open_wav()
+        self.assertNotIn("stat", r)                                         # never sent to the page
+        self.assertEqual(api.recording_changed(r["rec"]), {"ok": True, "changed": False})
+        st = os.stat(path)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        self.assertEqual(api.recording_changed(r["rec"]), {"ok": True, "changed": True})
+        os.remove(path)
+        self.assertEqual(api.recording_changed(r["rec"]), {"ok": True, "changed": True})
+        self.assertEqual(self.api.recording_changed(self.load()["rec"]), {"ok": True, "changed": False})
+        self.assertEqual(api.recording_changed("nope"), {"ok": True, "changed": False})
 
     # ---- Save-to ----------------------------------------------------------------
 

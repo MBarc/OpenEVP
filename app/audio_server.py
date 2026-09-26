@@ -8,7 +8,11 @@ decode a whole file just to draw it.
 
 prepare_file() does the same for a WAV file the user picked (for example from a
 recorder that writes WAV itself): it is served from where it is, never copied or
-deleted, and only files registered this way can be reached.
+deleted, and only files registered this way can be reached. The file's size and
+modification time are recorded when it is fingerprinted; if either differs when
+the player asks for audio, the request is refused (409), so the player never gets
+different audio under a handle whose marks belong to the fingerprinted audio.
+The file is not copied to snapshot it: WAVs can be gigabytes.
 """
 import hashlib
 import io
@@ -81,6 +85,11 @@ def _analyze(f):
         return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
 
 
+def _stat_of(st):
+    """(size, mtime_ns): what identifies one version of a file served in place."""
+    return st.st_size, st.st_mtime_ns
+
+
 class AudioServer:
     def __init__(self, provider, cache_dir, max_bytes=1 << 30):
         self._provider = provider            # (device_id, letter, number) -> WAV bytes
@@ -142,25 +151,30 @@ class AudioServer:
 
     def prepare_file(self, path):
         """Register a WAV file the user picked; returns {"url", "peaks", "duration",
-        "rate", "fp"} (fp None for a WAV with no samples). Raises ValueError for a
-        file that is not a playable PCM WAV."""
+        "rate", "fp", "stat"} (fp None for a WAV with no samples; stat is the
+        (size, mtime_ns) the fingerprint belongs to, for the caller's own checks --
+        not for the page). Raises ValueError for a file that is not a playable PCM
+        WAV, or that changed while it was being read."""
         path = os.path.abspath(path)
-        st = os.stat(path)
-        key = ("file", os.path.normcase(path), st.st_size, st.st_mtime_ns)
-        with self._lock:
-            e = self._entries.get(key)
-            if e is not None:
-                self._entries.move_to_end(key)
-                return self._info(e)
         with open(path, "rb") as f:
+            stat = _stat_of(os.fstat(f.fileno()))
+            key = ("file", os.path.normcase(path), *stat)
+            with self._lock:
+                e = self._entries.get(key)
+                if e is not None:
+                    self._entries.move_to_end(key)
+                    return {**self._info(e), "stat": e["stat"]}
             peaks, duration, rate, fp = _analyze(f)
+            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
+                raise ValueError("the file changed while it was being read; try again")
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "fp": fp, "path": path}
+                                  "fp": fp, "path": path, "stat": stat}
             self._by_file[file_id] = key
-        return self._info(self._entries[key])
+            e = self._entries[key]
+        return {**self._info(e), "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
@@ -208,7 +222,12 @@ class AudioServer:
             h.send_error(404)
             return
         with f:
-            size = os.fstat(f.fileno()).st_size
+            st = os.fstat(f.fileno())
+            if "stat" in entry and _stat_of(st) != entry["stat"]:
+                # Not the audio that was fingerprinted (and marked): the page must load it again.
+                h.send_error(409, "The file changed on disk")
+                return
+            size = st.st_size
             start, end, status = 0, size - 1, 200
             r = _RANGE.match(h.headers.get("Range", ""))
             if r and (r.group(1) or r.group(2)):

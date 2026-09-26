@@ -159,11 +159,16 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   const zoom = $("zoom");
   zoom.max = full ? Math.min(r.rate, 8000) : 400;   // px per second; at 8000 one pixel is one ST25 sample
   if (Number(zoom.value) > Number(zoom.max)) zoom.value = zoom.max;
-  if (full) {
-    S.ws.setOptions({ sampleRate: r.rate });
-    await S.ws.load(r.url);
-  } else {
-    await S.ws.load(r.url, [r.peaks], r.duration);
+  try {
+    if (full) {
+      S.ws.setOptions({ sampleRate: r.rate });
+      await S.ws.load(r.url);
+    } else {
+      await S.ws.load(r.url, [r.peaks], r.duration);
+    }
+  } catch (e) {                                   // already reported by the "error" handler
+    if (seq === S.playSeq) status("");
+    return;
   }
   if (seq !== S.playSeq) return;
   status("");
@@ -748,7 +753,7 @@ function setupPlayer() {
   S.ws.on("timeupdate", tick);
   S.ws.on("play", () => { $("play").textContent = "❚❚"; });
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
-  S.ws.on("error", (e) => { banner(`Could not play this recording: ${e}`); $("play").disabled = true; });
+  S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
   $("zoom").oninput = () => S.ws.zoom(Number($("zoom").value));
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
@@ -757,6 +762,16 @@ function setupPlayer() {
   setupMarks();
   $("open-wav").onclick = openWav;
   $("open-wav-2").onclick = openWav;
+}
+
+// The player could not load (or keep streaming) the current recording. A file served in place
+// is refused once it changes on disk (its marks belong to the version that was loaded).
+async function audioFailed(e) {
+  const cur = S.current;
+  banner(`Could not play this recording: ${(e && e.message) || e || "unknown error"}`);
+  if (!cur) return;
+  const r = await api().recording_changed(cur.rec);
+  if (S.current === cur && r.ok && r.changed) banner("This file changed on disk. Open it again.");
 }
 
 // Mouse wheel over the waveform zooms in and out, keeping the spot under the pointer in place.
