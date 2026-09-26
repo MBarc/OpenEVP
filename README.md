@@ -99,6 +99,58 @@ If a transfer is interrupted, the recorder gives up on it and keeps answering
 "busy". **Unplug the USB cable, wait a few seconds, plug it back in**, and try
 again. Recordings already saved are skipped.
 
+## Marking EVPs
+
+While a recording is loaded in the player at the bottom of the window:
+
+1. Drag across the waveform to select the part you want to mark.
+2. Press **M** (or click **★ Mark EVP**).
+3. Pick a class — **A**: clear, anyone hears the words; **B**: fairly clear,
+   most people agree on the words; **C**: faint, hard to make out — type a
+   note on what you hear, and click **Save**.
+
+The mark appears as a colored band on the waveform and in the list below it,
+where you can play it (▶), edit its class or note (✎), delete it (✕), or drag
+its edges to adjust it. Click a note to edit it in place. Marks save
+themselves as you make them.
+
+Tick **Reviewed** once you've listened all the way through a recording.
+
+A mark belongs to the recording's audio, not to one file: if the same audio
+exists as a `.dvf` and a WAV, or has been saved more than once, marking it
+anywhere marks it everywhere.
+
+## EVP Library
+
+Click **EVP Library** in the sidebar for every recording saved to disk
+(default: the Save-to folder above; click its name to point it elsewhere,
+such as a shared drive). Copies of the same recording — a `.dvf` and its WAV,
+or a WAV saved twice — are grouped into one row, showing its investigation
+(the subfolder it came from), type, length, how many class A/B/C EVPs it
+has, and whether it's been reviewed. Click a row to play it, the triangle to
+see its marks, or a mark to jump straight to it. Filter with the **All / Has
+EVPs / A / B / C / Not reviewed** buttons above the list, or search by name
+or note.
+
+**Backups.** The first time you mark a recording still on the recorder,
+OpenEVP saves a copy of it (the `.dvf`, and a WAV if conversion is available)
+to the Save-to folder in the background, so the mark isn't lost if the
+recorder is later wiped. A line under the marks list shows when it's done,
+or offers **Retry backup** if it failed.
+
+**Export WAV with marks** saves a WAV copy of the loaded recording, with its
+marks written in, to the Save-to folder. Those marks are standard RIFF
+`cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
+read (none has been verified with OpenEVP yet).
+
+### Where marks live
+
+Marks and settings (including the library folder) are stored on this PC in
+`%APPDATA%\OpenEVP\`: `marks.json`, `settings.json`, and `index.json` (an
+internal cache of files already checked). Only one OpenEVP window writes at a
+time — a second one open at the same time can still browse and play, but
+can't add, edit or delete marks (it says so) until the first is closed.
+
 ## Limits
 
 - **Verified** natively on Linux against one ICD-ST25: 20 LP-mode recordings in
