@@ -135,7 +135,8 @@ class AnalyzeTests(unittest.TestCase):
                 p = os.path.join(d, f"w{width}c{channels}.wav")
                 pcm_wav(p, width, channels, 9000)
                 with open(p, "rb") as f:
-                    peaks, duration = audio_server._analyze(f)
+                    peaks, duration, rate = audio_server._analyze(f)
+                self.assertEqual(rate, 48000)
                 self.assertAlmostEqual(duration, 9000 / 48000)
                 self.assertAlmostEqual(max(peaks), 0.5 if channels == 2 else 0.25, places=2)
 

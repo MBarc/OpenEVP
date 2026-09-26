@@ -53,7 +53,7 @@ def _analyze(f):
         if width not in (1, 2, 3, 4):
             raise ValueError(f"unsupported sample size ({8 * width} bit)")
         if not n or not rate:
-            return [], 0.0
+            return [], 0.0, rate
         count = min(MAX_PEAKS, n, max(1, -(-n * PEAKS_PER_SECOND // rate)))
         per = -(-n // count)                                  # frames per peak (ceil)
         chunk = per * max(1, CHUNK_BYTES // (per * ch * width))  # whole peaks per chunk
@@ -65,7 +65,7 @@ def _analyze(f):
                 break
             mags = np.abs(_samples(data, width).reshape(-1, ch)).max(axis=1)
             peaks.extend((np.maximum.reduceat(mags, np.arange(0, len(mags), per)) / full).tolist())
-        return [round(min(p, 1.0), 4) for p in peaks], n / rate
+        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate
 
 
 class AudioServer:
@@ -110,18 +110,19 @@ class AudioServer:
                 e = self._entries.get(key)
                 if e is not None:
                     self._entries.move_to_end(key)
-                    return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"]}
+                    return self._info(e)
             try:
                 wav = make() if make else self._provider(key)
-                peaks, duration = _analyze(io.BytesIO(wav))
+                peaks, duration, rate = _analyze(io.BytesIO(wav))
                 file_id = secrets.token_hex(8)
                 with open(os.path.join(self._dir, file_id + ".wav"), "wb") as f:
                     f.write(wav)
                 with self._lock:
-                    self._entries[key] = {"file": file_id, "size": len(wav), "peaks": peaks, "duration": duration}
+                    self._entries[key] = {"file": file_id, "size": len(wav), "peaks": peaks, "duration": duration,
+                                          "rate": rate}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
-                return {"url": self._url(file_id), "peaks": peaks, "duration": duration}
+                return self._info(self._entries[key])
             finally:
                 with self._lock:
                     self._inflight.pop(key, None)
@@ -136,15 +137,21 @@ class AudioServer:
             e = self._entries.get(key)
             if e is not None:
                 self._entries.move_to_end(key)
-                return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"]}
+                return self._info(e)
         with open(path, "rb") as f:
-            peaks, duration = _analyze(f)
+            peaks, duration, rate = _analyze(f)
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
-            self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "path": path}
+            self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
+                                  "path": path}
             self._by_file[file_id] = key
-        return {"url": self._url(file_id), "peaks": peaks, "duration": duration}
+        return self._info(self._entries[key])
+
+    def _info(self, e):
+        """What the player needs: the URL, peaks for a quick first drawing, the
+        duration, and the sample rate (short files are then drawn from the audio itself)."""
+        return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"]}
 
     def forget(self, device_id):
         with self._lock:

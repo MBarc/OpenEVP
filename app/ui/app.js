@@ -131,10 +131,24 @@ function showPlayerLoaded(label) {
 
 // Load a prepared audio {url, peaks, duration} into the player. Precomputed peaks and the
 // duration let wavesurfer draw at once and stream the audio instead of decoding it all.
+// Recordings up to this many samples are drawn from the audio itself (every
+// sample, both halves of the wave), so zooming in shows real detail; longer
+// ones use the server's peaks (400 per second), which keeps memory in check.
+const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;          // 30 minutes of ST25 audio
+
 async function loadIntoPlayer(seq, label, r, autoplay) {
   showPlayerLoaded(label);
   clearSelection();
-  await S.ws.load(r.url, [r.peaks], r.duration);
+  const full = r.rate && r.duration * r.rate <= FULL_DETAIL_SAMPLES;
+  const zoom = $("zoom");
+  zoom.max = full ? Math.min(r.rate, 8000) : 400;   // px per second; at 8000 one pixel is one ST25 sample
+  if (Number(zoom.value) > Number(zoom.max)) zoom.value = zoom.max;
+  if (full) {
+    S.ws.setOptions({ sampleRate: r.rate });
+    await S.ws.load(r.url);
+  } else {
+    await S.ws.load(r.url, [r.peaks], r.duration);
+  }
   if (seq !== S.playSeq) return;
   status("");
   if (autoplay) S.ws.play();
