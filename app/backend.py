@@ -371,7 +371,8 @@ class Api(LibraryOps):
         """What this app can do. wav / wav_status: whether the recorders' native
         formats can be converted to WAV (played, marked), and why not, or a
         slow-mode warning. formats: per library file type ("dvf", "wav"...),
-        whether it can be played and why not. Store problems (a damaged marks
+        whether it can be played and why not. models: the names of the recorder
+        models OpenEVP can read (for "plug in a supported recorder"). Store problems (a damaged marks
         file set aside, a second window) are reported here, once, for the page
         to show."""
         store = self._store
@@ -390,6 +391,7 @@ class Api(LibraryOps):
             problem = _decoder_problem(f)
             kinds[f.ext[1:]] = {"label": f.label, "playable": problem is None, "reason": problem}
         return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
+                "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
                 "store_problems": self._store_problems + (store.problems() if store is not None else [])}
 

@@ -145,7 +145,7 @@ level. Folders can nest as deep as you like. Turn on **All recordings** to
 switch to a flat, filterable list of every recording in the library
 instead, with no folders.
 
-**New investigation** creates a folder inside the one you're viewing, with
+**New folder** creates a folder inside the one you're viewing, with
 the name box left empty (the investigation may have been days ago) — type a
 name and click Create. Select a folder to **Rename** it, or **Delete** it.
 Delete asks first, listing what's inside: how many recordings and how many
@@ -161,6 +161,11 @@ Bin's size, when the folder is bigger than that — and says to use File
 Explorer instead. If Windows still finds it can't recycle something, it asks
 before deleting anything for good. If a file in the folder is in use, what
 could be recycled is, the rest stays where it was, and OpenEVP says so.
+
+Right-click in the library for the same tools: on an empty part of the list,
+**New folder**; on a folder, **Open**, **Rename** or **Delete**; on a recording,
+**Play** or **Move to…** (all the ticked recordings, if you right-click a
+ticked one).
 
 A second OpenEVP window can't create, rename, delete or move anything in the
 library, and can't export; do those in the first window.

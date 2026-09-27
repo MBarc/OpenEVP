@@ -179,6 +179,17 @@ class BackendTests(unittest.TestCase):
             self.assertTrue(self.api.export(ID, [{"folder": "A", "number": 1}], "dvf", d, 3)["ok"])
             self.assertEqual(self.wait()[0], "export-done")
 
+    def test_capabilities_name_the_supported_models(self):
+        """The page's "plug in a supported recorder (...)" comes from the registry: a model
+        added there shows up by itself; one OpenEVP cannot read yet is not named."""
+        from openevp import recorders
+        models = self.api.capabilities()["models"]
+        self.assertEqual(models, [m.name for m in recorders.supported()])
+        self.assertIn("Sony ICD-ST25", models)
+        unsupported = [m.name for m in recorders.models() if not m.supported]
+        self.assertTrue(unsupported)
+        self.assertFalse(set(unsupported) & set(models))
+
     def test_wav_needs_decoder(self):
         with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             caps = self.api.capabilities()

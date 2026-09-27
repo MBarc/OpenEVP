@@ -140,6 +140,13 @@ async function poll() {
   }
 }
 
+// "Plug in a supported recorder (Sony ICD-ST25)": the models from capabilities(), so a new model
+// shows up here by itself.
+function plugIn() {
+  const names = Array.isArray(S.caps.models) ? S.caps.models.filter((n) => typeof n === "string" && n) : [];
+  return names.length ? `Plug in a supported recorder (${names.join(", ")})` : "Plug in a supported recorder";
+}
+
 function deviceLabel(d, i) {
   if (d.state === "needs_driver" && !d.port) return `${d.model} — needs setup`;
   // d.port is the model's own display location ("port 1-4" for an ST25), shown as is.
@@ -216,7 +223,10 @@ function renderDevices() {
     leaveDevice(); banner("The recorder was unplugged.");
   }
   if (!S.devices.length) {
-    nav.innerHTML = '<p class="muted">No recorder connected. Plug in an ICD-ST25.</p>';
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = `No recorder connected. ${plugIn()}.`;
+    nav.appendChild(p);
     return;
   }
   S.devices.forEach((d, i) => {
@@ -532,7 +542,7 @@ function renderLibrary() {
   if (!L.listed) empty.textContent = "Loading…";
   else if (L.problem) empty.textContent = L.problem;
   else if (!L.exists) empty.textContent = `${L.folder} does not exist yet. Export recordings from a recorder, or choose another library folder above.`;
-  else if (!L.files.length && (L.flat || L.folders.length <= 1)) empty.textContent = `No .dvf or WAV files in ${L.folder} yet.`;
+  else if (!L.files.length && (L.flat || L.folders.length <= 1)) empty.textContent = `No recordings in ${L.folder} yet.`;
   else if (L.flat || libraryFiltering()) empty.textContent = "No recordings match.";
   else empty.textContent = "This folder is empty. Drag recordings here or use Move to…";
 }
@@ -765,15 +775,23 @@ function renderLibraryBar() {
   st.title = L.indexing ? "" : L.checkError;
   $("library-flat").checked = L.flat;
   // The folder tools: New / Rename / Delete in the folder view, Move to… in both views.
-  const ready = L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op;
   for (const id of ["library-new", "library-rename", "library-delete"]) $(id).hidden = L.flat;
-  $("library-new").disabled = !ready || !L.folderById.has(L.folderId);
-  $("library-rename").disabled = $("library-delete").disabled = !ready || !L.folderById.has(L.selFolder) || L.selFolder === "root";
-  $("library-move").disabled = !ready || !L.selected.size || L.folders.length < 2;
+  $("library-new").disabled = !canNewFolder();
+  $("library-rename").disabled = $("library-delete").disabled = !canChangeFolder(L.selFolder);
+  $("library-move").disabled = !canMove([...L.selected]);
   const n = pickedRecordings();
   $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
 }
+
+// When the folder tools (and the same items of the library's right-click menu) can be used.
+function libraryToolsReady() {
+  const L = S.lib;
+  return L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op;
+}
+function canNewFolder() { return libraryToolsReady() && !S.lib.flat && S.lib.folderById.has(S.lib.folderId); }
+function canChangeFolder(id) { return libraryToolsReady() && S.lib.folderById.has(id) && id !== "root"; }   // rename, delete
+function canMove(ids) { return libraryToolsReady() && ids.length > 0 && S.lib.folders.length >= 2; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
   const t = (S.caps.formats || {})[type];
@@ -1104,7 +1122,7 @@ function setupLibrary() {
   S.lib.moreRow = more;
 }
 
-// ---- Folder management: New investigation, Rename, Delete (Recycle Bin), picking recordings,
+// ---- Folder management: New folder, Rename, Delete (Recycle Bin), picking recordings,
 // Move to… and drag and drop. The page sends ids, never paths; after an operation it lists again.
 // The recording in the player is unloaded before an operation touches its file (so nothing holds
 // it open) and loaded again from its new place afterwards.
@@ -1268,12 +1286,12 @@ function selectFolderRow(id) {
   }
 }
 
-// ---- New investigation / Rename / Delete ----
+// ---- New folder / Rename / Delete ----
 function newFolderDialog() {
   const L = S.lib, here = L.folderById.get(L.folderId);
   if (!here || L.flat || L.op) return;
   folderDialog({
-    title: "New investigation",
+    title: "New folder",
     body: [dialogText(`A new folder in ${here.name || "the library"}.`)],
     name: "", ok: "Create",
     run: async (name) => {
@@ -1354,8 +1372,10 @@ async function deleteFolderDialog() {
 }
 
 // ---- Move to… (the folder tree) and the move itself ----
-function moveDialog() {
-  const L = S.lib, ids = [...L.selected].filter((id) => L.byId.has(id));
+// ids: the files to move (default: the recordings ticked).
+function moveDialog(ids = [...S.lib.selected]) {
+  const L = S.lib;
+  ids = ids.filter((id) => L.byId.has(id));
   if (!ids.length || L.op) return;
   let target = null, first = null;
   const list = document.createElement("div");
@@ -1496,7 +1516,7 @@ function setupFolderTools() {
   $("library-new").onclick = newFolderDialog;
   $("library-rename").onclick = renameFolderDialog;
   $("library-delete").onclick = deleteFolderDialog;
-  $("library-move").onclick = moveDialog;
+  $("library-move").onclick = () => moveDialog();
   $("library-all").onclick = () => {
     const on = $("library-all").checked;
     for (const g of S.lib.shown) for (const id of groupPickIds(g)) on ? S.lib.selected.add(id) : S.lib.selected.delete(id);
@@ -1509,6 +1529,120 @@ function setupFolderTools() {
     else if (e.key === "Enter" && e.target === $("folder-dialog-name")) { e.preventDefault(); folderDialogOk(); }
   });
   setupDragAndDrop();
+  setupLibraryMenu();
+}
+
+// ---- the library's right-click menu: the folder tools for the row (or the empty space) clicked ----
+// Each item runs the same function as its toolbar button and is off whenever that button would be.
+const CM = { back: null };
+
+function libraryMenuItems(target) {
+  const L = S.lib;
+  const folderRow = target.closest && target.closest("tr.lib-folder");
+  if (folderRow && !L.flat && L.folderById.has(folderRow.folderId)) {
+    const id = folderRow.folderId;
+    selectFolderRow(id);                       // the row the menu is for, as a click would
+    const why = canChangeFolder(id) ? "" : L.op ? "Wait for the operation to finish" : "";
+    return [
+      { label: "Open", run: () => openLibraryFolder(id) },
+      { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
+      { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
+    ];
+  }
+  const recRow = target.closest && target.closest("tr.lib-row");
+  if (recRow && recRow.group) {
+    const g = recRow.group;
+    // A ticked row stands for every recording ticked; any other row for itself only.
+    const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
+    const n = recordingsIn(ids), playable = !!libraryPlayable(g);
+    return [
+      { label: "Play", disabled: !playable, title: playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type),
+        run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
+      { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
+    ];
+  }
+  if (L.flat) return [];                       // no folders in the All recordings view
+  return [{ label: "New folder…", disabled: !canNewFolder(), run: newFolderDialog }];
+}
+
+function libraryMenuOpen() { return !$("context-menu").hidden; }
+
+function openLibraryMenu(e) {
+  if (S.view !== "library") return;
+  e.preventDefault();                          // no browser menu over the library (text fields elsewhere keep theirs)
+  closeLibraryMenu(false);
+  const back = document.activeElement;
+  const items = libraryMenuItems(e.target);
+  if (!items.length) return;
+  const menu = $("context-menu");
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "context-item";
+    b.setAttribute("role", "menuitem");
+    b.textContent = it.label;
+    b.disabled = !!it.disabled;
+    if (it.title) b.title = it.title;
+    b.onclick = () => { if (b.disabled) return; closeLibraryMenu(true); it.run(); };
+    menu.appendChild(b);
+  }
+  CM.back = back;
+  menu.hidden = false;
+  // At the pointer (from the keyboard's menu key: at the element), kept inside the window.
+  let x = e.clientX || 0, y = e.clientY || 0;
+  if (!x && !y && e.target.getBoundingClientRect) {
+    const r = e.target.getBoundingClientRect();
+    x = r.left + 8; y = r.top + r.height / 2;
+  }
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(0, Math.min(x, (window.innerWidth || 0) - box.width - 2))}px`;
+  menu.style.top = `${Math.max(0, Math.min(y, (window.innerHeight || 0) - box.height - 2))}px`;
+  const first = [...menu.children].find((b) => !b.disabled);
+  (first || menu).focus({ preventScroll: true });
+}
+
+// refocus: give the focus back to where it was (Escape; an item chosen, so that a dialog it
+// opens returns the focus there too).
+function closeLibraryMenu(refocus) {
+  const menu = $("context-menu");
+  if (menu.hidden) return;
+  menu.hidden = true;
+  menu.textContent = "";
+  const back = CM.back;
+  CM.back = null;
+  if (refocus && back && back.isConnected && typeof back.focus === "function") back.focus({ preventScroll: true });
+}
+
+function libraryMenuKeys(e) {
+  if (!libraryMenuOpen()) return;
+  const items = [...$("context-menu").children].filter((b) => !b.disabled);
+  const at = items.indexOf(document.activeElement);
+  const stop = () => { e.preventDefault(); e.stopPropagation(); };
+  if (e.key === "Escape") { stop(); closeLibraryMenu(true); }
+  else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+    stop();
+    if (!items.length) return;
+    const step = e.key === "ArrowDown" ? 1 : -1;
+    items[at < 0 ? (step > 0 ? 0 : items.length - 1) : (at + step + items.length) % items.length].focus();
+  } else if (e.key === "Home" || e.key === "End") {
+    stop();
+    if (items.length) items[e.key === "Home" ? 0 : items.length - 1].focus();
+  } else if (e.key === "Enter" || e.key === " ") {
+    stop();
+    if (at >= 0) items[at].onclick();
+  } else if (e.key === "Tab") { stop(); closeLibraryMenu(true); }
+}
+
+function setupLibraryMenu() {
+  $("list-scroll").addEventListener("contextmenu", openLibraryMenu);
+  $("context-menu").addEventListener("contextmenu", (e) => e.preventDefault());
+  document.addEventListener("keydown", libraryMenuKeys, true);   // before the page's own keys
+  window.addEventListener("pointerdown", (e) => {
+    if (libraryMenuOpen() && !$("context-menu").contains(e.target)) closeLibraryMenu(false);
+  }, true);
+  window.addEventListener("scroll", () => closeLibraryMenu(false), true);
+  window.addEventListener("resize", () => closeLibraryMenu(false));
+  window.addEventListener("blur", () => closeLibraryMenu(false));
 }
 
 function renderRows() {
@@ -1518,7 +1652,7 @@ function renderRows() {
   const recs = folder ? folder.recordings : [];
   $("empty").hidden = recs.length > 0;
   $("empty").textContent = S.device ? `${folder ? folder.label : "This folder"} is empty.`
-                                    : "Plug in an ICD-ST25 and select it on the left.";
+                                    : `${plugIn()} and select it on the left.`;
   for (const r of recs) {
     const tr = document.createElement("tr");
     const k = key(S.device, folder.id, r.number);

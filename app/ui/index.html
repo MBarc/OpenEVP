@@ -44,7 +44,7 @@
       <input id="library-search" type="search" placeholder="Search names, folders and notes" autocomplete="off">
       <label title="Every recording in the library in one list, without folders"><input type="checkbox" id="library-flat"> All recordings</label>
       <span id="library-tools" role="group" aria-label="Folders">
-        <button type="button" id="library-new" title="Create a folder in the folder shown">New investigation</button>
+        <button type="button" id="library-new" title="Create a folder in the folder shown">New folder</button>
         <button type="button" id="library-rename" title="Rename the selected folder">Rename</button>
         <button type="button" id="library-delete" title="Move the selected folder to the Recycle Bin">Delete</button>
         <button type="button" id="library-move" title="Move the selected recordings to another folder">Move to…</button>
@@ -61,7 +61,7 @@
       <thead><tr><th><input type="checkbox" id="library-all" title="Select all recordings shown"></th><th>Recording</th><th>Investigation</th><th>Type</th><th>Length</th><th>EVPs</th><th>Reviewed</th></tr></thead>
       <tbody id="library-rows"></tbody>
     </table>
-    <p id="empty" class="muted">Plug in an ICD-ST25 and select it on the left.</p>
+    <p id="empty" class="muted">Plug in a supported recorder and select it on the left.</p>
     </div>
   </section>
 </main>
@@ -125,7 +125,7 @@
   <div class="modal-card" role="dialog" aria-labelledby="about-title">
     <h2 id="about-title">About OpenEVP <span id="about-version" class="muted"></span></h2>
     <p>Gets the recordings off ghost-hunting voice recorders and onto a modern PC.</p>
-    <p class="legal">OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony. "Sony", "ICD-ST25" and "Digital Voice Editor" are trademarks of Sony Corporation.</p>
+    <p class="legal">OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony or Panasonic. "Sony", "ICD-ST25", "ICD-ST10" and "Digital Voice Editor" are trademarks of Sony Corporation. "Panasonic" and "RR-DR60" are trademarks of Panasonic Corporation.</p>
     <p class="legal">To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio format. They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly.</p>
     <p class="legal">OpenEVP is provided "as is", without warranty of any kind.</p>
     <div class="modal-buttons"><button id="about-close" class="primary">Close</button></div>
@@ -155,6 +155,7 @@
   </div>
 </div>
 <div id="drag-label" aria-hidden="true"></div>
+<div id="context-menu" class="context-menu" role="menu" aria-label="Library" tabindex="-1" hidden></div>
 <script src="notes.js"></script>
 <script src="app.js"></script>
 </body>

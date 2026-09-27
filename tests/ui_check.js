@@ -2,7 +2,8 @@
 // no browser): the recorder list shows "<model> — <owner>", a recorder's folders come from
 // its listing (labels as text, never markup), the export menu comes from its model, and
 // selections hand the backend back the exact folder ids and recording numbers, even with
-// ":" or "|" in them. Prints "ok" or throws.
+// ":" or "|" in them. The EVP Library's right-click menu runs the same code as the folder tools
+// (New folder, Rename, Delete, Move to…), with the same enabled state. Prints "ok" or throws.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -32,17 +33,38 @@ class Element {
   get innerHTML() { return this._html || ""; }
   get firstChild() { return this.children[0] || null; }
   get lastChild() { return this.children[this.children.length - 1] || null; }
-  appendChild(c) { if (typeof c !== "string") c.parentNode = this; this.children.push(c); return c; }
+  get nextSibling() { const p = this.parentNode; return p ? p.children[p.children.indexOf(this) + 1] || null : null; }
+  get isConnected() { return true; }
+  appendChild(c) { return this.insertBefore(c, null); }
   append(...cs) { for (const c of cs) this.appendChild(c); }
   replaceChildren(...cs) { this.children.length = 0; this._text = ""; this.append(...cs); }
-  insertBefore(c) { return this.appendChild(c); }
-  remove() { if (this.parentNode) this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1); }
-  addEventListener() {}
+  insertBefore(c, ref) {
+    if (typeof c !== "string") { if (c.parentNode) c.remove(); c.parentNode = this; }
+    const at = ref ? this.children.indexOf(ref) : -1;
+    at < 0 ? this.children.push(c) : this.children.splice(at, 0, c);
+    return c;
+  }
+  remove() {
+    if (this.parentNode) this.parentNode.children.splice(this.parentNode.children.indexOf(this), 1);
+    this.parentNode = null;
+  }
+  addEventListener(type, fn, capture) { listen(this, type, fn, capture); }
   removeEventListener() {}
   setAttribute(k, v) { this[k] = v; }
   getAttribute(k) { return this[k]; }
-  focus() {} select() {} scrollIntoView() {}
-  closest() { return null; }
+  focus() { document.activeElement = this; } select() {} scrollIntoView() {}
+  contains(x) { for (; x; x = x.parentNode) if (x === this) return true; return false; }
+  // Simple selectors only ("tr.lib-folder", "#id", ".cls"), comma-separated; others never match.
+  closest(sel) {
+    const one = (el, s) => {
+      const m = /^([a-z]*)((?:\.[\w-]+)*)(?:#([\w-]+))?$/i.exec(s.trim());
+      if (!m) return false;
+      return (!m[1] || el.tagName === m[1].toUpperCase()) && (!m[3] || el.id === m[3]) &&
+             m[2].split(".").filter(Boolean).every((c) => el.classList.contains(c));
+    };
+    for (let el = this; el && el instanceof Element; el = el.parentNode) if (sel.split(",").some((s) => one(el, s))) return el;
+    return null;
+  }
   getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 80 }; }
   querySelectorAll() { return []; }
   querySelector(sel) {
@@ -52,12 +74,29 @@ class Element {
   get clientWidth() { return 800; }
 }
 
+// Event listeners: capture ones first, stopPropagation honoured (enough for one target).
+const listeners = new Map();
+function listen(target, type, fn, capture) {
+  if (!listeners.has(target)) listeners.set(target, []);
+  listeners.get(target).push({ type, fn, capture: !!(capture === true || (capture && capture.capture)) });
+}
+function fire(targets, type, props = {}) {
+  let stopped = false;
+  const e = { type, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; },
+              stopPropagation() { stopped = true; }, ...props };
+  const all = targets.flatMap((t) => (listeners.get(t) || []).filter((l) => l.type === type));
+  for (const l of [...all.filter((x) => x.capture), ...all.filter((x) => !x.capture)]) { if (stopped) break; l.fn(e); }
+  return e;
+}
+
 const byId = new Map();
 const document = {
   getElementById(id) { if (!byId.has(id)) byId.set(id, new Element(id === "format" ? "select" : "div", id)); return byId.get(id); },
   createElement(tag) { return new Element(tag); },
   querySelectorAll() { return []; },
-  addEventListener() {},
+  querySelector() { return null; },
+  addEventListener(type, fn, capture) { listen(document, type, fn, capture); },
+  activeElement: null,
   body: new Element("body"),
 };
 // The format menu as index.html ships it.
@@ -91,7 +130,7 @@ const listing = {
                { number: 1, label: "A-001", recorded: "2029-05-23 19:54:04", seconds: 1.3, owner: "Casey", problem: null }] : [] })) },
 };
 const api = {
-  capabilities: async () => ({ wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
+  capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
                                store_problems: [], formats: { dvf: { playable: true }, wav: { playable: true } } }),
   default_destination: async () => "C:\\save",
   check_update: async () => ({ ok: true, available: false, current: "0.0" }),
@@ -111,7 +150,8 @@ const api = {
 let ready = null;
 const window = {
   pywebview: { api },
-  addEventListener(name, fn) { if (name === "pywebviewready") ready = fn; },
+  addEventListener(name, fn, capture) { if (name === "pywebviewready") ready = fn; else listen(window, name, fn, capture); },
+  innerWidth: 1000, innerHeight: 700,
   localStorage: { getItem: () => null, setItem() {} },
 };
 const context = { window, document, WaveSurfer: anything, console, getComputedStyle: () => ({ getPropertyValue: () => "" }),
@@ -182,5 +222,157 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                      JSON.stringify([{ folder: "a:b|c", number: "rec:1" }, { folder: "a:b|c", number: 7 },
                                      { folder: "7", number: "7" }]));
   assert.ok(!calls.some((c) => c[0] === "audio"));
+  // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
+  api.devices = async () => ({ ok: true, problems: [], devices: [] });
+  await context.poll();
+  assert.strictEqual($("devices").children[0].textContent, "No recorder connected. Plug in a supported recorder (Sony ICD-ST25).");
+  assert.ok(!$("devices").innerHTML.includes("ICD-ST25"), "model names are text, not markup");
+  vm.runInContext(`S.caps.models = ["Sony ICD-ST25", "Other X1"]; renderMain();`, context);
+  assert.strictEqual($("empty").textContent, "Plug in a supported recorder (Sony ICD-ST25, Other X1) and select it on the left.");
+  vm.runInContext(`S.caps.models = []; renderMain();`, context);
+  assert.strictEqual($("empty").textContent, "Plug in a supported recorder and select it on the left.");
+  const html = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "index.html"), "utf8");
+  assert.ok(html.includes('<p id="empty" class="muted">Plug in a supported recorder and select it on the left.</p>'));
+  assert.ok(html.includes('supported by Sony or Panasonic. "Sony", "ICD-ST25", "ICD-ST10" and "Digital Voice Editor" are ' +
+                          'trademarks of Sony Corporation. "Panasonic" and "RR-DR60" are trademarks of Panasonic Corporation.'));
+
+  // ---- the EVP Library: "New folder", and the right-click menu ----
+  assert.ok(/id="library-new"[^>]*>New folder<\/button>/.test(html) && !/new investigation/i.test(html));
+  assert.ok(html.includes('id="context-menu"'));
+  const settle = async () => { for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r)); context.renderLibrary(); };
+  const libFile = (id, name, folder, fp) => ({ id, name, folder_id: folder, type: "wav", fp, investigation: "", seconds: 3,
+                                               marks: { A: 0, B: 0, C: 0 }, reviewed: false, notes: "", error: null });
+  const libFolders = [{ id: "root", name: "", rel: [], parent: null }, { id: "f1", name: "Old Mill", rel: ["Old Mill"], parent: "root" },
+                      { id: "f2", name: "Night 2", rel: ["Night 2"], parent: "root" }];
+  // A library with no recordings at all: said without naming a recorder's formats.
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 2, exists: true, truncated: false, indexing: false,
+                                    pending: 0, files: [], folders: [libFolders[0]] });
+  context.showLibrary();
+  await settle();
+  assert.strictEqual($("empty").textContent, "No recordings in C:\\save yet.");
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 3, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: libFolders,
+                                    files: [libFile("r1", "a.wav", "root", "fp1"), libFile("r2", "b.wav", "root", "fp2"),
+                                            libFile("r3", "c.wav", "root", "fp3")] });
+  const ops = [];
+  api.play_library = async (id) => { ops.push(["play", id]); return { ok: false, error: "stub" }; };
+  api.move_files = async (ids, to) => { ops.push(["move", ids, to]); return { ok: true, ids: {} }; };
+  await context.loadLibrary();
+  await settle();
+  const L = vm.runInContext("S.lib", context);
+  const menu = $("context-menu"), dialogShown = () => !$("folder-dialog").hidden;
+  const rowsNow = () => $("library-rows").children;
+  const folderRow = (id) => rowsNow().find((r) => r.folderId === id);
+  const recRow = (id) => rowsNow().find((r) => r.group && r.group.main.id === id);
+  const rightClick = (target) => fire([$("list-scroll")], "contextmenu", { target, clientX: 50, clientY: 60 });
+  const menuItems = () => menu.children.map((b) => [b.textContent, b.disabled]);
+  const choose = (label) => menu.children.find((b) => b.textContent === label).onclick();
+  const press = (k) => fire([document], "keydown", { key: k, target: document.activeElement || document.body });
+  assert.deepStrictEqual(rowsNow().map((r) => r.folderId || r.group.main.id), ["f2", "f1", "r1", "r2", "r3"]);
+  menu.hidden = true;                                               // as index.html has it
+
+  // Empty space: New folder, the same dialog as the button (an empty name box).
+  let e = rightClick($("empty"));
+  assert.ok(e.defaultPrevented, "no browser menu over the library");
+  assert.ok(!menu.hidden);
+  assert.deepStrictEqual(menuItems(), [["New folder…", false]]);
+  assert.strictEqual(menu.children[0].getAttribute("role"), "menuitem");
+  assert.strictEqual(document.activeElement, menu.children[0]);
+  choose("New folder…");
+  assert.ok(menu.hidden && dialogShown());
+  assert.strictEqual($("folder-dialog-title").textContent, "New folder");
+  assert.strictEqual($("folder-dialog-name").value, "");
+  assert.ok(!$("folder-dialog-name").hidden);
+  context.closeFolderDialog();
+  $("library-new").onclick();                                      // the button: the very same dialog
+  assert.strictEqual($("folder-dialog-title").textContent, "New folder");
+  context.closeFolderDialog();
+
+  // A folder row: Open / Rename / Delete; it becomes the selected folder; keys move and choose.
+  rightClick(folderRow("f1").cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false]]);
+  assert.strictEqual(L.selFolder, "f1");
+  assert.strictEqual(document.activeElement.textContent, "Open");
+  press("ArrowUp");
+  assert.strictEqual(document.activeElement.textContent, "Delete…");  // wraps round
+  press("ArrowDown"); press("ArrowDown");
+  assert.strictEqual(document.activeElement.textContent, "Rename…");
+  press("Enter");
+  assert.ok(menu.hidden);
+  assert.strictEqual($("folder-dialog-title").textContent, "Rename “Old Mill”");
+  context.closeFolderDialog();
+  rightClick(folderRow("f2").cells[1]);
+  choose("Open");
+  assert.strictEqual(L.folderId, "f2");
+  context.openLibraryFolder("root");
+  await settle();
+  // Off exactly when the toolbar's buttons are: during an operation, and for the library's root.
+  L.selFolder = "f1"; L.op = true; context.renderLibrary();
+  rightClick(folderRow("f1").cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  assert.ok($("library-rename").disabled && $("library-delete").disabled);
+  press("Escape");
+  assert.ok(menu.hidden, "Escape closes it");
+  L.op = false; context.renderLibrary();
+  assert.ok(!$("library-rename").disabled);
+  const rootRow = document.createElement("tr"); rootRow.className = "lib-folder"; rootRow.folderId = "root";
+  rightClick(rootRow);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  L.selFolder = "root"; context.renderLibraryBar();
+  assert.ok($("library-rename").disabled && $("library-delete").disabled);
+  fire([window], "pointerdown", { target: document.body });
+  assert.ok(menu.hidden, "a click outside closes it");
+  L.selFolder = null;
+
+  // A recording row: Play and Move to… for that row; a ticked row stands for every ticked one.
+  const realTimeout = context.setTimeout;
+  context.setTimeout = (fn, ms) => { if (!ms) setImmediate(fn); return 0; };   // finishFolderOp runs
+  rightClick(recRow("r3").cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", false]]);
+  choose("Play");
+  await settle();
+  assert.deepStrictEqual(ops.pop(), ["play", "r3"]);
+  rightClick(recRow("r3").cells[1]);
+  choose("Move to…");
+  assert.strictEqual($("folder-dialog-title").textContent, "Move 1 recording to…");
+  const pick = (id) => $("folder-dialog-body").children[0].children.find((b) => b.folderId === id);
+  pick("f1").onclick();
+  await context.folderDialogOk();
+  await settle();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())), ["move", ["r3"], "f1"]);
+  context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
+  context.renderLibrary();
+  rightClick(recRow("r2").cells[1]);                                  // ticked: both ticked recordings
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move 2 recordings to…", false]]);
+  choose("Move 2 recordings to…");
+  assert.strictEqual($("folder-dialog-title").textContent, "Move 2 recordings to…");
+  pick("f2").onclick();
+  await context.folderDialogOk();
+  await settle();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())), ["move", ["r1", "r2"], "f2"]);
+  context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
+  context.renderLibrary();
+  rightClick(recRow("r3").cells[1]);                                  // not ticked: just itself
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", false]]);
+  L.op = true;
+  rightClick(recRow("r3").cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", true]]);
+  L.op = false;
+  press("Escape");
+  context.setTimeout = realTimeout;
+
+  // All recordings (no folders): empty space offers nothing, but the browser menu stays off there.
+  L.flat = true; context.renderLibrary();
+  e = rightClick($("empty"));
+  assert.ok(e.defaultPrevented && menu.hidden);
+  rightClick(recRow("r1").cells[1]);
+  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Move 2 recordings to…"]);
+  fire([window], "scroll", {});
+  assert.ok(menu.hidden, "scrolling closes it");
+  L.flat = false;
+  // Not in the library (a recorder shown): the browser's own menu.
+  vm.runInContext(`S.view = "device";`, context);
+  e = rightClick($("empty"));
+  assert.ok(!e.defaultPrevented && menu.hidden);
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });
