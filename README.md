@@ -150,16 +150,17 @@ have EVPs (or that not all have been checked yet), any recorder backups that
 would go with it (those recordings get **Retry backup** afterward), other
 files such as photos or video, subfolders, and the total size. If it's your
 Save-to folder, the confirmation says so, since exporting there will just
-create it again. The folder goes to the Recycle Bin; OpenEVP refuses when
-Windows couldn't recycle it — on a drive with no Recycle Bin (such as some
-network or external drives), when the Recycle Bin is set to delete files
-immediately, or when the folder is too big for it — and says to use File
-Explorer instead. Should Windows still find it can't recycle something, it
-asks before deleting anything for good. If a file in the folder is in use,
-what could be recycled is, the rest stays where it was, and OpenEVP says so.
+create it again. The folder goes to the Recycle Bin. OpenEVP refuses up
+front when it can tell Windows wouldn't recycle it — on a drive with no
+Recycle Bin (such as some network or external drives), when the Recycle Bin
+is set to delete files immediately, or, when Windows reports the Recycle
+Bin's size, when the folder is bigger than that — and says to use File
+Explorer instead. If Windows still finds it can't recycle something, it asks
+before deleting anything for good. If a file in the folder is in use, what
+could be recycled is, the rest stays where it was, and OpenEVP says so.
 
 A second OpenEVP window can't create, rename, delete or move anything in the
-library; organise folders in the first window.
+library, and can't export; do those in the first window.
 
 Move recordings between folders by ticking their checkboxes and clicking
 **Move to…**, or by dragging a row onto a folder or a breadcrumb step. Marks
