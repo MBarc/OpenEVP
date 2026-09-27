@@ -5,8 +5,15 @@
 Get the recordings off your ghost-hunting voice recorders and onto a modern
 Windows PC: one installer, no manufacturer software, no old 32-bit computer.
 
-- **Supported recorders:** Sony ICD-ST25
-- **Planned:** Sony ICD-ST10, Panasonic RR-DR60
+## Recorders
+
+| Recorder | Status |
+|---|---|
+| Sony ICD-ST25 | ✅ Supported: download, play, WAV export, EVP marks |
+| Sony ICD-ST10 | 🛠 Planned |
+| Panasonic RR-DR60 | 🛠 Planned |
+
+Have a recorder you'd like supported? [Open an issue](https://github.com/MBarc/OpenEVP/issues).
 
 Each recorder is one module in `openevp/recorders/`; see
 [its README](openevp/recorders/README.md) to add one.

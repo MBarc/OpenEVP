@@ -780,6 +780,7 @@ function renderLibraryBar() {
   $("library-rename").disabled = $("library-delete").disabled = !canChangeFolder(L.selFolder);
   $("library-move").disabled = !canMove([...L.selected]);
   const n = pickedRecordings();
+  $("library-tools").title = S.caps.marks_read_only ? "Another OpenEVP window is open; organise folders there." : "";
   $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
 }
@@ -787,7 +788,8 @@ function renderLibraryBar() {
 // When the folder tools (and the same items of the library's right-click menu) can be used.
 function libraryToolsReady() {
   const L = S.lib;
-  return L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op;
+  // A second OpenEVP window (its store is read-only) can view the library but not change it.
+  return L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op && !S.caps.marks_read_only;
 }
 function canNewFolder() { return libraryToolsReady() && !S.lib.flat && S.lib.folderById.has(S.lib.folderId); }
 function canChangeFolder(id) { return libraryToolsReady() && S.lib.folderById.has(id) && id !== "root"; }   // rename, delete

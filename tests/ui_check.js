@@ -288,6 +288,15 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("folder-dialog-title").textContent, "New folder");
   context.closeFolderDialog();
 
+  // A second OpenEVP window (read-only store) can look but not change folders.
+  vm.runInContext(`S.caps.marks_read_only = true; renderLibraryBar();`, context);
+  assert.ok($("library-new").disabled && /Another OpenEVP window/.test($("library-tools").title));
+  rightClick(folderRow("f1").cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  press("Escape");
+  vm.runInContext(`S.caps.marks_read_only = false; renderLibraryBar();`, context);
+  assert.ok(!$("library-new").disabled && $("library-tools").title === "");
+
   // A folder row: Open / Rename / Delete; it becomes the selected folder; keys move and choose.
   rightClick(folderRow("f1").cells[1]);
   assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false]]);
