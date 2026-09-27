@@ -66,6 +66,7 @@ table[hidden] { display: none; }
 .crumb-sep { color: var(--muted); }
 .crumb-here { font-weight: 600; overflow-wrap: anywhere; }
 tr.lib-folder { outline: none; user-select: none; }
+tr.lib-folder:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
 tr.lib-folder.selected td { background: var(--line); }
 .lib-folder-name { font-weight: 600; overflow-wrap: anywhere; }
 .lib-error { color: var(--warn); cursor: help; }

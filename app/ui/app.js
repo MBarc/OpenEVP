@@ -275,6 +275,7 @@ function renderMain() {
   const library = S.view === "library";
   $("device-table").hidden = library;
   $("library-table").hidden = $("library-bar").hidden = !library;
+  if (!library) { $("library-crumbs").hidden = true; $("library-crumbs").sig = null; }   // renderCrumbs shows it again
   if (library) renderLibrary(); else renderRows();
   updateExport();
 }
@@ -316,7 +317,7 @@ async function loadLibrary() {
                      folders: r.folders || [], folderById: new Map((r.folders || []).map((d) => [d.id, d])),
                      paused: !!r.paused });
   for (const id of [...L.selected]) if (!L.byId.has(id)) L.selected.delete(id);
-  findLibraryFolder(!r.paused);
+  findLibraryFolder(!r.paused && !r.truncated);   // an incomplete listing may lack the folder
   for (const f of r.files) if (f.fp && !L.summaries.has(f.fp)) L.summaries.set(f.fp, fileSummary(f));
   // The backend is the source of truth: if it differs from the player (markers imported
   // meanwhile), the player fetches its marks again instead of overwriting the listing.
@@ -414,12 +415,13 @@ function libraryGroups() {
   return out.sort((a, b) => a.order - b.order);
 }
 
-function libraryMatches(g) {
+// extra: more text the search may find it by (the names of the folders it is in, in the folder view).
+function libraryMatches(g, extra = "") {
   const L = S.lib;
   if (!LIB_FILTERS[L.filter](g)) return false;
   const q = L.search.trim().toLowerCase();
   if (!q) return true;
-  const text = [...g.files.flatMap((f) => [f.name, f.investigation]), g.notes].join("\n").toLowerCase();
+  const text = [...g.files.flatMap((f) => [f.name, f.investigation]), g.notes, extra].join("\n").toLowerCase();
   return text.includes(q);
 }
 
@@ -542,33 +544,41 @@ function libraryUp() {
 
 // The current folder's subfolders (by name), each with the recordings in its whole subtree
 // (each recording once) and their EVPs. With a filter or search, a subfolder shows only if
-// a recording somewhere in it matches.
+// a recording somewhere in it matches (the search also finds it by the names of the folders
+// it is in); without a class filter, a subfolder whose name the search finds shows too.
 function libraryFolderRows() {
-  const L = S.lib, rows = new Map();
-  for (const d of L.folders) if (d.parent === L.folderId) rows.set(d.id, { ...d, recs: new Set(), visible: !libraryFiltering() });
+  const L = S.lib, rows = new Map(), q = L.search.trim().toLowerCase();
+  for (const d of L.folders) {
+    if (d.parent !== L.folderId) continue;
+    const named = !!q && L.filter === "all" && d.name.toLowerCase().includes(q);
+    rows.set(d.id, { ...d, recs: new Map(), visible: !libraryFiltering() || named });
+  }
   if (!rows.size) return [];
-  const top = new Map();                       // folder id -> the subfolder of the current folder it is in (or null)
+  // folder id -> [the subfolder of the current folder it is in (or null), the names from there down]
+  const top = new Map();
   const topOf = (id) => {
     if (top.has(id)) return top.get(id);
     const d = L.folderById.get(id);
-    const t = rows.has(id) ? id : !d || d.parent == null ? null : topOf(d.parent);
+    let t = [null, ""];
+    if (rows.has(id)) t = [id, d.name];
+    else if (d && d.parent != null) {
+      const [up, names] = topOf(d.parent);
+      if (up != null) t = [up, `${names}\n${d.name}`];
+    }
     top.set(id, t);
     return t;
   };
   for (const g of L.groups) {
-    const t = topOf(g.folderId);
+    const [t, names] = topOf(g.folderId);
     if (t == null) continue;
     const row = rows.get(t);
-    row.recs.add(g.recKey);
-    if (!row.visible && libraryMatches(g)) row.visible = true;
+    row.recs.set(g.recKey, g.marks);           // a recording once, with its marks (un-indexed ones too)
+    if (!row.visible && libraryMatches(g, names)) row.visible = true;
   }
   for (const row of rows.values()) {
     row.count = row.recs.size;
     row.marks = { A: 0, B: 0, C: 0 };
-    for (const k of row.recs) {
-      const sum = k.startsWith("id:") ? null : L.summaries.get(k);
-      if (sum) for (const c of ["A", "B", "C"]) row.marks[c] += sum.marks[c] || 0;
-    }
+    for (const m of row.recs.values()) for (const c of ["A", "B", "C"]) row.marks[c] += (m && m[c]) || 0;
   }
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
 }
@@ -580,9 +590,10 @@ function libraryFolderRow(d) {
   if (!tr) {
     tr = document.createElement("tr");
     tr.className = "lib-folder";
-    tr.tabIndex = -1;
+    tr.tabIndex = 0;                           // keyboard users can reach it (Tab), then Enter opens it
     for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
     tr.onclick = () => { L.selFolder = tr.folderId; tr.focus({ preventScroll: true }); scheduleLibraryRender(); };
+    tr.onfocus = () => { if (L.selFolder !== tr.folderId) { L.selFolder = tr.folderId; scheduleLibraryRender(); } };
     tr.ondblclick = () => openLibraryFolder(tr.folderId);
     tr.title = "Double-click to open";
     L.folderEls.set(d.id, tr);
@@ -664,14 +675,15 @@ function loadLibraryView() {
   } catch (e) { /* the defaults */ }
 }
 
-// Enter opens the selected folder; Backspace goes up a level (not while typing or in a dialog).
+// Enter on a folder row opens it; Backspace goes up a level (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
   if (S.view !== "library" || L.flat || e.ctrlKey || e.altKey || e.metaKey) return;
   if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
-  if (e.key === "Enter" && L.selFolder && e.target.tagName !== "BUTTON" && L.folderById.has(L.selFolder)) {
+  const row = e.target.closest && e.target.closest("tr.lib-folder");
+  if (e.key === "Enter" && row && row === e.target && L.folderById.has(row.folderId)) {
     e.preventDefault();
-    openLibraryFolder(L.selFolder);
+    openLibraryFolder(row.folderId);
   } else if (e.key === "Backspace") {
     e.preventDefault();
     libraryUp();
@@ -710,7 +722,10 @@ function libraryRow(g) {
     toggle.className = "lib-toggle";
     toggle.onclick = (e) => { e.stopPropagation(); toggleLibraryRow(tr.group); };
     tr.cells[0].appendChild(toggle);
-    tr.onclick = () => playLibrary(tr.group, null);
+    tr.onclick = () => {
+      if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
+      playLibrary(tr.group, null);
+    };
     L.rowEls.set(g.key, tr);
   }
   tr.group = g;
