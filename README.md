@@ -132,6 +132,37 @@ see its marks, or a mark to jump straight to it. Filter with the **All / Has
 EVPs / A / B / C / Not reviewed** buttons above the list, or search by file
 name, investigation (folder) name, or note.
 
+### Folders
+
+The library shows folders like File Explorer: a breadcrumb path at the top,
+subfolders first, then that folder's recordings. Click a folder row to select
+it; double-click it, or press Enter while it's selected, to open it. Click a
+step in the breadcrumb to jump back up, or press Backspace to go up one
+level. Folders can nest as deep as you like. Turn on **All recordings** to
+switch to today's flat, filterable list of every recording in the library
+instead, with no folders.
+
+**New investigation** creates a folder inside the one you're viewing, with
+the name box left empty (the investigation may have been days ago) — type a
+name and click Create. Select a folder to **Rename** it, or **Delete** it.
+Delete moves the folder to the Recycle Bin — it's never deleted for good —
+and asks first, listing what's inside: how many recordings and how many have
+EVPs (or that not all have been checked yet), any recorder backups that
+would go with it (those recordings get **Retry backup** afterward), other
+files such as photos or video, subfolders, and the total size. If it's your
+Save-to folder, the confirmation says so, since exporting there will just
+create it again. Deleting is refused on a drive with no Recycle Bin, such as
+some network or external drives — use File Explorer for those instead.
+
+Move recordings between folders by ticking their checkboxes and clicking
+**Move to…**, or by dragging a row onto a folder or a breadcrumb step. Marks
+travel with the audio automatically — nothing about a recording's marks
+changes when it moves. The **Investigation** column always shows the
+top-level folder a recording sits in, however deep it's nested.
+
+Recorder exports still go to the separate **Save to** folder set above;
+folders here just organize what's already in the library.
+
 **Backups.** The first time you mark a recording still on the recorder,
 OpenEVP saves a copy of it (the `.dvf`, and a WAV if conversion is available)
 to the Save-to folder in the background, so the mark isn't lost if the
