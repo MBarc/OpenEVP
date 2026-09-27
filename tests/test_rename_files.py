@@ -209,6 +209,89 @@ class RenameFilesTests(FolderApiBase):
         r = api.list_library()
         self.assertEqual((r["indexing"], r["pending"]), (False, 0))
 
+    def setup_backed_up_pair(self):
+        self.write("x.dvf", dvf_bytes())
+        self.write("x.wav", wav_bytes(b"x"))
+        with FakeDecoder().installed():
+            api = self.new_api()
+            r = self.index(api)
+        fp = next(f["fp"] for f in r["files"] if f["name"] == "x.dvf")
+        lib = os.path.abspath(self.lib)
+        old = [os.path.join(lib, "x.dvf"), os.path.join(lib, "x.wav")]
+        self.store.set_backup(fp, "saved", "Saved", old)
+        return api, r, fp, old
+
+    def test_an_unexpected_error_on_the_second_file_names_the_first_back(self):
+        api, r, fp, old = self.setup_backed_up_pair()
+        real, calls = self.store.move_backup_paths, []
+
+        def move(o, n):
+            calls.append(o)
+            if len(calls) == 2:
+                raise RuntimeError("boom")
+            return real(o, n)
+        with mock.patch.object(self.store, "move_backup_paths", move):
+            res = api.rename_files(self.group(r, "x.dvf", "x.wav"), "New")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "x.wav was not renamed: boom. Nothing was renamed.")
+        self.assertEqual((res["ids"], self.names()), ({}, ["x.dvf", "x.wav"]))
+        self.assertEqual(self.store.backup_record(fp)["paths"], old)
+        self.assertFalse(api._busy.locked())
+        r = api.list_library()
+        self.assertEqual((r["indexing"], r["pending"]), (False, 0))
+
+    def test_an_undo_that_raises_does_not_stop_the_roll_back(self):
+        api, r, fp, old = self.setup_backed_up_pair()
+        real = os.rename
+
+        def rename(src, dst):
+            if os.path.basename(src) == "x.wav":
+                raise PermissionError(13, "Access is denied", src)
+            return real(src, dst)
+        with mock.patch.object(backend.os, "rename", rename),                 mock.patch.object(self.store, "restore_backup_paths", side_effect=RuntimeError("store trouble")):
+            res = api.rename_files(self.group(r, "x.dvf", "x.wav"), "New")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res["error"].endswith("Nothing was renamed."), res)
+        self.assertEqual(self.names(), ["x.dvf", "x.wav"])
+        self.assertFalse(api._busy.locked())
+
+    def test_an_old_name_taken_meanwhile_is_never_overwritten(self):
+        api, r, fp, old = self.setup_backed_up_pair()
+        real, seen = os.rename, []
+
+        def rename(src, dst):
+            if os.path.basename(src) == "x.wav":
+                with open(old[0], "wb") as f:              # another program takes x.dvf meanwhile
+                    f.write(b"intruder")
+                raise PermissionError(13, "Access is denied", src)
+            seen.append((os.path.basename(src), list(self.store.backup_record(fp)["paths"])))
+            return real(src, dst)
+        with mock.patch.object(backend.os, "rename", rename):
+            res = api.rename_files(self.group(r, "x.dvf", "x.wav"), "New")
+        self.assertFalse(res["ok"])
+        self.assertIn("New.dvf could not be given its old name back", res["error"])
+        self.assertEqual(res["ids"], {self.file(r, "x.dvf"): backend._file_id(os.path.join(self.lib, "New.dvf"))})
+        self.assertEqual(self.names(), ["New.dvf", "x.dvf", "x.wav"])
+        with open(old[0], "rb") as f:
+            self.assertEqual(f.read(), b"intruder")
+        self.assertEqual(len(seen), 1)                          # never renamed back over it
+        self.assertEqual(self.store.backup_record(fp)["paths"],
+                         [os.path.join(os.path.abspath(self.lib), "New.dvf"), old[1]])   # follows the stuck file
+
+    def test_backup_records_are_restored_before_a_file_is_named_back(self):
+        api, r, fp, old = self.setup_backed_up_pair()
+        real, seen = os.rename, []
+
+        def rename(src, dst):
+            if os.path.basename(src) == "x.wav":
+                raise PermissionError(13, "Access is denied", src)
+            seen.append((os.path.basename(src), list(self.store.backup_record(fp)["paths"])))
+            return real(src, dst)
+        with mock.patch.object(backend.os, "rename", rename):
+            self.assertFalse(api.rename_files(self.group(r, "x.dvf", "x.wav"), "New")["ok"])
+        new_dvf = os.path.join(os.path.abspath(self.lib), "New.dvf")
+        self.assertEqual(seen, [("x.dvf", [new_dvf, old[1]]), ("New.dvf", old)])
+
     def test_a_briefly_locked_file_is_renamed_after_a_retry(self):
         self.write("a.wav", wav_bytes(b"a"))
         api = self.new_api()

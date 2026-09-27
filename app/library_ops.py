@@ -808,31 +808,35 @@ class LibraryOps:
                     if folders.name_taken(folder, new_name, ignore=name):
                         return _fail(f'There is already a file named "{new_name}" here. Nothing was renamed.')
                 plan.append((fid, path, dest))
-            done = []                               # (path, dest, undo backups) renamed so far
+            done = []                               # (file id, path, dest, undo backups) renamed so far
             for fid, path, dest in plan:
                 if path == dest:
                     continue
                 name, new_name = os.path.basename(path), os.path.basename(dest)
                 case_only = os.path.normcase(path) == os.path.normcase(dest)
-                problem = None
-                if not case_only and os.path.lexists(dest):    # os.rename replaces a file outside Windows
-                    problem = f'There is already a file named "{new_name}" here'
-                else:
-                    try:
-                        undo = self._move_backups(path, dest)
-                    except (StoreReadOnly, StoreUnavailable) as e:
-                        problem = (f"{name} was not renamed: its recorder backup could not be "
-                                   f"recorded under the new name ({e})")
+                problem, undo = None, None
+                try:
+                    if not case_only and os.path.lexists(dest):    # os.rename replaces a file outside Windows
+                        problem = f'There is already a file named "{new_name}" here'
                     else:
                         try:
-                            self._rename(path, dest)
-                        except OSError as e:
-                            self._undo_backups(undo)
-                            problem = (f'There is already a file named "{new_name}" here'
-                                       if isinstance(e, FileExistsError)
-                                       else f"{name} was not renamed: {_fs_problem(e)}")
+                            undo = self._move_backups(path, dest)
+                        except (StoreReadOnly, StoreUnavailable) as e:
+                            problem = (f"{name} was not renamed: its recorder backup could not be "
+                                       f"recorded under the new name ({e})")
                         else:
-                            done.append((fid, path, dest, undo))
+                            try:
+                                self._rename(path, dest)
+                            except OSError as e:
+                                self._undo_backups(undo)
+                                problem = (f'There is already a file named "{new_name}" here'
+                                           if isinstance(e, FileExistsError)
+                                           else f"{name} was not renamed: {_fs_problem(e)}")
+                            else:
+                                done.append((fid, path, dest, undo))
+                except Exception as e:              # anything unforeseen: the earlier files are named back too
+                    self._undo_backups(undo)
+                    problem = f"{name} was not renamed: {_plain(e)}"
                 if problem:
                     return self._roll_back_renames(done, problem)
             result = {"ok": True, "renamed": [], "ids": {}}
@@ -856,28 +860,38 @@ class LibraryOps:
         if undo is not None:
             try:
                 undo()
-            except (StoreReadOnly, StoreUnavailable):
+            except Exception:
                 pass                                # a stale path: found by fingerprint all the same
 
     def _roll_back_renames(self, done, problem):
         """A file of a recording could not be renamed: name back the ones renamed
-        before it (latest first), with their backup paths. The _fail() saying so;
-        a file that cannot be named back keeps its new name, and is re-keyed there."""
+        before it (latest first), their backup paths first. The _fail() saying so;
+        a file that cannot be named back (its old name taken meanwhile, or in use)
+        keeps its new name, where its backup paths and index entry follow it."""
         stuck, ids = [], {}
         for fid, path, dest, undo in reversed(done):
+            self._undo_backups(undo)
             try:
+                case_only = os.path.normcase(path) == os.path.normcase(dest)
+                if not case_only and os.path.lexists(path):
+                    raise FileExistsError(errno.EEXIST, "The old name is taken", os.path.basename(path))
                 self._rename(dest, path)
-            except OSError:
+            except Exception:
                 stuck.append(os.path.basename(dest))
                 ids[fid] = _file_id(dest)
+                try:
+                    self._move_backups(path, dest)
+                except Exception:
+                    pass                            # a stale path: found by fingerprint all the same
                 try:
                     self._retarget_prefix(path, dest)
                 except Exception:
                     pass
-                continue
-            self._undo_backups(undo)
         if stuck:
-            self._flush_index()
+            try:
+                self._flush_index()
+            except Exception:
+                pass
             problem += (f". {', '.join(reversed(stuck))} could not be given "
                         f"{'its' if len(stuck) == 1 else 'their'} old name back")
         else:

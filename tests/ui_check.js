@@ -401,23 +401,71 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.closeFolderDialog();
   await settle();
   ops.length = 0;
-  // A recording with a .dvf and its .wav copy: both files go, the .dvf's name is shown.
+  // A .dvf and its .wav not checked yet: rows of their own. The dialog opens for the .dvf; then
+  // indexing joins them into one recording: both files are sent (the group as it is now).
   const listed = await api.list_library();
-  api.list_library = async () => ({ ...listed, scan_id: 4, files: [...listed.files,
-    { ...libFile("r4", "x.dvf", "root", "fpX"), type: "dvf" }, libFile("r5", "x.wav", "root", "fpX")] });
+  const withPair = (fp, scan) => async () => ({ ...listed, scan_id: scan, files: [...listed.files,
+    { ...libFile("r4", "x.dvf", "root", fp), type: "dvf" }, libFile("r5", "x.wav", "root", fp)] });
+  api.list_library = withPair(null, 4);
   await context.loadLibrary();
   await settle();
   api.rename_files = async (ids, name) => { ops.push(["rename", ids, name]); return { ok: true, renamed: [], ids: {} }; };
-  // F2 on the focused row opens the same dialog.
-  recRow("r4").focus();
-  let k = press("F2");
+  rightClick(recRow("r4").cells[1]);
+  choose("Rename…");
+  assert.ok(!/renamed together/.test($("folder-dialog-body").textContent));     // one file when it opened
+  api.list_library = withPair("fpX", 5);
+  await context.loadLibrary();
+  await settle();
+  $("folder-dialog-name").value = "Attic";
+  await context.folderDialogOk();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())), ["rename", ["r4", "r5"], "Attic"]);
+  await settle();
+  // One row at a time is reachable with Tab; the arrow keys move between rows, Enter plays.
+  const tabs = () => rowsNow().filter((r) => r.group).map((r) => [r.group.main.id, r.tabIndex]);
+  assert.deepStrictEqual(tabs(), [["r1", 0], ["r2", -1], ["r3", -1], ["r4", -1]]);
+  recRow("r4").onfocus(); recRow("r4").focus();
+  assert.deepStrictEqual(tabs(), [["r1", -1], ["r2", -1], ["r3", -1], ["r4", 0]]);
+  let k = press("ArrowUp");
+  assert.ok(k.defaultPrevented && document.activeElement === recRow("r3"));
+  press("ArrowDown");
+  assert.strictEqual(document.activeElement, recRow("r4"));
+  press("Enter");
+  await settle();
+  assert.deepStrictEqual(ops.pop(), ["play", "r4"]);
+  // F2 on the focused row opens the same dialog, now for both files.
+  k = press("F2");
   assert.ok(k.defaultPrevented && dialogShown());
   assert.strictEqual($("folder-dialog-title").textContent, "Rename “x.dvf”");
   assert.strictEqual($("folder-dialog-name").value, "x");
   assert.ok(/x\.dvf and x\.wav are renamed together/.test($("folder-dialog-body").textContent));
+  // The same name: nothing is sent, the dialog closes, the player is left alone.
+  vm.runInContext(`S.playing = "lib|r4"; S.current = { rec: "h" };`, context);
   await context.folderDialogOk();
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())).slice(0, 2), ["rename", ["r4", "r5"]]);
+  assert.ok(!dialogShown() && !ops.some((o) => o[0] === "rename"));
+  assert.strictEqual(vm.runInContext("S.playing", context), "lib|r4");
+  vm.runInContext(`S.playing = null; S.current = null;`, context);
+  // A failure that left a file under its new name: said in the banner, the dialog closes.
+  api.rename_files = async (ids, name) => { ops.push(["rename", ids, name]);
+    return { ok: false, error: "x.wav was not renamed: boom. New.dvf could not be given its old name back.",
+             ids: { r4: "r7" } }; };
+  recRow("r4").focus();
+  press("F2");
+  $("folder-dialog-name").value = "New";
+  await context.folderDialogOk();
+  assert.ok(!dialogShown());
+  assert.ok(/could not be given its old name back/.test($("banner-text").textContent));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())), ["rename", ["r4", "r5"], "New"]);
   await settle();
+  // F2 while the right-click menu is open only closes the menu.
+  rightClick(recRow("r4").cells[1]);
+  k = press("F2");
+  assert.ok(k.defaultPrevented && menu.hidden && !dialogShown());
+  // With several recordings ticked, Rename… says it is for this one only.
+  context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
+  context.renderLibrary();
+  rightClick(recRow("r2").cells[1]);
+  assert.strictEqual(menu.children[1].title, "Renames this recording only");
+  press("Escape");                                                    // (r1 and r2 stay ticked)
   // F2 on a folder row renames the folder; off while an operation runs or in a second window.
   folderRow("f1").focus();
   k = press("F2");

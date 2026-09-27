@@ -525,6 +525,7 @@ function renderLibrary() {
     L.moreRow.firstChild.textContent = `Only the first ${L.files.length} files are shown.`;
     wanted.push(L.moreRow);
   }
+  rovingTabs();
   const all = $("library-all"), picked = L.shown.filter(groupPicked).length;
   all.checked = picked > 0 && picked === L.shown.length;
   all.indeterminate = picked > 0 && picked < L.shown.length;
@@ -545,6 +546,18 @@ function renderLibrary() {
   else if (!L.files.length && (L.flat || L.folders.length <= 1)) empty.textContent = `No recordings in ${L.folder} yet.`;
   else if (L.flat || libraryFiltering()) empty.textContent = "No recordings match.";
   else empty.textContent = "This folder is empty. Drag recordings here or use Move to…";
+}
+
+// Tab reaches one recording row: the one last focused, else the one playing, else the first;
+// the arrow keys move between them (libraryKeys).
+function rovingTabs() {
+  const L = S.lib, keys = new Set(L.shown.map((g) => g.key));
+  const playing = L.shown.find(libraryPlaying);
+  const at = keys.has(L.focusKey) ? L.focusKey : playing ? playing.key : L.shown.length ? L.shown[0].key : null;
+  for (const g of L.shown) {
+    const tr = L.rowEls.get(g.key);
+    if (tr) tr.tabIndex = g.key === at ? 0 : -1;
+  }
 }
 
 function libraryFiltering() { return S.lib.filter !== "all" || !!S.lib.search.trim(); }
@@ -752,6 +765,23 @@ function libraryKeys(e) {
     return;
   }
   if (e.key === "F2") { renameKey(e); return; }
+  const recRow = e.target.closest && e.target.closest("tr.lib-row");
+  if (recRow && recRow === e.target && recRow.group) {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
+      playLibrary(recRow.group, null);
+      return;
+    }
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const i = L.shown.findIndex((g) => g.key === recRow.group.key);
+      const next = L.shown[i + (e.key === "ArrowDown" ? 1 : -1)];
+      const tr = next && L.rowEls.get(next.key);
+      if (tr) tr.focus();
+      return;
+    }
+  }
   if (L.flat) return;
   const row = e.target.closest && e.target.closest("tr.lib-folder");
   if (e.key === "Enter" && row && row === e.target && L.folderById.has(row.folderId)) {
@@ -837,7 +867,8 @@ function libraryRow(g) {
   if (!tr) {
     tr = document.createElement("tr");
     tr.className = "lib-row";
-    tr.tabIndex = 0;                           // reachable with Tab; F2 renames it
+    tr.tabIndex = -1;                          // one row at a time is reachable with Tab (rovingTabs)
+    tr.onfocus = () => { if (L.focusKey !== tr.group.key) { L.focusKey = tr.group.key; rovingTabs(); } };
     for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
     const pick = document.createElement("input");
     pick.type = "checkbox"; pick.className = "lib-pick"; pick.title = "Select (to move it)";
@@ -1396,6 +1427,13 @@ async function deleteFolderDialog() {
 // ---- Rename a recording: its files in the folder shown get one new name, each its own extension ----
 function fileStem(name) { const dot = name.lastIndexOf("."); return dot > 0 ? name.slice(0, dot) : name; }
 
+// The row's group as the latest listing has it (indexing may have joined a .wav to its .dvf
+// since the dialog opened): by its key, else the group now holding its main file.
+function currentGroup(g) {
+  const L = S.lib, groups = L.groups || [];
+  return groups.find((x) => x.key === g.key) || groups.find((x) => x.files.some((f) => f.id === g.main.id)) || null;
+}
+
 function renameRecordingDialog(g) {
   const L = S.lib, ids = groupPickIds(g).filter((id) => L.byId.has(id));
   if (!ids.length || L.op) return;
@@ -1405,6 +1443,13 @@ function renameRecordingDialog(g) {
     body: names.length > 1 ? [dialogText(`${names.join(" and ")} are renamed together; each keeps its extension.`)] : null,
     name: fileStem(g.main.name), ok: "Rename",
     run: async (name) => {
+      const now = currentGroup(g);
+      if (!now) { relistAfterFailure(); return "That recording is no longer there. Refresh the list."; }
+      const ids = groupPickIds(now).filter((id) => L.byId.has(id));
+      const stem = name.trim();
+      if (!stem) return "Type a name for the file.";
+      // Nothing to do: the player is left alone.
+      if (ids.every((id) => { const f = L.byId.get(id); return f.name === stem + f.name.slice(fileStem(f.name).length); })) return null;
       const held = heldLibraryFile(), touched = !!held && ids.includes(held.id);
       if (touched) unloadPlayer();
       const r = await libraryOp("Renaming the recording…", () => api().rename_files(ids, name));
@@ -1414,7 +1459,9 @@ function renameRecordingDialog(g) {
           await loadLibrary();
           if (touched) reloadHeld(held, newIds[held.id] || held.id);
         });
-        return errorText(r);
+        if (!Object.keys(newIds).length) return errorText(r);
+        banner(errorText(r), "warn");                    // part of it was renamed: these ids are gone
+        return null;
       }
       const renamed = r.renamed || [];
       banner(renamed.length ? `Renamed ${renamed.map((x) => `“${x.from}” to “${x.to}”`).join(", ")}.`
@@ -1622,7 +1669,8 @@ function libraryMenuItems(target) {
       { label: "Play", disabled: !playable, title: playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
-      { label: "Rename…", disabled: !canRenameRecording(g), title: L.op ? "Wait for the operation to finish" : "",
+      { label: "Rename…", disabled: !canRenameRecording(g),
+        title: L.op ? "Wait for the operation to finish" : n > 1 ? "Renames this recording only" : "",
         run: () => renameRecordingDialog(g) },
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
     ];
@@ -1696,7 +1744,7 @@ function libraryMenuKeys(e) {
   } else if (e.key === "Enter" || e.key === " ") {
     stop();
     if (at >= 0) items[at].onclick();
-  } else if (e.key === "Tab") { stop(); closeLibraryMenu(true); }
+  } else if (e.key === "Tab" || e.key === "F2") { stop(); closeLibraryMenu(true); }
 }
 
 function setupLibraryMenu() {
