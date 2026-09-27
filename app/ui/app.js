@@ -7,6 +7,7 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
             dest: "", selected: new Set(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: false, settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
+            drag: null,                                   // recordings being dragged in the library: {ids}
             // The EVP library: the listing, its scan, what is shown (see loadLibrary).
             lib: { seq: 0, loading: false, listed: false, scanId: 0, buffer: [], folder: "", exists: true,
                    truncated: false, indexing: false, done: 0, total: 0, checkError: "", problem: "",
@@ -17,7 +18,9 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    // parts (ids change when an ancestor is renamed; the path finds it again), or flat.
                    folders: [], folderById: new Map(), folderId: "root", folderRel: [], flat: false,
                    folderEls: new Map(), selFolder: null, paused: false,
-                   selected: new Set(),                   // file ids of the recordings selected (Task 5)
+                   selected: new Set(),                   // file ids of the recordings picked (checkboxes) for a move
+                   shown: [],                             // the recording groups shown (select all)
+                   op: false, renderHeld: false,          // a folder operation running; a redraw held back by a drag
                    summaries: new Map(),                  // fp -> {marks, reviewed, notes}: one per recording, not per file
                    subTokens: new Map(), subToken: 0 },   // key -> token of the subMarks fetch that may still answer
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
@@ -317,7 +320,9 @@ async function loadLibrary() {
                      folders: r.folders || [], folderById: new Map((r.folders || []).map((d) => [d.id, d])),
                      paused: !!r.paused });
   for (const id of [...L.selected]) if (!L.byId.has(id)) L.selected.delete(id);
+  const shownBefore = L.folderId;
   findLibraryFolder(!r.paused && !r.truncated);   // an incomplete listing may lack the folder
+  if (L.folderId !== shownBefore) { L.selected.clear(); L.selFolder = null; }   // another folder is shown
   for (const f of r.files) if (f.fp && !L.summaries.has(f.fp)) L.summaries.set(f.fp, fileSummary(f));
   // The backend is the source of truth: if it differs from the player (markers imported
   // meanwhile), the player fetches its marks again instead of overwriting the listing.
@@ -435,6 +440,7 @@ function scheduleLibraryRender() {
 function renderLibrary() {
   const L = S.lib;
   L.renderQueued = false;
+  if (S.drag) { L.renderHeld = true; return; }   // rows stay put under the pointer; redrawn on dragend
   L.groups = libraryGroups();
   $("library-count").textContent = L.listed && L.files.length ? `(${new Set(L.files.map(libFileKey)).size})` : "";
   $("library-entry").title = L.folder || "";
@@ -451,11 +457,13 @@ function renderLibrary() {
       wanted.push(libraryFolderRow(d));
     }
   }
+  L.shown = [];
   for (const g of L.groups) {
     live.add(g.key);
     if (!L.flat && g.folderId !== L.folderId) continue;
     if (!libraryMatches(g)) continue;
     shown++;
+    L.shown.push(g);
     wanted.push(libraryRow(g));
     if (L.expanded.has(g.recKey)) wanted.push(...libraryMarkRows(g));
   }
@@ -466,6 +474,10 @@ function renderLibrary() {
     L.moreRow.firstChild.textContent = `Only the first ${L.files.length} files are shown.`;
     wanted.push(L.moreRow);
   }
+  const all = $("library-all"), picked = L.shown.filter(groupPicked).length;
+  all.checked = picked > 0 && picked === L.shown.length;
+  all.indeterminate = picked > 0 && picked < L.shown.length;
+  all.disabled = !L.shown.length;
   // Put the rows in order, moving only the ones out of place (no flicker, scroll kept).
   const body = $("library-rows");
   let at = body.firstChild;
@@ -656,6 +668,7 @@ function renderCrumbs() {
       b.textContent = name;
       b.title = `Go to ${name}`;
       b.onclick = () => openLibraryFolder(d.id);
+      b.folderId = d.id;                       // a drop target for dragged recordings
       bar.appendChild(b);
     }
   });
@@ -675,11 +688,19 @@ function loadLibraryView() {
   } catch (e) { /* the defaults */ }
 }
 
-// Enter on a folder row opens it; Backspace goes up a level (not while typing or in a dialog).
+// Enter on a folder row opens it; Backspace goes up a level; Escape clears the recordings
+// picked (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
-  if (S.view !== "library" || L.flat || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (S.view !== "library" || e.ctrlKey || e.altKey || e.metaKey) return;
   if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
+  if (e.key === "Escape" && L.selected.size) {
+    e.preventDefault();
+    L.selected.clear();
+    scheduleLibraryRender();
+    return;
+  }
+  if (L.flat) return;
   const row = e.target.closest && e.target.closest("tr.lib-folder");
   if (e.key === "Enter" && row && row === e.target && L.folderById.has(row.folderId)) {
     e.preventDefault();
@@ -702,6 +723,15 @@ function renderLibraryBar() {
   if (L.indexing && !L.flat && libraryFiltering()) st.textContent += " (folders may appear as recordings are checked)";
   st.title = L.indexing ? "" : L.checkError;
   $("library-flat").checked = L.flat;
+  // The folder tools: New / Rename / Delete in the folder view, Move to… in both views.
+  const ready = L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op;
+  for (const id of ["library-new", "library-rename", "library-delete"]) $(id).hidden = L.flat;
+  $("library-new").disabled = !ready || !L.folderById.has(L.folderId);
+  $("library-rename").disabled = $("library-delete").disabled = !ready || !L.folderById.has(L.selFolder) || L.selFolder === "root";
+  $("library-move").disabled = !ready || !L.selected.size || L.folders.length < 2;
+  const n = pickedRecordings();
+  $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
+                              : "Tick recordings, then move them to another folder (or drag them onto a folder)";
 }
 
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
@@ -718,10 +748,15 @@ function libraryRow(g) {
     tr = document.createElement("tr");
     tr.className = "lib-row";
     for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
+    const pick = document.createElement("input");
+    pick.type = "checkbox"; pick.className = "lib-pick"; pick.title = "Select (to move it)";
+    pick.onclick = (e) => { e.stopPropagation(); pickGroup(tr.group, pick.checked); };
     const toggle = document.createElement("button");
     toggle.className = "lib-toggle";
     toggle.onclick = (e) => { e.stopPropagation(); toggleLibraryRow(tr.group); };
-    tr.cells[0].appendChild(toggle);
+    tr.cells[0].append(pick, toggle);
+    tr.ondragstart = (e) => startDrag(e, tr.group);
+    tr.ondragend = endDrag;
     tr.onclick = () => {
       if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
       playLibrary(tr.group, null);
@@ -729,6 +764,10 @@ function libraryRow(g) {
     L.rowEls.set(g.key, tr);
   }
   tr.group = g;
+  const picked = groupPicked(g);
+  tr.cells[0].firstChild.checked = picked;
+  tr.classList.toggle("picked", picked);
+  tr.draggable = !L.flat;                      // onto a folder row or a breadcrumb segment
   const total = g.marks.A + g.marks.B + g.marks.C;
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
@@ -740,7 +779,7 @@ function libraryRow(g) {
   tr.classList.toggle("unplayable", !playable);
   tr.title = playable ? "" : "Can't play .dvf files. " + wavStatus();
   const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
-  const toggle = cToggle.firstChild;
+  const toggle = cToggle.lastChild;
   toggle.hidden = !total && !expanded;
   toggle.textContent = expanded ? "▾" : "▸";
   toggle.title = expanded ? "Hide the EVPs" : "Show the EVPs";
@@ -1006,11 +1045,404 @@ function setupLibrary() {
     b.onclick = () => { S.lib.filter = b.dataset.filter; scheduleLibraryRender(); };
   }
   $("library-search").oninput = () => { S.lib.search = $("library-search").value; scheduleLibraryRender(); };
+  setupFolderTools();
   const more = document.createElement("tr");
   const td = document.createElement("td");
   td.colSpan = 7; td.className = "muted";
   more.appendChild(td);
   S.lib.moreRow = more;
+}
+
+// ---- Folder management: New investigation, Rename, Delete (Recycle Bin), picking recordings,
+// Move to… and drag and drop. The page sends ids, never paths; after an operation it lists again.
+// The recording in the player is unloaded before an operation touches its file (so nothing holds
+// it open) and loaded again from its new place afterwards.
+
+// A row's files that a pick (or a drag) moves: the group's files in the folder view (a group is
+// one folder's copies); in the All recordings view the copies beside its main file only.
+function groupPickIds(g) {
+  const files = S.lib.flat ? g.files.filter((f) => f.folder_id === g.main.folder_id) : g.files;
+  return files.map((f) => f.id);
+}
+function groupPicked(g) { return groupPickIds(g).every((id) => S.lib.selected.has(id)); }
+function pickGroup(g, on) {
+  for (const id of groupPickIds(g)) on ? S.lib.selected.add(id) : S.lib.selected.delete(id);
+  scheduleLibraryRender();
+}
+function recordingsIn(ids) {                   // how many recordings (rows) these files are
+  const L = S.lib;
+  return new Set(ids.map((id) => L.byId.get(id)).filter(Boolean)
+                    .map((f) => (L.flat ? "" : f.folder_id) + "|" + libFileKey(f))).size;
+}
+function pickedRecordings() { return recordingsIn([...S.lib.selected]); }
+
+function humanSize(bytes) {
+  if (bytes < 1024) return plural(bytes, "byte");
+  const units = ["KB", "MB", "GB", "TB"];
+  let v = bytes / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+function inFolderTree(folderId, topId) {       // is folderId topId or inside it?
+  for (let d = S.lib.folderById.get(folderId); d; d = d.parent == null ? null : S.lib.folderById.get(d.parent)) {
+    if (d.id === topId) return true;
+  }
+  return false;
+}
+
+function errorText(r) { return [r.error, r.advice].filter(Boolean).join(" ") || "It did not work."; }
+function dialogText(text) { const p = document.createElement("p"); p.textContent = text; return p; }
+
+// ---- the dialog: a title, a body, an optional name field, OK / Cancel ----
+// run(name) does the work: it returns a message to show under the field (the dialog stays
+// open to try again), or nothing to close the dialog.
+const FD = { run: null, busy: false, back: null };
+
+function folderDialog({ title, body = null, name = null, ok, okDisabled = false, focus = null, run }) {
+  $("folder-dialog-title").textContent = title;
+  const box = $("folder-dialog-body");
+  box.textContent = "";
+  if (body) box.append(...body);
+  box.hidden = !body;
+  const input = $("folder-dialog-name");
+  input.hidden = name === null;
+  input.value = name || "";
+  input.disabled = false;
+  showDialogError("");
+  $("folder-dialog-ok").textContent = ok;
+  $("folder-dialog-ok").disabled = okDisabled;
+  $("folder-dialog-cancel").disabled = false;
+  Object.assign(FD, { run, busy: false, back: document.activeElement });
+  $("folder-dialog").hidden = false;
+  if (!input.hidden) { input.focus(); input.select(); } else (focus || $("folder-dialog-cancel")).focus();
+}
+
+function showDialogError(text) {
+  const el = $("folder-dialog-error");
+  el.textContent = text || "";
+  el.hidden = !text;
+}
+
+function closeFolderDialog() {
+  if (FD.busy) return;
+  $("folder-dialog").hidden = true;
+  FD.run = null;
+  const back = FD.back;
+  FD.back = null;
+  if (back && back.isConnected && typeof back.focus === "function") back.focus({ preventScroll: true });
+}
+
+async function folderDialogOk() {
+  if (FD.busy || !FD.run || $("folder-dialog-ok").disabled) return;
+  FD.busy = true;
+  const input = $("folder-dialog-name");
+  $("folder-dialog-ok").disabled = $("folder-dialog-cancel").disabled = input.disabled = true;
+  let problem;
+  try { problem = await FD.run(input.value); } catch (e) { problem = String(e); }
+  FD.busy = false;
+  $("folder-dialog-ok").disabled = $("folder-dialog-cancel").disabled = input.disabled = false;
+  if (!problem) { closeFolderDialog(); return; }
+  showDialogError(problem);
+  if (!input.hidden) { input.focus(); input.select(); }
+}
+
+// An operation on the library: one at a time; the tools are off while it runs.
+async function libraryOp(what, call) {
+  const L = S.lib;
+  L.op = true; status(what); scheduleLibraryRender();
+  try { return await call(); } finally { L.op = false; status(""); scheduleLibraryRender(); }
+}
+
+// After the dialog has closed: list again (and whatever follows), without holding the dialog open.
+function finishFolderOp(then) { setTimeout(() => { then().catch((e) => banner(String(e))); }, 0); }
+
+// ---- the recording in the player, around an operation ----
+function heldLibraryFile() {                   // the library file in the player, or null
+  if (!S.current || !S.playing || !S.playing.startsWith("lib|")) return null;
+  const L = S.lib, id = S.playing.slice(4), f = L.byId.get(id);
+  if (!f) return null;
+  const d = L.folderById.get(f.folder_id);
+  return { id, name: f.name, folderId: f.folder_id, rel: d ? d.rel.slice() : null, time: S.ws.getCurrentTime() };
+}
+
+function unloadPlayer() {                      // stop, and let go of the file
+  S.playSeq++;
+  S.ws.pause();
+  S.ws.empty();
+  const media = S.ws.getMediaElement && S.ws.getMediaElement();
+  if (media) { media.removeAttribute("src"); media.load(); }
+  S.playing = null;
+  setCurrent(null);
+  showPlayerEmpty();
+}
+
+// Load a held recording again, by its file id after the operation (null: it is gone).
+async function reloadHeld(held, id) {
+  const f = id && S.lib.byId.get(id);
+  if (!f) return;                              // deleted (or not listed): the player stays empty
+  const seq = ++S.playSeq;
+  const r = await api().play_library(id);
+  if (seq !== S.playSeq) return;               // the user played something else meanwhile
+  if (!r.ok) { showError(r); return; }
+  S.playing = `lib|${id}`;
+  if (!f.fp && !f.error && r.fp) setFileFp(f, r.fp);
+  scheduleLibraryRender();
+  await loadIntoPlayer(seq, f.name, r, false);
+  if (seq === S.playSeq && held.time) S.ws.setTime(Math.min(held.time, S.ws.getDuration() || held.time));
+}
+
+// The file listed under this name in the folder with these relative path parts (after a rename).
+function findLibraryFile(rel, name) {
+  const L = S.lib, d = L.folders.find((x) => sameRel(x.rel, rel));
+  if (!d) return null;
+  const f = L.files.find((x) => x.folder_id === d.id && x.name === name);
+  return f ? f.id : null;
+}
+
+function selectFolderRow(id) {
+  const L = S.lib;
+  if (!L.flat && L.folderById.has(id) && L.folderById.get(id).parent === L.folderId) {
+    L.selFolder = id;
+    scheduleLibraryRender();
+  }
+}
+
+// ---- New investigation / Rename / Delete ----
+function newFolderDialog() {
+  const L = S.lib, here = L.folderById.get(L.folderId);
+  if (!here || L.flat || L.op) return;
+  folderDialog({
+    title: "New investigation",
+    body: [dialogText(`A new folder in ${here.name || "the library"}.`)],
+    name: "", ok: "Create",
+    run: async (name) => {
+      const r = await libraryOp("Creating the folder…", () => api().create_folder(here.id, name));
+      if (!r.ok) return errorText(r);
+      banner(`Created “${name.trim()}”.`, "ok");
+      finishFolderOp(async () => { await loadLibrary(); selectFolderRow(r.id); });
+      return null;
+    },
+  });
+}
+
+function renameFolderDialog() {
+  const L = S.lib, d = L.folderById.get(L.selFolder);
+  if (!d || d.id === "root" || L.op) return;
+  folderDialog({
+    title: `Rename “${d.name}”`, name: d.name, ok: "Rename",
+    run: async (name) => {
+      const held = heldLibraryFile(), touched = !!held && inFolderTree(held.folderId, d.id);
+      if (touched) unloadPlayer();
+      const r = await libraryOp("Renaming the folder…", () => api().rename_folder(d.id, name));
+      if (!r.ok) {
+        if (touched) reloadHeld(held, held.id);        // still where it was
+        return errorText(r);
+      }
+      const newName = name.trim(), oldRel = d.rel.slice(), newRel = [...oldRel.slice(0, -1), newName];
+      banner(`Renamed “${d.name}” to “${newName}”.`, "ok");
+      libraryFolderRenamed(oldRel, newRel);            // the folder shown keeps its place if it was inside
+      finishFolderOp(async () => {
+        await loadLibrary();
+        selectFolderRow(r.id);
+        if (touched) {
+          const rel = [...newRel, ...held.rel.slice(oldRel.length)];
+          reloadHeld(held, findLibraryFile(rel, held.name));
+        }
+      });
+      return null;
+    },
+  });
+}
+
+async function deleteFolderDialog() {
+  const L = S.lib, d = L.folderById.get(L.selFolder);
+  if (!d || d.id === "root" || L.op) return;
+  const info = await libraryOp("Looking into the folder…", () => api().folder_info(d.id));
+  if (!info.ok) { showError(info); loadLibrary(); return; }
+  const list = document.createElement("ul");
+  const item = (text) => { const li = document.createElement("li"); li.textContent = text; list.appendChild(li); };
+  let evps;
+  if (info.evps_at_least && !info.with_evps) evps = "not all checked for EVPs yet";
+  else if (info.with_evps) evps = `${info.evps_at_least ? "at least " : ""}${info.with_evps} with EVPs`;
+  else evps = "none with EVPs";
+  item(info.recordings ? `${plural(info.recordings, "recording")} — ${evps}` : "No recordings");
+  if (info.backups) item(plural(info.backups, "recorder backup"));
+  if (info.other_files) item(`${plural(info.other_files, "other file")} such as photos or video`);
+  if (info.subfolders) item(plural(info.subfolders, "folder"));
+  item(`${humanSize(info.bytes)} in all`);
+  const body = [dialogText("It contains:"), list];
+  if (info.save_folder) body.push(dialogText("This is your Save to folder; exports will create it again."));
+  folderDialog({
+    title: `Move “${info.name || d.name}” to the Recycle Bin?`, body, ok: "Move to Recycle Bin",
+    run: async () => {
+      const held = heldLibraryFile(), touched = !!held && inFolderTree(held.folderId, d.id);
+      if (touched) unloadPlayer();
+      const r = await libraryOp("Moving the folder to the Recycle Bin…", () => api().delete_folder(d.id));
+      const lost = r.backups ? ` ${plural(r.backups, "recorder backup")} went with it; those recordings offer Retry backup.` : "";
+      if (r.ok) banner(`Moved “${d.name}” to the Recycle Bin.${lost}`, "ok");
+      else showError(r);                                // part of it may be gone: list again either way
+      finishFolderOp(async () => {
+        await loadLibrary();
+        if (touched) reloadHeld(held, S.lib.byId.has(held.id) ? held.id : null);   // still there: back in the player
+      });
+      return null;
+    },
+  });
+}
+
+// ---- Move to… (the folder tree) and the move itself ----
+function moveDialog() {
+  const L = S.lib, ids = [...L.selected].filter((id) => L.byId.has(id));
+  if (!ids.length || L.op) return;
+  let target = null, first = null;
+  const list = document.createElement("div");
+  list.className = "folder-picker";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", "Folders");
+  for (const d of L.folders) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "folder-pick";
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", "false");
+    b.style.paddingLeft = `${8 + 18 * (libraryFolderChain(d.id).length - 1)}px`;
+    b.textContent = `📁 ${d.name || "Library"}`;
+    b.folderId = d.id;
+    // The folder every picked file is in already (the folder shown, in the folder view).
+    b.disabled = ids.every((id) => L.byId.get(id).folder_id === d.id);
+    if (b.disabled) b.title = "They are in this folder already";
+    b.onclick = () => {
+      target = d.id;
+      for (const x of list.children) x.setAttribute("aria-selected", String(x === b));
+      $("folder-dialog-ok").disabled = false;
+    };
+    b.ondblclick = () => { b.onclick(); folderDialogOk(); };
+    if (!first && !b.disabled) first = b;
+    list.appendChild(b);
+  }
+  folderDialog({
+    title: `Move ${plural(recordingsIn(ids), "recording")} to…`, body: [list], ok: "Move", okDisabled: true, focus: first,
+    run: async () => {
+      if (target) finishFolderOp(() => moveRecordings(ids, target));
+      return null;
+    },
+  });
+}
+
+async function moveRecordings(ids, targetId) {
+  const L = S.lib, to = L.folderById.get(targetId);
+  if (!to || L.op || !ids.length) return;
+  const n = recordingsIn(ids);
+  const held = heldLibraryFile(), touched = !!held && ids.includes(held.id);
+  if (touched) unloadPlayer();
+  const r = await libraryOp(`Moving ${plural(n, "recording")}…`, () => api().move_files(ids, targetId));
+  const newIds = r.ids || {}, moved = Object.keys(newIds), failed = r.failed || [];
+  const where = to.name || "the library";
+  const parts = [];
+  if (!r.ok) parts.push(errorText(r));
+  else if (moved.length) parts.push(`Moved ${plural(recordingsIn(moved), "recording")} to ${where}.`);
+  else if (r.skipped) parts.push(`They are in ${where} already.`);
+  if (r.renamed && r.renamed.length) {
+    parts.push(`The name was taken, so: ${r.renamed.map((x) => `${x.from} → ${x.to}`).join(", ")}.`);
+  }
+  if (r.ok && failed.length) {
+    parts.push(`Not moved: ${failed.map((x) => `${x.name} (${String(x.error).replace(/\.$/, "")})`).join(" · ")}.`);
+  }
+  banner(parts.join(" "), r.ok && !failed.length ? "ok" : "warn");
+  if (r.ok && !failed.length) L.selected.clear();
+  else for (const id of moved) L.selected.delete(id);
+  // The playing highlight follows its file to the new id.
+  const playingId = S.playing && S.playing.startsWith("lib|") ? S.playing.slice(4) : null;
+  if (playingId && newIds[playingId]) S.playing = `lib|${newIds[playingId]}`;
+  await loadLibrary();
+  if (touched) reloadHeld(held, newIds[held.id] || held.id);
+}
+
+// ---- drag and drop: recording rows onto a folder row or a breadcrumb segment ----
+function startDrag(e, g) {
+  const L = S.lib;
+  if (L.flat || L.op) { e.preventDefault(); return; }
+  // A picked row drags every picked recording; any other row just itself.
+  const ids = groupPicked(g) ? [...L.selected].filter((id) => L.byId.has(id)) : groupPickIds(g);
+  S.drag = { ids };
+  e.dataTransfer.effectAllowed = "move";
+  e.dataTransfer.setData("application/x-openevp-recordings", JSON.stringify(ids));
+  const label = $("drag-label"), n = recordingsIn(ids);
+  label.textContent = n === 1 ? g.main.name : plural(n, "recording");
+  e.dataTransfer.setDragImage(label, -12, -12);
+}
+
+function endDrag() {
+  if (!S.drag) return;
+  S.drag = null;
+  for (const el of document.querySelectorAll(".drop-target")) el.classList.remove("drop-target");
+  if (S.lib.renderHeld) { S.lib.renderHeld = false; scheduleLibraryRender(); }
+}
+
+// The folder a drag is over (a subfolder row or an ancestor in the breadcrumb), if it can take it.
+function dropTarget(e) {
+  const L = S.lib;
+  if (!S.drag || L.op || L.flat || !e.target.closest) return null;
+  const el = e.target.closest("tr.lib-folder, #library-crumbs button.crumb");
+  if (!el || !L.folderById.has(el.folderId) || el.folderId === L.folderId) return null;
+  return el;
+}
+
+function setupDragAndDrop() {
+  for (const zone of [$("library-rows"), $("library-crumbs")]) {
+    zone.addEventListener("dragover", (e) => {
+      const el = dropTarget(e);
+      if (!el) return;
+      e.preventDefault();                      // on a valid target only
+      e.dataTransfer.dropEffect = "move";
+      for (const x of document.querySelectorAll(".drop-target")) if (x !== el) x.classList.remove("drop-target");
+      el.classList.add("drop-target");
+    });
+    zone.addEventListener("dragleave", (e) => {
+      const el = e.target.closest && e.target.closest(".drop-target");
+      if (el && !el.contains(e.relatedTarget)) el.classList.remove("drop-target");
+    });
+    zone.addEventListener("drop", (e) => {
+      const el = dropTarget(e);
+      if (!el) return;
+      e.preventDefault();
+      const ids = S.drag.ids, to = el.folderId;
+      endDrag();
+      moveRecordings(ids, to);
+    });
+  }
+  // Anything else dropped on the page (files from Explorer, say) is swallowed: the window must
+  // not navigate to it. Text may still be dropped into a text field.
+  const intoField = (e) => !S.drag && typingIn(e.target) && !e.dataTransfer.types.includes("Files");
+  document.addEventListener("dragover", (e) => {
+    if (e.defaultPrevented || intoField(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "none";
+  });
+  document.addEventListener("drop", (e) => {
+    if (e.defaultPrevented || intoField(e)) return;
+    e.preventDefault();
+    endDrag();
+  });
+}
+
+function setupFolderTools() {
+  $("library-new").onclick = newFolderDialog;
+  $("library-rename").onclick = renameFolderDialog;
+  $("library-delete").onclick = deleteFolderDialog;
+  $("library-move").onclick = moveDialog;
+  $("library-all").onclick = () => {
+    const on = $("library-all").checked;
+    for (const g of S.lib.shown) for (const id of groupPickIds(g)) on ? S.lib.selected.add(id) : S.lib.selected.delete(id);
+    scheduleLibraryRender();
+  };
+  $("folder-dialog-ok").onclick = folderDialogOk;
+  $("folder-dialog-cancel").onclick = closeFolderDialog;
+  $("folder-dialog").addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); closeFolderDialog(); }
+    else if (e.key === "Enter" && e.target === $("folder-dialog-name")) { e.preventDefault(); folderDialogOk(); }
+  });
+  setupDragAndDrop();
 }
 
 function renderRows() {

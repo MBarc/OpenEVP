@@ -43,6 +43,12 @@
       </span>
       <input id="library-search" type="search" placeholder="Search names, folders and notes" autocomplete="off">
       <label title="Every recording in the library in one list, without folders"><input type="checkbox" id="library-flat"> All recordings</label>
+      <span id="library-tools" role="group" aria-label="Folders">
+        <button type="button" id="library-new" title="Create a folder in the folder shown">New investigation</button>
+        <button type="button" id="library-rename" title="Rename the selected folder">Rename</button>
+        <button type="button" id="library-delete" title="Move the selected folder to the Recycle Bin">Delete</button>
+        <button type="button" id="library-move" title="Move the selected recordings to another folder">Move to…</button>
+      </span>
       <span id="library-status"></span>
     </div>
     <nav id="library-crumbs" aria-label="Folder" hidden></nav>
@@ -52,7 +58,7 @@
       <tbody id="rows"></tbody>
     </table>
     <table id="library-table" hidden>
-      <thead><tr><th></th><th>Recording</th><th>Investigation</th><th>Type</th><th>Length</th><th>EVPs</th><th>Reviewed</th></tr></thead>
+      <thead><tr><th><input type="checkbox" id="library-all" title="Select all recordings shown"></th><th>Recording</th><th>Investigation</th><th>Type</th><th>Length</th><th>EVPs</th><th>Reviewed</th></tr></thead>
       <tbody id="library-rows"></tbody>
     </table>
     <p id="empty" class="muted">Plug in an ICD-ST25 and select it on the left.</p>
@@ -136,6 +142,19 @@
     </div>
   </div>
 </div>
+<div id="folder-dialog" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="folder-dialog-title">
+    <h2 id="folder-dialog-title"></h2>
+    <div id="folder-dialog-body"></div>
+    <input id="folder-dialog-name" type="text" maxlength="120" autocomplete="off" spellcheck="false" aria-labelledby="folder-dialog-title">
+    <p id="folder-dialog-error" role="alert" hidden></p>
+    <div class="modal-buttons">
+      <button id="folder-dialog-cancel">Cancel</button>
+      <button id="folder-dialog-ok" class="primary"></button>
+    </div>
+  </div>
+</div>
+<div id="drag-label" aria-hidden="true"></div>
 <script src="app.js"></script>
 </body>
 </html>

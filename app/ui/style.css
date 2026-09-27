@@ -56,7 +56,8 @@ table[hidden] { display: none; }
 #library-status.warn { color: var(--warn); }
 .lib-toggle { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; font: inherit; }
 .lib-toggle[hidden] { display: none; }
-#library-table td:first-child, #library-table th:first-child { width: 24px; padding-right: 0; }
+#library-table td:first-child, #library-table th:first-child { width: 52px; padding-right: 0; white-space: nowrap; }
+.lib-pick { margin: 0 4px 0 0; vertical-align: middle; }
 .lib-also { font-size: 12px; color: var(--muted); }
 /* Folder view: where you are, and the current folder's subfolders above its recordings */
 #library-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 6px 10px;
@@ -68,6 +69,30 @@ table[hidden] { display: none; }
 tr.lib-folder { outline: none; user-select: none; }
 tr.lib-folder:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
 tr.lib-folder.selected td { background: var(--line); }
+/* Folder management: the tools, recordings picked for a move, drop targets while dragging */
+#library-tools { display: inline-flex; gap: 4px; }
+#library-tools button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 4px;
+                        padding: 1px 8px; cursor: pointer; font-size: 12px; }
+#library-tools button:disabled { color: var(--muted); cursor: default; opacity: .6; }
+#library-tools button[hidden] { display: none; }
+tr.lib-row.picked td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+tr.lib-folder.drop-target td { background: var(--accent-soft); box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
+#library-crumbs .crumb.drop-target { background: var(--accent-soft); outline: 2px solid var(--accent); border-radius: 3px; }
+#drag-label { position: fixed; top: -100px; left: 0; padding: 4px 10px; border-radius: 4px; background: var(--accent);
+              color: var(--panel); font-size: 13px; font-weight: 600; white-space: nowrap; pointer-events: none; }
+#folder-dialog-name { width: 100%; font: inherit; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--line);
+                      background: var(--bg); color: var(--text); }
+#folder-dialog-name[hidden], #folder-dialog-body[hidden], #folder-dialog-error[hidden] { display: none; }
+#folder-dialog-body { margin-bottom: 10px; overflow-wrap: anywhere; }
+#folder-dialog-body ul { margin: 6px 0; padding-left: 20px; }
+#folder-dialog-error { color: var(--warn); background: var(--warn-bg); margin: 8px 0 0; padding: 4px 8px; border-radius: 4px; }
+.folder-picker { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
+.folder-pick { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text);
+               padding: 4px 8px; cursor: pointer; overflow-wrap: anywhere; }
+.folder-pick:hover:not(:disabled) { background: var(--line); }
+.folder-pick[aria-selected="true"] { background: var(--accent-soft); font-weight: 600; }
+.folder-pick:disabled { color: var(--muted); cursor: default; }
+.folder-pick:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .lib-folder-name { font-weight: 600; overflow-wrap: anywhere; }
 .lib-error { color: var(--warn); cursor: help; }
 #library-table .cls-chip { padding: 0 5px; font-size: 12px; }
