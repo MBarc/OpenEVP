@@ -65,10 +65,16 @@ def raster(px, oversample=8):
     return big.resize((px, px), Image.LANCZOS)
 
 
+SMALL_MARGIN = 0.14      # white space around the logo in the installer's top-right box, per side
+
+
 def wizard_small(px):
+    """The logo centred in the installer's small top-right box, clear of its edges."""
     img = Image.new("RGB", (px, px), "white")
-    logo = raster(px)
-    img.paste(logo, (0, 0), logo)
+    side = px - 2 * round(px * SMALL_MARGIN)
+    logo = raster(side)
+    off = (px - side) // 2
+    img.paste(logo, (off, off), logo)
     return img
 
 
