@@ -1242,6 +1242,31 @@ class BackupIdentityTests(FolderApiBase):
         self.assertIn("could not be recorded", res["error"])
         self.assertEqual(self.names(), ["Save", "T"])
 
+    def test_a_failed_move_does_not_rewrite_an_unrelated_stale_path(self):
+        # Astra's reproduction: backup A records A/x.dvf; backup B has a stale
+        # path T/x.dvf (B's real recording is elsewhere and cannot be fingerprinted).
+        self.write("A/x.dvf", dvf_bytes(1))
+        self.write("Elsewhere/b.dvf", dvf_bytes(2))
+        os.makedirs(os.path.join(self.lib, "T"))
+        api = self.new_api()
+        r = api.list_library()
+        a_path = os.path.join(os.path.abspath(self.lib), "A", "x.dvf")
+        stale = os.path.join(os.path.abspath(self.lib), "T", "x.dvf")
+        self.store.set_backup("fpA", "saved", "Saved", [a_path])
+        self.store.set_backup("fpB", "saved", "Saved", [stale])
+        with mock.patch.object(backend.os, "rename", side_effect=PermissionError(13, "Access is denied")):
+            res = api.move_files([self.file(r, "x.dvf")], self.folder(r, "T"))
+        self.assertEqual(res["moved"], 0)
+        self.assertEqual(self.store.backup_record("fpA")["paths"], [a_path])
+        self.assertEqual(self.store.backup_record("fpB")["paths"], [stale])       # untouched
+        with self.store._lock:                                 # b.dvf: not indexed, and no decoder
+            self.store._index["files"].clear()
+        with mock.patch.object(library_ops.audio, "available", return_value=False):
+            res = api.delete_folder(self.folder(r, "Elsewhere"))
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(self.store.backup("fpB"), {"status": "failed", "detail": library_ops.BACKUP_UNCHECKED})
+        self.assertEqual(self.store.backup("fpA")["status"], "saved")
+
     def test_an_unreadable_recording_marks_unmatched_backups_unchecked(self):
         self.write("A/x.dvf", dvf_bytes(5))
         self.write("Save/y.wav", wav_bytes(b"y"))

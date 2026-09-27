@@ -239,10 +239,21 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.backup_record("fp1")["paths"], [dvf, wav])
             self.assertEqual(store.saved_backups(), {"fp1": [dvf, wav], "fp2": []})
             moved = os.path.join(d, "Save 2")
-            self.assertEqual(store.move_backup_paths(save, moved), 3)      # fp3's path follows too
-            self.assertEqual(store.move_backup_paths(os.path.join(d, "elsewhere"), save), 0)
+            self.assertEqual(store.move_backup_paths(save, moved),        # fp3's path follows too
+                             {"fp1": [dvf, wav], "fp3": [dvf]})
+            self.assertEqual(store.move_backup_paths(os.path.join(d, "elsewhere"), save), {})
             self.assertEqual(store.backup_record("fp1")["paths"],
                              [os.path.join(moved, "A", "x.dvf"), os.path.join(moved, "A", "x.wav")])
+            # an undo restores exactly the changed records, never by prefix
+            other = os.path.join(moved, "A", "y.dvf")
+            store.set_backup("fp4", "saved", "", [other])
+            before = store.move_backup_paths(os.path.join(moved, "A", "x.dvf"), os.path.join(d, "T", "x.dvf"))
+            self.assertEqual(set(before), {"fp1", "fp3"})
+            store.set_backup("fp5", "saved", "", [os.path.join(d, "T", "x.dvf")])     # stale, unrelated
+            store.restore_backup_paths(before)
+            self.assertEqual(store.backup_record("fp1")["paths"][0], os.path.join(moved, "A", "x.dvf"))
+            self.assertEqual(store.backup_record("fp5")["paths"], [os.path.join(d, "T", "x.dvf")])
+            self.assertEqual(store.backup_record("fp4")["paths"], [other])
             with self.assertRaises(ValueError):
                 store.set_backups({"fp1": {"status": "saved", "detail": "", "paths": [5]}})
             store.set_backups({"fp1": {"status": "failed", "detail": "gone"}, "fp2": {"status": "failed"}})

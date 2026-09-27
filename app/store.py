@@ -685,12 +685,13 @@ class AppData:
 
     def move_backup_paths(self, old, new):
         """A file or folder moved from old to new: backup paths at or under old now
-        name the same place under new. Returns how many paths changed."""
+        name the same place under new. Returns {fp: its paths before} for exactly
+        the records changed (for restore_backup_paths); {} when none was."""
         with self._lock:
             self._require_writable()
             old_key, new_abs = _index_key(old), os.path.abspath(new)
             under = old_key.rstrip(os.sep) + os.sep
-            new_data, changed = None, 0
+            new_data, changed = None, {}
             for fp, rec in self._data["recordings"].items():
                 paths = rec["backup"]["paths"]
                 if not any(_index_key(p) == old_key or _index_key(p).startswith(under) for p in paths):
@@ -702,12 +703,24 @@ class AppData:
                     k = _index_key(p)
                     if k == old_key or k.startswith(under):
                         p = new_abs + os.path.abspath(p)[len(old_key):]
-                        changed += 1
                     moved.append(p)
                 new_data["recordings"][fp]["backup"]["paths"] = moved
+                changed[fp] = list(paths)
             if new_data is not None:
                 self._save_marks(new_data)
             return changed
+
+    def restore_backup_paths(self, before):
+        """Put back the paths of exactly the records move_backup_paths() changed
+        ({fp: paths before}); no other record is touched."""
+        with self._lock:
+            self._require_writable()
+            new_data = copy.deepcopy(self._data)
+            for fp, paths in before.items():
+                rec = new_data["recordings"].get(fp)
+                if rec is not None:
+                    rec["backup"]["paths"] = list(paths)
+            self._save_marks(new_data)
 
     def summary(self):
         with self._lock:

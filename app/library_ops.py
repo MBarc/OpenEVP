@@ -233,9 +233,10 @@ class LibraryOps:
         store = self._store
         if store is None:
             return None
-        if not store.move_backup_paths(old, new):
+        before = store.move_backup_paths(old, new)
+        if not before:
             return None
-        return lambda: store.move_backup_paths(new, old)
+        return lambda: store.restore_backup_paths(before)     # exactly those records, never by prefix
 
     def _walk(self, path):
         """A fresh look at everything in a folder (never through a symlink or
