@@ -84,12 +84,30 @@ def rebase(path, old, new):
     return new + path[len(old):]
 
 
-def is_link(path):
-    """Is path itself a symlink, junction or other reparse point (never followed)?"""
-    st = os.lstat(path)
+_REPARSE_POINT = 0x400                  # FILE_ATTRIBUTE_REPARSE_POINT
+_NAME_SURROGATE = 0x20000000            # reparse tags that stand for another file or folder
+
+
+def _link_stat(st):
+    """Does an lstat result describe a symlink, junction (mount point) or other
+    name-surrogate reparse point? Cloud placeholders (OneDrive files on demand)
+    are reparse points too, but not name surrogates: they are ordinary files."""
     if stat.S_ISLNK(st.st_mode):
         return True
-    return bool(getattr(st, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    if getattr(st, "st_file_attributes", 0) & _REPARSE_POINT:
+        return bool(getattr(st, "st_reparse_tag", 0) & _NAME_SURROGATE)
+    return False
+
+
+def is_link(path):
+    """Is path itself a symlink or junction (never followed)?"""
+    return _link_stat(os.lstat(path))
+
+
+def entry_is_link(entry):
+    """is_link() for an os.DirEntry, from what the folder listing already read
+    (on any Python version: DirEntry.is_junction only exists from 3.12)."""
+    return entry.is_symlink() or _link_stat(entry.stat(follow_symlinks=False))
 
 
 def inside(root, path, allow_root=False):
@@ -188,15 +206,14 @@ def recycle(path, owner=None):
 
     if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
         raise RecycleError(NO_RECYCLE_BIN)
-    info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
-    if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
-        raise RecycleError(NO_RECYCLE_BIN)
-
     source = ctypes.create_unicode_buffer(path + "\0")   # double-NUL terminated; kept referenced
     op = SHFILEOPSTRUCTW(hwnd=owner or None, wFunc=FO_DELETE,
                          pFrom=ctypes.cast(source, ctypes.c_wchar_p), pTo=None, fFlags=RECYCLE_FLAGS)
-    hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)   # the shell calls below need COM
     try:
+        info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
+        if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
+            raise RecycleError(NO_RECYCLE_BIN)
         code = shell32.SHFileOperationW(ctypes.byref(op))
     finally:
         if hr >= 0:                                      # S_OK or S_FALSE; not RPC_E_CHANGED_MODE

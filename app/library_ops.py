@@ -178,7 +178,7 @@ class LibraryOps:
                 continue
             for e in entries:
                 try:
-                    if e.is_symlink() or getattr(e, "is_junction", lambda: False)():
+                    if folders.entry_is_link(e):
                         info["other_files"] += 1
                         continue
                     if e.is_dir():
@@ -299,7 +299,8 @@ class LibraryOps:
             if name == old_name:
                 return {"ok": True, "id": folder_id}
             target = os.path.join(parent, name)
-            if folders.too_long(target):
+            longest = self._longest_path(old)
+            if len(longest) + len(os.path.abspath(target)) - len(os.path.abspath(old)) >= folders.MAX_PATH_CHARS:
                 return _fail(PATH_TOO_LONG)
             if folders.name_taken(parent, name, ignore=old_name):
                 return _fail(f'There is already something named "{name}" here.')
@@ -309,18 +310,56 @@ class LibraryOps:
                 return _fail(f'There is already something named "{name}" here.')
             except OSError as e:
                 return _fail(f"{old_name} was not renamed: {_fs_problem(e)}.")
-            self._retarget_prefix(old, target)
+            try:                                    # renamed: nothing below may report otherwise
+                self._retarget_prefix(old, target)
+            except Exception:
+                pass                                # its recordings are fingerprinted again
+            self._follow_save_folder(old, target)
             self._flush_index()
             return {"ok": True, "id": _folder_id(self._rel(root, target))}
         finally:
             self._fs_end()
+
+    @staticmethod
+    def _longest_path(path):
+        """The longest absolute path of path itself or anything in it (links not followed)."""
+        longest = os.path.abspath(path)
+        stack = [longest]
+        while stack:
+            try:
+                with os.scandir(stack.pop()) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            for e in entries:
+                if len(e.path) > len(longest):
+                    longest = e.path
+                try:
+                    if not folders.entry_is_link(e) and e.is_dir(follow_symlinks=False):
+                        stack.append(e.path)
+                except OSError:
+                    continue
+        return longest
+
+    def _follow_save_folder(self, old, new):
+        """The Save-to folder was old or inside it: it is now under new (remembered
+        for the next start when the store can be written)."""
+        if not self._dest or not folders.under(self._dest, old):
+            return
+        self._dest = folders.rebase(self._dest, old, new)
+        if self._store is not None:
+            try:
+                self._store.set_setting("save_folder", self._dest)
+            except (StoreReadOnly, StoreUnavailable):
+                pass                                # used for this session; not remembered
 
     def folder_info(self, folder_id):
         """What deleting a folder would put in the Recycle Bin, counted fresh from
         disk: {"ok", "name", "recordings", "with_evps", "evps_at_least" (some
         recordings are not checked yet, so there may be more), "backups" (marked
         recorder recordings whose only backup copy is in it), "other_files",
-        "subfolders", "bytes"}."""
+        "subfolders", "bytes", "save_folder" (it is, or holds, the Save-to folder:
+        the next export or backup creates that folder again)}."""
         try:
             found = self._lib_paths(folder_id)
             if found is None:
@@ -334,7 +373,8 @@ class LibraryOps:
             return {"ok": True, "name": os.path.basename(os.path.normpath(path)),
                     "recordings": info["recordings"], "with_evps": info["with_evps"],
                     "evps_at_least": info["unindexed"] > 0, "backups": backups,
-                    "other_files": info["other_files"], "subfolders": info["subfolders"], "bytes": info["bytes"]}
+                    "other_files": info["other_files"], "subfolders": info["subfolders"], "bytes": info["bytes"],
+                    "save_folder": bool(self._dest) and folders.under(self._dest, path)}
         except Exception as e:
             return _fail(f"Could not look into the folder: {_plain(e)}")
 
@@ -370,12 +410,16 @@ class LibraryOps:
                 error = f"{os.path.basename(path)} was not moved to the Recycle Bin: {_plain(e)}"
             # Every backup with no copy left (in what remains of the folder, or
             # elsewhere in the library) now shows as not backed up.
-            left = self._walk(path)["fps"] if os.path.lexists(path) else set()
-            lost = candidates - left
-            lost -= self._fps_outside(path, lost)
-            for fp in sorted(lost):
-                if self._store.backup(fp)["status"] == "saved":
-                    self._record_backup(fp, "failed", BACKUP_RECYCLED)
+            lost = set()
+            try:
+                left = self._walk(path)["fps"] if os.path.lexists(path) else set()
+                lost = candidates - left
+                lost -= self._fps_outside(path, lost)
+                for fp in sorted(lost):
+                    if self._store.backup(fp)["status"] == "saved":
+                        self._record_backup(fp, "failed", BACKUP_RECYCLED)
+            except Exception:
+                pass                                # the folder's fate is what the result reports
             if error:
                 return {**_fail(error), "backups": len(lost)}
             return {"ok": True, "backups": len(lost)}
@@ -388,7 +432,8 @@ class LibraryOps:
         the same stem, so a .dvf and its .wav stay together); nothing is
         overwritten. Marks follow (same fingerprint). {"ok", "moved", "skipped"
         (already there), "renamed": [{"from", "to"}], "failed": [{"name", "error"}],
-        "ids": {old file id: new file id}}."""
+        "ids": {old file id: new file id}}. When nothing moved and something
+        failed, ok is False with a summary "error" (the detail fields stay)."""
         try:
             return self._move_files(file_ids, folder_id)
         except Exception as e:
@@ -425,10 +470,25 @@ class LibraryOps:
                     result["failed"].append({"name": name, "error": "It is no longer there. Refresh the list."})
                     continue
                 groups.setdefault(os.path.splitext(name)[0].casefold(), []).append((fid, path))
-            for group in groups.values():
-                self._move_group(group, target, result)
-            if result["moved"]:
-                self._flush_index()
+            try:
+                for group in groups.values():
+                    try:
+                        self._move_group(group, target, result)
+                    except Exception as e:          # the files of this group not moved yet
+                        for fid, path in group:
+                            if fid not in result["ids"] and not any(
+                                    f["name"] == os.path.basename(path) for f in result["failed"]):
+                                result["failed"].append({"name": os.path.basename(path),
+                                                         "error": f"It was not moved: {_plain(e)}."})
+            finally:
+                if result["moved"]:
+                    self._flush_index()
+            if not result["moved"] and result["failed"]:
+                first = result["failed"][0]
+                summary = (f"{first['name']} was not moved. {first['error']}" if len(result["failed"]) == 1
+                           else f"None of the {len(result['failed'])} files were moved. "
+                                f"{first['name']}: {first['error']}")
+                result.update(_fail(summary))
             return result
         finally:
             self._fs_end()
@@ -471,7 +531,10 @@ class LibraryOps:
                     result["failed"].append({"name": name, "error": problem[:1].upper() + problem[1:] + "."})
                     break
                 taken.add(new_name.casefold())
-                self._retarget_prefix(path, dest)
+                try:
+                    self._retarget_prefix(path, dest)
+                except Exception:
+                    pass                            # moved all the same; fingerprinted again later
                 result["moved"] += 1
                 result["ids"][fid] = _file_id(dest)
                 if new_name != name:

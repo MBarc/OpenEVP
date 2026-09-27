@@ -149,7 +149,7 @@ def _scan_library(folder):
     folder_rel is that same tuple for the folder directly containing the file
     (empty for a file in `folder` itself)."""
     found = []
-    folders = []
+    subfolders = []
     complete = True
     stack = [(folder, "", ())]
     while stack:
@@ -165,7 +165,7 @@ def _scan_library(folder):
             if e.name.startswith("."):
                 continue
             try:
-                if e.is_symlink() or getattr(e, "is_junction", lambda: False)():
+                if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
                     subdirs.append(e)
@@ -178,12 +178,12 @@ def _scan_library(folder):
                 continue
             found.append((investigation, e.name, kind, e.path, st, rel))
             if len(found) > SAVED_LIMIT:
-                return found[:SAVED_LIMIT], folders, True, complete
+                return found[:SAVED_LIMIT], subfolders, True, complete
         for d in subdirs:
-            folders.append(rel + (d.name,))
+            subfolders.append(rel + (d.name,))
         for d in reversed(subdirs):
             stack.append((d.path, investigation or d.name, rel + (d.name,)))
-    return found, folders, False, complete
+    return found, subfolders, False, complete
 
 
 def _marks_row(counts, reviewed, notes):
@@ -303,11 +303,11 @@ class Api(LibraryOps):
 
     def recordings(self, device_id):
         try:
-            folders = self._manager.with_session(device_id, lambda s: [(l, s.messages(l)) for l in LETTERS])
+            by_letter = self._manager.with_session(device_id, lambda s: [(l, s.messages(l)) for l in LETTERS])
         except Exception as e:
             return _error(e)
         return {"ok": True, "folders": [{"letter": l, "recordings": [_recording(m) for m in msgs]}
-                                        for l, msgs in folders]}
+                                        for l, msgs in by_letter]}
 
     def audio(self, device_id, letter, number):
         if not audio.available():
@@ -865,7 +865,7 @@ class Api(LibraryOps):
                     self._library_folders = {}
                     self._lib_job = None
             return result
-        found, folders, truncated, complete = _scan_library(folder)
+        found, subfolders, truncated, complete = _scan_library(folder)
         store = self._store
         summary = store.summary() if store is not None else {}
         table, files, pending = {}, [], []
@@ -890,7 +890,7 @@ class Api(LibraryOps):
         folder_table = {"root": folder}
         folder_rows = [{"id": "root", "parent": None, "name": os.path.basename(os.path.normpath(folder)),
                         "rel": []}]
-        for parts in sorted(folders, key=lambda p: tuple(part.lower() for part in p)):
+        for parts in sorted(subfolders, key=lambda p: tuple(part.lower() for part in p)):
             fid = _folder_id(parts)
             folder_table[fid] = os.path.join(folder, *parts)
             folder_rows.append({"id": fid, "parent": _folder_id(parts[:-1]), "name": parts[-1],
@@ -911,12 +911,14 @@ class Api(LibraryOps):
         with self._lib_lock:
             if scan_id != self._scan_id:        # a newer list_library() overtook this one
                 return result
+            if self._fs_op or self._fs_gen != fs_gen:
+                # A folder operation ran during this scan: its paths may be out of
+                # date. The page lists again after the operation.
+                result["paused"] = True
+                return result
             self._library = table
             self._library_folders = folder_table
             self._lib_job = None
-            if self._fs_op:                     # a folder operation is running; the page lists again after it
-                result["paused"] = True
-                return result
             if not pending or self._stop.is_set():
                 return result
             self._lib_job = (scan_id, self._scan_folder, pending)
