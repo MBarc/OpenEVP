@@ -708,3 +708,28 @@ class AppData:
                 del self._index["files"][k]
             if to_delete:
                 self._index_dirty = True
+
+    def move_index_prefix(self, old, new):
+        """A file or folder moved from `old` to `new`: re-key every cached entry
+        for `old` itself or anything under it to the same place under `new`
+        (same size and mtime, so nothing is fingerprinted again). Returns how
+        many entries moved. An entry already cached at the new place is replaced."""
+        with self._lock:
+            self._require_writable()
+            old_key, new_key = _index_key(old), _index_key(new)
+            under = old_key.rstrip(os.sep) + os.sep
+            files = self._index["files"]
+            moving = [k for k in files if k == old_key or k.startswith(under)]
+            entries = [(k, files.pop(k)) for k in moving]
+            for k, entry in entries:
+                files[new_key + k[len(old_key):]] = entry
+            if entries:
+                self._index_dirty = True
+            return len(entries)
+
+    def index_under(self, folder):
+        """{key: entry} of every cached entry for `folder` itself or anything under it."""
+        with self._lock:
+            key = _index_key(folder)
+            under = key.rstrip(os.sep) + os.sep
+            return {k: dict(v) for k, v in self._index["files"].items() if k == key or k.startswith(under)}

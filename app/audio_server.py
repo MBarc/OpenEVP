@@ -12,13 +12,17 @@ deleted, and only files registered this way can be reached. The file's size and
 modification time are recorded when it is fingerprinted; if either differs when
 the player asks for audio, the request is refused (409), so the player never gets
 different audio under a handle whose marks belong to the fingerprinted audio.
-The file is not copied to snapshot it: WAVs can be gigabytes.
+The file is not copied to snapshot it: WAVs can be gigabytes. Files are opened
+so that they can still be moved, renamed or recycled while they are being read
+(Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
+new place, and its URL keeps working.
 """
 import hashlib
 import io
 import os
 import re
 import secrets
+import sys
 import threading
 import wave
 from collections import OrderedDict
@@ -83,6 +87,35 @@ def _analyze(f):
         if total != expected:
             raise ValueError("the WAV file is truncated")
         return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
+
+
+def _open_shared(path):
+    """Open a file for reading (binary) without stopping anyone from reading,
+    writing, renaming or deleting it meanwhile. Python's own open() on Windows
+    does not share delete access, so a file being played could not be moved."""
+    if sys.platform != "win32":
+        return open(path, "rb")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p,
+                                     wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    GENERIC_READ, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL = 0x80000000, 3, 0x80
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE = 0x1, 0x2, 0x4
+    handle = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  None, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None)
+    if handle is None or handle == ctypes.c_void_p(-1).value:
+        err = ctypes.get_last_error()
+        raise OSError(None, ctypes.FormatError(err).strip(), path, err)
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
+    return os.fdopen(fd, "rb")
 
 
 def _stat_of(st):
@@ -156,7 +189,7 @@ class AudioServer:
         not for the page). Raises ValueError for a file that is not a playable PCM
         WAV, or that changed while it was being read."""
         path = os.path.abspath(path)
-        with open(path, "rb") as f:
+        with _open_shared(path) as f:
             stat = _stat_of(os.fstat(f.fileno()))
             key = ("file", os.path.normcase(path), *stat)
             with self._lock:
@@ -182,6 +215,28 @@ class AudioServer:
         and the audio fingerprint (st25.wavinfo) of the decoded samples."""
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
                 "fp": e["fp"]}
+
+    def retarget_prefix(self, old, new):
+        """A file or folder moved from `old` to `new` (same volume, so the same
+        size and mtime): every file served in place from `old` or under it is
+        served from its new place, under the same URL."""
+        old, new = os.path.abspath(old), os.path.abspath(new)
+        old_key = os.path.normcase(old)
+        inner = old_key.rstrip(os.sep) + os.sep
+        with self._lock:
+            for key in list(self._entries):
+                e = self._entries[key]
+                path = e.get("path")
+                if path is None:
+                    continue
+                k = os.path.normcase(path)
+                if k != old_key and not k.startswith(inner):
+                    continue
+                moved = new + path[len(old):]
+                new_key = ("file", os.path.normcase(moved), *key[2:])
+                e["path"] = moved
+                self._entries[new_key] = self._entries.pop(key)   # most recently used: kept longest
+                self._by_file[e["file"]] = new_key
 
     def forget(self, device_id):
         with self._lock:
@@ -217,7 +272,7 @@ class AudioServer:
             return
         path = entry.get("path") or os.path.join(self._dir, m.group(2) + ".wav")
         try:
-            f = open(path, "rb")
+            f = _open_shared(path)
         except OSError:
             h.send_error(404)
             return

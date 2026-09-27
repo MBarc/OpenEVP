@@ -466,6 +466,43 @@ class StoreTests(unittest.TestCase):
             store.close()
 
 
+    def test_move_index_prefix_rekeys_a_folder_or_one_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(os.path.join(d, "appdata"))
+            lib = os.path.join(d, "lib")
+            old, new = os.path.join(lib, "Old Mill"), os.path.join(lib, "Mill 2")
+            store.remember_fp(os.path.join(old, "a.wav"), 1, 10, "fpa", 1.0)
+            store.remember_fp(os.path.join(old, "sub", "b.dvf"), 2, 20, "fpb", 2.0)
+            store.remember_fp(os.path.join(lib, "Old Mill 2", "c.wav"), 3, 30, "fpc", 3.0)   # a sibling, not under
+            store.remember_fp(os.path.join(new, "a.wav"), 9, 90, "stale", 9.0)              # replaced
+            store.flush_index()
+            self.assertEqual(store.move_index_prefix(old, new), 2)
+            self.assertIsNone(store.cached_fp(os.path.join(old, "a.wav"), 1, 10))
+            self.assertEqual(store.cached_fp(os.path.join(new, "a.wav"), 1, 10)["fp"], "fpa")
+            self.assertEqual(store.cached_fp(os.path.join(new, "sub", "b.dvf"), 2, 20)["fp"], "fpb")
+            self.assertEqual(store.cached_fp(os.path.join(lib, "Old Mill 2", "c.wav"), 3, 30)["fp"], "fpc")
+            # one file
+            self.assertEqual(store.move_index_prefix(os.path.join(new, "a.wav"), os.path.join(lib, "a (2).wav")), 1)
+            self.assertEqual(store.cached_fp(os.path.join(lib, "a (2).wav"), 1, 10)["fp"], "fpa")
+            self.assertEqual(set(store.index_under(new)), {os.path.normcase(os.path.join(new, "sub", "b.dvf"))})
+            self.assertEqual(store.move_index_prefix(os.path.join(d, "nothing"), new), 0)
+            store.close()                                   # flushes the re-keyed index
+            reopened = AppData(os.path.join(d, "appdata"))
+            self.assertEqual(reopened.cached_fp(os.path.join(new, "sub", "b.dvf"), 2, 20)["fp"], "fpb")
+            reopened.close()
+
+    def test_move_index_prefix_refuses_on_a_read_only_store(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            second = AppData(d)
+            try:
+                with self.assertRaises(StoreReadOnly):
+                    second.move_index_prefix(os.path.join(d, "a"), os.path.join(d, "b"))
+            finally:
+                second.close()
+                store.close()
+
+
 class StoreMultiprocessTests(unittest.TestCase):
     def test_second_process_on_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:

@@ -13,7 +13,7 @@ from st25.protocol import PID, VID
 from st25.session import RecorderSession
 from st25.usb import list_devices
 
-from . import updater
+from . import folders, updater
 from .audio_server import AudioServer
 from .backend import Api, recording_wav
 from .devices import DeviceManager
@@ -30,6 +30,14 @@ def _recorders():
     """Usable recorders (libusb), plus placeholders for ones still needing their driver."""
     ids = list_devices(VID, PID)
     return ids + needs_setup(present_instances(), len(ids))
+
+
+def _window_handle(window):
+    """The app window's HWND (the owner of a Recycle Bin prompt), or None."""
+    try:
+        return int(window.native.Handle.ToInt64()) or None
+    except Exception:
+        return None
 
 
 def _icon():
@@ -186,7 +194,8 @@ def main():
         api = Api(manager, emit, pick_folder, default_dest, server,
                   driver_setup=set_up_driver if sys.platform == "win32" else None, pick_wav=pick_wav,
                   updater=updater, quit_app=quit_for_update, can_install=frozen and sys.platform == "win32",
-                  before_install=lambda: _hand_over(running), store=store, store_problems=store_problems)
+                  before_install=lambda: _hand_over(running), store=store, store_problems=store_problems,
+                  recycle=lambda path: folders.recycle(path, owner=_window_handle(window)))
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
         window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,

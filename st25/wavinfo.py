@@ -25,6 +25,10 @@ CHUNK_FRAMES = 1 << 18                  # 512 KiB of 16-bit mono per read
 _MAX_OUTPUT_SIZE = (1 << 32) - 1
 
 
+class Stopped(Exception):
+    """wav_fingerprint was stopped by its should_stop callback."""
+
+
 def fingerprint_prefix(nchannels, sampwidth, framerate):
     """The versioned header hashed ahead of the raw PCM samples. The version
     (``pcm1``) lets a future change to what is fingerprinted (or how) produce
@@ -41,10 +45,11 @@ def fingerprint_stream(nchannels, sampwidth, framerate, chunks):
     return h.hexdigest()
 
 
-def wav_fingerprint(f):
+def wav_fingerprint(f, should_stop=None):
     """The audio fingerprint of a PCM WAV. ``f`` is a path or a binary file
     object. Reads the data chunk in CHUNK_FRAMES-frame pieces through the
-    ``wave`` module -- never the whole file at once.
+    ``wave`` module -- never the whole file at once. ``should_stop``: a
+    callable polled before each piece; when it returns true, Stopped is raised.
 
     Raises ValueError for anything that is not a readable PCM WAV, including
     one whose data chunk is shorter than its header claims (a truncated
@@ -65,6 +70,8 @@ def wav_fingerprint(f):
         def chunks():
             nonlocal total
             while True:
+                if should_stop is not None and should_stop():
+                    raise Stopped("stopped")
                 data = w.readframes(CHUNK_FRAMES)
                 if not data:
                     return

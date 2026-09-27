@@ -128,6 +128,38 @@ def pcm_wav(path, width, channels, frames, rate=48000):
                     out += struct.pack({2: "<h", 4: "<i"}[width], v)
         w.writeframes(bytes(out))
 
+    def test_retarget_prefix_keeps_a_file_served_in_place_playing(self):
+        folder = os.path.join(self.dir.name, "lib", "Old Mill")
+        os.makedirs(folder)
+        path = os.path.join(folder, "a.wav")
+        with open(path, "wb") as f:
+            f.write(WAV)
+        info = self.s.prepare_file(path)
+        moved = os.path.join(self.dir.name, "lib", "Mill 2")
+        os.rename(folder, moved)
+        with self.assertRaises(urllib.error.HTTPError):          # the old place is gone
+            self.get(info["url"]).close()
+        self.s.retarget_prefix(folder, moved)
+        with self.get(info["url"]) as r:
+            self.assertEqual(r.read(), WAV)
+        again = self.s.prepare_file(os.path.join(moved, "a.wav"))  # found under its new key: no new entry
+        self.assertEqual(again["url"], info["url"])
+        self.s.retarget_prefix(os.path.join(self.dir.name, "elsewhere"), moved)   # nothing under it: no change
+        with self.get(info["url"]) as r:
+            self.assertEqual(r.status, 200)
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows file sharing")
+    def test_a_file_being_served_can_be_renamed(self):
+        from app import audio_server
+        path = os.path.join(self.dir.name, "open.wav")
+        with open(path, "wb") as f:
+            f.write(WAV)
+        with audio_server._open_shared(path) as f:
+            os.rename(path, path + ".moved")                      # refused with Python's own open()
+            self.assertEqual(f.read(), WAV)
+        with self.assertRaises(FileNotFoundError):
+            audio_server._open_shared(path)
+
 
 class AnalyzeTests(unittest.TestCase):
     def test_24_bit_stereo_and_8_bit(self):

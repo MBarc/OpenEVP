@@ -392,7 +392,7 @@ class LibraryTests(unittest.TestCase):
         self.write("still.wav", wav_bytes(b"still"))
         real = wavinfo.wav_fingerprint
 
-        def changing(f):
+        def changing(f, should_stop=None):
             fp = real(f)
             if f == path:
                 with open(path, "ab") as out:                                 # recorder still writing

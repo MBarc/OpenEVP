@@ -87,6 +87,13 @@ class FingerprintTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             wavinfo.wav_fingerprint(io.BytesIO(truncated))
 
+    def test_should_stop_stops_between_pieces(self):
+        wav = make_wav(seconds=0.5)
+        with self.assertRaises(wavinfo.Stopped):
+            wavinfo.wav_fingerprint(io.BytesIO(wav), should_stop=lambda: True)
+        self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(wav), should_stop=lambda: False),
+                         wavinfo.wav_fingerprint(io.BytesIO(wav)))
+
     def test_accepts_a_path(self):
         wav = make_wav()
         with tempfile.TemporaryDirectory() as d:
