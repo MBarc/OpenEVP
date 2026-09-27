@@ -58,6 +58,16 @@ table[hidden] { display: none; }
 .lib-toggle[hidden] { display: none; }
 #library-table td:first-child, #library-table th:first-child { width: 24px; padding-right: 0; }
 .lib-also { font-size: 12px; color: var(--muted); }
+/* Folder view: where you are, and the current folder's subfolders above its recordings */
+#library-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; padding: 6px 10px;
+                  border-bottom: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+#library-crumbs[hidden] { display: none; }
+#library-crumbs .crumb { max-width: 30ch; }
+.crumb-sep { color: var(--muted); }
+.crumb-here { font-weight: 600; overflow-wrap: anywhere; }
+tr.lib-folder { outline: none; user-select: none; }
+tr.lib-folder.selected td { background: var(--line); }
+.lib-folder-name { font-weight: 600; overflow-wrap: anywhere; }
 .lib-error { color: var(--warn); cursor: help; }
 #library-table .cls-chip { padding: 0 5px; font-size: 12px; }
 tr.lib-mark td { font-size: 12px; background: var(--bg); padding-top: 3px; padding-bottom: 3px; }

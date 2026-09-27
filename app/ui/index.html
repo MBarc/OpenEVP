@@ -42,8 +42,10 @@
         <button type="button" data-filter="unreviewed" title="Recordings not marked as reviewed yet">Not reviewed</button>
       </span>
       <input id="library-search" type="search" placeholder="Search names, folders and notes" autocomplete="off">
+      <label title="Every recording in the library in one list, without folders"><input type="checkbox" id="library-flat"> All recordings</label>
       <span id="library-status"></span>
     </div>
+    <nav id="library-crumbs" aria-label="Folder" hidden></nav>
     <div id="list-scroll">
     <table id="device-table">
       <thead><tr><th><input type="checkbox" id="all" title="Select all"></th><th>No.</th><th>Recorded</th><th>Length</th><th></th></tr></thead>

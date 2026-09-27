@@ -13,6 +13,11 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    files: [], byId: new Map(), groups: [], rowEls: new Map(), subEls: new Map(),
                    subMarks: new Map(), expanded: new Set(), filter: "all", search: "", renderQueued: false,
                    moreRow: null,
+                   // Folder view (see libraryGroups): the folder shown, by id and by its relative path
+                   // parts (ids change when an ancestor is renamed; the path finds it again), or flat.
+                   folders: [], folderById: new Map(), folderId: "root", folderRel: [], flat: false,
+                   folderEls: new Map(), selFolder: null, paused: false,
+                   selected: new Set(),                   // file ids of the recordings selected (Task 5)
                    summaries: new Map(),                  // fp -> {marks, reviewed, notes}: one per recording, not per file
                    subTokens: new Map(), subToken: 0 },   // key -> token of the subMarks fetch that may still answer
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
@@ -307,7 +312,11 @@ async function loadLibrary() {
   }
   Object.assign(L, { scanId: r.scan_id, folder: r.folder, exists: r.exists, truncated: r.truncated,
                      indexing: r.indexing, done: 0, total: r.pending, checkError: "", problem: "",
-                     files: r.files, byId: new Map(r.files.map((f) => [f.id, f])), summaries: new Map() });
+                     files: r.files, byId: new Map(r.files.map((f) => [f.id, f])), summaries: new Map(),
+                     folders: r.folders || [], folderById: new Map((r.folders || []).map((d) => [d.id, d])),
+                     paused: !!r.paused });
+  for (const id of [...L.selected]) if (!L.byId.has(id)) L.selected.delete(id);
+  findLibraryFolder(!r.paused);
   for (const f of r.files) if (f.fp && !L.summaries.has(f.fp)) L.summaries.set(f.fp, fileSummary(f));
   // The backend is the source of truth: if it differs from the player (markers imported
   // meanwhile), the player fetches its marks again instead of overwriting the listing.
@@ -375,13 +384,15 @@ function setFileFp(f, fp) {
   if (was !== now && S.lib.expanded.delete(was)) S.lib.expanded.add(now);
 }
 
-// The recordings: files grouped by fingerprint, in the order of their main file.
+// The recordings: files grouped by fingerprint, in the order of their main file. In the
+// folder view, copies in different folders are rows of their own (a group per folder and fp).
+// key = the row; recKey = the recording (its marks, expanded state).
 function libraryGroups() {
   const L = S.lib, groups = new Map(), order = new Map();
   L.files.forEach((f, i) => {
     order.set(f, i);
-    const k = libFileKey(f);
-    if (!groups.has(k)) groups.set(k, { key: k, files: [] });
+    const rk = libFileKey(f), k = L.flat ? rk : `${f.folder_id}|${rk}`;
+    if (!groups.has(k)) groups.set(k, { key: k, recKey: rk, folderId: f.folder_id, files: [] });
     groups.get(k).files.push(f);
   });
   const out = [];
@@ -423,20 +434,32 @@ function renderLibrary() {
   const L = S.lib;
   L.renderQueued = false;
   L.groups = libraryGroups();
-  $("library-count").textContent = L.listed && L.groups.length ? `(${L.groups.length})` : "";
+  $("library-count").textContent = L.listed && L.files.length ? `(${new Set(L.files.map(libFileKey)).size})` : "";
   $("library-entry").title = L.folder || "";
   if (S.view !== "library") return;
   renderLibraryBar();
-  const wanted = [], live = new Set();
+  renderCrumbs();
+  const wanted = [], live = new Set(), liveFolders = new Set();
   let shown = 0;
+  if (!L.flat) {
+    for (const d of libraryFolderRows()) {
+      if (!d.visible) continue;
+      liveFolders.add(d.id);
+      shown++;
+      wanted.push(libraryFolderRow(d));
+    }
+  }
   for (const g of L.groups) {
     live.add(g.key);
+    if (!L.flat && g.folderId !== L.folderId) continue;
     if (!libraryMatches(g)) continue;
     shown++;
     wanted.push(libraryRow(g));
-    if (L.expanded.has(g.key)) wanted.push(...libraryMarkRows(g));
+    if (L.expanded.has(g.recKey)) wanted.push(...libraryMarkRows(g));
   }
   for (const k of L.rowEls.keys()) if (!live.has(k)) { L.rowEls.delete(k); L.subEls.delete(k); }
+  for (const k of L.folderEls.keys()) if (!liveFolders.has(k)) L.folderEls.delete(k);
+  if (L.selFolder && !liveFolders.has(L.selFolder)) L.selFolder = null;
   if (L.truncated) {
     L.moreRow.firstChild.textContent = `Only the first ${L.files.length} files are shown.`;
     wanted.push(L.moreRow);
@@ -454,8 +477,205 @@ function renderLibrary() {
   if (!L.listed) empty.textContent = "Loading…";
   else if (L.problem) empty.textContent = L.problem;
   else if (!L.exists) empty.textContent = `${L.folder} does not exist yet. Export recordings from a recorder, or choose another library folder above.`;
-  else if (!L.files.length) empty.textContent = `No .dvf or WAV files in ${L.folder} yet.`;
-  else empty.textContent = "No recordings match.";
+  else if (!L.files.length && (L.flat || L.folders.length <= 1)) empty.textContent = `No .dvf or WAV files in ${L.folder} yet.`;
+  else if (L.flat || libraryFiltering()) empty.textContent = "No recordings match.";
+  else empty.textContent = "This folder is empty. Drag recordings here or use Move to…";
+}
+
+function libraryFiltering() { return S.lib.filter !== "all" || !!S.lib.search.trim(); }
+
+// ---- Folder view: the breadcrumb, the current folder's subfolders, navigation ----
+// The folders arrive in tree order (root first, parent before child); where a folder sits
+// comes from its parent chain.
+function libraryFolderChain(id) {
+  const L = S.lib, chain = [];
+  for (let d = L.folderById.get(id); d; d = d.parent == null ? null : L.folderById.get(d.parent)) chain.unshift(d);
+  return chain;
+}
+
+function sameRel(a, b) {                     // Windows names: another case is the same folder
+  return a.length === b.length && a.every((p, i) => p.toLowerCase() === b[i].toLowerCase());
+}
+
+// After a listing: the folder shown is found again by its relative path (an ancestor renamed
+// gives it a new id), else its nearest existing ancestor, else the library itself. remember:
+// what was found becomes the folder to show from now on (not after a listing made during a
+// folder operation, whose folders may be out of date).
+function findLibraryFolder(remember) {
+  const L = S.lib;
+  let found = null;
+  for (let n = L.folderRel.length; n >= 0 && !found; n--) {
+    const rel = L.folderRel.slice(0, n);
+    found = L.folders.find((d) => sameRel(d.rel, rel)) || null;
+  }
+  L.folderId = found ? found.id : "root";
+  if (found && remember && found.rel.join("\0") !== L.folderRel.join("\0")) {
+    L.folderRel = found.rel.slice();
+    saveLibraryView();
+  }
+}
+
+// A folder was renamed (for Task 5): the folder shown, or one inside it, keeps its place under
+// the new name when the page lists again.
+function libraryFolderRenamed(oldRel, newRel) {
+  const L = S.lib;
+  if (L.folderRel.length >= oldRel.length && sameRel(L.folderRel.slice(0, oldRel.length), oldRel)) {
+    L.folderRel = [...newRel, ...L.folderRel.slice(oldRel.length)];
+    saveLibraryView();
+  }
+}
+
+function openLibraryFolder(id) {
+  const L = S.lib, d = L.folderById.get(id);
+  if (!d) return;
+  L.folderId = d.id; L.folderRel = d.rel.slice();
+  L.selFolder = null; L.selected.clear();
+  saveLibraryView();
+  $("list-scroll").scrollTop = 0;
+  scheduleLibraryRender();
+}
+
+function libraryUp() {
+  const d = S.lib.folderById.get(S.lib.folderId);
+  if (d && d.parent != null) openLibraryFolder(d.parent);
+}
+
+// The current folder's subfolders (by name), each with the recordings in its whole subtree
+// (each recording once) and their EVPs. With a filter or search, a subfolder shows only if
+// a recording somewhere in it matches.
+function libraryFolderRows() {
+  const L = S.lib, rows = new Map();
+  for (const d of L.folders) if (d.parent === L.folderId) rows.set(d.id, { ...d, recs: new Set(), visible: !libraryFiltering() });
+  if (!rows.size) return [];
+  const top = new Map();                       // folder id -> the subfolder of the current folder it is in (or null)
+  const topOf = (id) => {
+    if (top.has(id)) return top.get(id);
+    const d = L.folderById.get(id);
+    const t = rows.has(id) ? id : !d || d.parent == null ? null : topOf(d.parent);
+    top.set(id, t);
+    return t;
+  };
+  for (const g of L.groups) {
+    const t = topOf(g.folderId);
+    if (t == null) continue;
+    const row = rows.get(t);
+    row.recs.add(g.recKey);
+    if (!row.visible && libraryMatches(g)) row.visible = true;
+  }
+  for (const row of rows.values()) {
+    row.count = row.recs.size;
+    row.marks = { A: 0, B: 0, C: 0 };
+    for (const k of row.recs) {
+      const sum = k.startsWith("id:") ? null : L.summaries.get(k);
+      if (sum) for (const c of ["A", "B", "C"]) row.marks[c] += sum.marks[c] || 0;
+    }
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }));
+}
+
+// A subfolder's row: a click selects it, a double-click (or Enter while selected) opens it.
+function libraryFolderRow(d) {
+  const L = S.lib;
+  let tr = L.folderEls.get(d.id);
+  if (!tr) {
+    tr = document.createElement("tr");
+    tr.className = "lib-folder";
+    tr.tabIndex = -1;
+    for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
+    tr.onclick = () => { L.selFolder = tr.folderId; tr.focus({ preventScroll: true }); scheduleLibraryRender(); };
+    tr.ondblclick = () => openLibraryFolder(tr.folderId);
+    tr.title = "Double-click to open";
+    L.folderEls.set(d.id, tr);
+  }
+  tr.folderId = d.id;
+  const selected = L.selFolder === d.id;
+  const sig = JSON.stringify([d.name, d.count, d.marks, selected, !!S.caps.marks]);
+  if (tr.sig === sig) return tr;
+  tr.sig = sig;
+  tr.classList.toggle("selected", selected);
+  const [, cName, , , , cEvp] = tr.cells;
+  cName.textContent = "";
+  const name = document.createElement("div");
+  name.className = "lib-folder-name";
+  name.textContent = `📁 ${d.name}`;
+  const count = document.createElement("div");
+  count.className = "lib-also";
+  count.textContent = d.count ? plural(d.count, "recording") : "No recordings";
+  cName.append(name, count);
+  cEvp.textContent = "";
+  if (S.caps.marks) {
+    for (const c of ["A", "B", "C"]) {
+      if (!d.marks[c]) continue;
+      const chip = document.createElement("span");
+      chip.className = `cls-chip cls-${c}`;
+      chip.textContent = `${c}×${d.marks[c]}`;
+      chip.title = `${plural(d.marks[c], "class " + c + " EVP")} in this folder`;
+      cEvp.append(chip, " ");
+    }
+  }
+  return tr;
+}
+
+// Library › Old Mill › Night 2: every folder above the current one is a button.
+function renderCrumbs() {
+  const L = S.lib, bar = $("library-crumbs");
+  bar.hidden = L.flat || !L.listed || !!L.problem || !L.exists || !L.folders.length;
+  if (bar.hidden) return;
+  const chain = libraryFolderChain(L.folderId);
+  const sig = JSON.stringify(chain.map((d) => [d.id, d.name]));
+  if (bar.sig === sig) return;
+  bar.sig = sig;
+  bar.textContent = "";
+  chain.forEach((d, i) => {
+    if (i) {
+      const sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.textContent = "›";
+      bar.appendChild(sep);
+    }
+    const name = d.name || "Library";
+    if (i === chain.length - 1) {
+      const here = document.createElement("span");
+      here.className = "crumb-here";
+      here.textContent = name;
+      bar.appendChild(here);
+    } else {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "link crumb";
+      b.textContent = name;
+      b.title = `Go to ${name}`;
+      b.onclick = () => openLibraryFolder(d.id);
+      bar.appendChild(b);
+    }
+  });
+}
+
+// The All recordings switch and the folder shown are remembered for this viewer (best effort).
+const LIB_VIEW_KEY = "openevp.library-view";
+function saveLibraryView() {
+  try { localStorage.setItem(LIB_VIEW_KEY, JSON.stringify({ flat: S.lib.flat, rel: S.lib.folderRel })); } catch (e) { /* not kept */ }
+}
+function loadLibraryView() {
+  try {
+    const v = JSON.parse(localStorage.getItem(LIB_VIEW_KEY) || "null");
+    if (!v) return;
+    S.lib.flat = v.flat === true;
+    if (Array.isArray(v.rel) && v.rel.every((p) => typeof p === "string")) S.lib.folderRel = v.rel;
+  } catch (e) { /* the defaults */ }
+}
+
+// Enter opens the selected folder; Backspace goes up a level (not while typing or in a dialog).
+function libraryKeys(e) {
+  const L = S.lib;
+  if (S.view !== "library" || L.flat || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
+  if (e.key === "Enter" && L.selFolder && e.target.tagName !== "BUTTON" && L.folderById.has(L.selFolder)) {
+    e.preventDefault();
+    openLibraryFolder(L.selFolder);
+  } else if (e.key === "Backspace") {
+    e.preventDefault();
+    libraryUp();
+  }
 }
 
 function renderLibraryBar() {
@@ -466,7 +686,10 @@ function renderLibraryBar() {
   const st = $("library-status");
   st.classList.toggle("warn", !L.indexing && !!L.checkError);
   st.textContent = L.indexing ? `Checking recordings… ${L.done} of ${L.total}` : L.checkError ? "Could not check some recordings" : "";
+  // Folders show only if a recording in them matches: one not checked yet may still match.
+  if (L.indexing && !L.flat && libraryFiltering()) st.textContent += " (folders may appear as recordings are checked)";
   st.title = L.indexing ? "" : L.checkError;
+  $("library-flat").checked = L.flat;
 }
 
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
@@ -492,7 +715,7 @@ function libraryRow(g) {
   }
   tr.group = g;
   const total = g.marks.A + g.marks.B + g.marks.C;
-  const expanded = L.expanded.has(g.key);
+  const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
   const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type]), g.seconds, g.marks, g.reviewed,
                               g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable]);
@@ -557,7 +780,7 @@ function libraryRow(g) {
 
 // The sub-rows of an expanded recording: one per mark (or a loading / error line).
 function libraryMarkRows(g) {
-  const L = S.lib, marks = L.subMarks.get(g.key);
+  const L = S.lib, marks = L.subMarks.get(g.recKey);   // marks per recording, rows per group
   if (marks === undefined) fetchLibraryMarks(g);
   const held = L.subEls.get(g.key);
   if (held && held.marks === marks && held.fp === g.fp) return held.els;
@@ -617,7 +840,7 @@ function dropSubMarks(key) { S.lib.subTokens.delete(key); S.lib.subMarks.delete(
 function clearSubMarks() { S.lib.subTokens.clear(); S.lib.subMarks.clear(); }
 
 async function fetchLibraryMarks(g) {
-  const L = S.lib, key = g.key, seq = L.seq;
+  const L = S.lib, key = g.recKey, seq = L.seq;
   const token = setSubMarks(key, null);       // loading
   const r = await api().library_marks(g.main.id);
   if (seq !== L.seq || L.subTokens.get(key) !== token) return;   // relisted, updated or fetched again meanwhile
@@ -627,7 +850,7 @@ async function fetchLibraryMarks(g) {
 
 function toggleLibraryRow(g) {
   const L = S.lib;
-  if (!L.expanded.delete(g.key)) L.expanded.add(g.key);
+  if (!L.expanded.delete(g.recKey)) L.expanded.add(g.recKey);
   scheduleLibraryRender();
 }
 
@@ -749,8 +972,21 @@ function setupLibrary() {
   $("library-entry").onclick = showLibrary;
   $("library-folder").onclick = async () => {
     const d = await api().choose_library_folder();
-    if (d) { S.lib.folder = d; S.lib.expanded.clear(); loadLibrary(); }
+    if (d) {
+      Object.assign(S.lib, { folder: d, folderId: "root", folderRel: [], selFolder: null });
+      S.lib.expanded.clear(); S.lib.selected.clear();
+      saveLibraryView();
+      loadLibrary();
+    }
   };
+  loadLibraryView();
+  $("library-flat").onchange = () => {
+    Object.assign(S.lib, { flat: $("library-flat").checked, selFolder: null });
+    S.lib.selected.clear();
+    saveLibraryView();
+    scheduleLibraryRender();
+  };
+  document.addEventListener("keydown", libraryKeys);
   for (const b of document.querySelectorAll("#library-filters button")) {
     b.onclick = () => { S.lib.filter = b.dataset.filter; scheduleLibraryRender(); };
   }
