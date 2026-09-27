@@ -160,6 +160,20 @@ def audio_fingerprint(dvf_bytes):
     return hashlib.sha256(audio).hexdigest()
 
 
+def audio_matches(existing_bytes, fingerprint):
+    """Whether a .dvf already on disk holds the recording whose
+    audio_fingerprint() is ``fingerprint``: THE .dvf "already saved" test,
+    used by st25.export and openevp.formats. Frozen semantics: a plain
+    equality of fingerprints (so a damaged file, fingerprint None, matches
+    another damaged file)."""
+    return audio_fingerprint(existing_bytes) == fingerprint
+
+
+def same_audio(existing_bytes, new_bytes):
+    """audio_matches() for two .dvf files."""
+    return audio_matches(existing_bytes, audio_fingerprint(new_bytes))
+
+
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 

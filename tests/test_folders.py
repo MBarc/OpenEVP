@@ -1,6 +1,7 @@
 """Library folders: name rules, containment, the Recycle Bin call, and the Api's
 create / rename / folder_info / delete_folder / move_files (tasks 2 and 3)."""
 import ctypes
+import dataclasses
 import os
 import shutil
 import stat
@@ -19,9 +20,37 @@ from app import backend, folders, library_ops  # noqa: E402
 from app.store import StoreUnavailable  # noqa: E402
 from app.audio_server import AudioServer  # noqa: E402
 from app.store import AppData  # noqa: E402
-from st25 import wavinfo  # noqa: E402
+from openevp import formats  # noqa: E402
+from st25 import audio as st25_audio  # noqa: E402  (the .dvf decoder behind openevp.formats.DVF)
+from openevp import wavinfo  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
+
+
+class _AlwaysUnreadable:
+    """A stand-in .dvf decoder: available (so indexing does not stall on
+    "pending"), but every recording fails to decode, as for a genuinely
+    unreadable one. Independent of the real LPEC tables/DLL, which the
+    grouping and backup-identity behaviour under test does not need."""
+
+    def available(self):
+        return True
+
+    def reason(self):
+        return None
+
+    def warning(self):
+        return None
+
+    def to_wav(self, data, should_stop=None):
+        raise formats.DecodeError("not decodable (test stub)")
+
+
+def dvf_decodes_as_unreadable():
+    """Patches formats.DVF's decoder (via the registry) for the duration of a
+    ``with`` block, so .dvf indexing completes without the real decoder."""
+    stub = dataclasses.replace(formats.DVF, decoder=_AlwaysUnreadable())
+    return mock.patch.dict(formats._registry, {".dvf": stub})
 
 
 class NameTests(unittest.TestCase):
@@ -755,7 +784,8 @@ class MoveTests(FolderApiBase):
         self.write("c.wav", wav_bytes(b"c"))
         os.makedirs(os.path.join(self.lib, "T"))
         api = self.new_api()
-        r = self.index(api)                             # no indexer left to flush meanwhile
+        with dvf_decodes_as_unreadable():
+            r = self.index(api)                         # no indexer left to flush meanwhile
         real_scandir = os.scandir
         calls = []
 
@@ -1261,7 +1291,7 @@ class BackupIdentityTests(FolderApiBase):
         self.assertEqual(self.store.backup_record("fpB")["paths"], [stale])       # untouched
         with self.store._lock:                                 # b.dvf: not indexed, and no decoder
             self.store._index["files"].clear()
-        with mock.patch.object(library_ops.audio, "available", return_value=False):
+        with mock.patch.object(st25_audio, "available", return_value=False):
             res = api.delete_folder(self.folder(r, "Elsewhere"))
         self.assertTrue(res["ok"], res)
         self.assertEqual(self.store.backup("fpB"), {"status": "failed", "detail": library_ops.BACKUP_UNCHECKED})
@@ -1271,13 +1301,14 @@ class BackupIdentityTests(FolderApiBase):
         self.write("A/x.dvf", dvf_bytes(5))
         self.write("Save/y.wav", wav_bytes(b"y"))
         api = self.new_api()
-        r = self.index(api)
+        with dvf_decodes_as_unreadable():
+            r = self.index(api)
         y = next(f["fp"] for f in r["files"] if f["name"] == "y.wav")
         self.store.set_backup("fpLegacy", "saved", "Saved")        # could be one of them: nothing says otherwise
         self.backup("fpKnown", "Save/y.wav")                      # its file is where it was recorded
         with self.store._lock:                                     # x.dvf not indexed, and no decoder now
             self.store._index["files"].pop(os.path.normcase(os.path.join(self.lib, "A", "x.dvf")), None)
-        with mock.patch.object(library_ops.audio, "available", return_value=False):
+        with mock.patch.object(st25_audio, "available", return_value=False):
             res = api.delete_folder(self.folder(r, "A"))
         self.assertEqual(res, {"ok": True, "backups": 1})
         self.assertEqual(self.store.backup("fpLegacy"), {"status": "failed", "detail": library_ops.BACKUP_UNCHECKED})
@@ -1289,7 +1320,7 @@ class BackupIdentityTests(FolderApiBase):
         api = self.new_api()
         r = self.index(api)
         self.store.set_backup("fpLegacy", "saved", "Saved")
-        with mock.patch.object(library_ops.audio, "available", return_value=False), \
+        with mock.patch.object(st25_audio, "available", return_value=False), \
                 mock.patch.object(self.store, "set_backups", side_effect=StoreUnavailable("disk full")):
             res = api.delete_folder(self.folder(r, "A"))
         self.assertIn("not deleted", res["error"])

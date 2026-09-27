@@ -2,8 +2,9 @@
 ;
 ; One setup file, one admin prompt, nothing else to install:
 ;   - the desktop app and the command-line downloader
-;   - the recorder driver (WinUSB for USB 054C:0103), whether or not the
-;     recorder is plugged in; Windows applies it when it is (any USB port)
+;   - the recorder driver (WinUSB for every recorder model in the driver manifest,
+;     _internal\driver\models.json: today the ICD-ST25, USB 054C:0103), whether or
+;     not the recorder is plugged in; Windows applies it when it is (any USB port)
 ;   - Microsoft's WebView2 runtime, only if this PC does not have it yet
 ;     (Windows 11 and updated Windows 10 already do; this step needs internet)
 ; Uninstalling removes all of it, including the driver and its certificate.
@@ -15,6 +16,10 @@
 
 #ifndef AppVersion
   #error Pass /DAppVersion=<version> (build_windows.ps1 does)
+#endif
+; The driver scripts read the manifest; without it the driver step would fail on every PC.
+#if !FileExists(AddBackslash(SourcePath) + "..\dist\OpenEVP\_internal\driver\models.json")
+  #error dist\OpenEVP\_internal\driver\models.json is missing: build with build_windows.ps1
 #endif
 
 [Setup]

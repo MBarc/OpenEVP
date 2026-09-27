@@ -1,8 +1,14 @@
-# Bind the Sony ICD-ST25 (USB 054C:0103) to Windows' built-in WinUSB driver.
+# Bind the recorders that need it (the Sony ICD-ST25, USB 054C:0103, today) to Windows'
+# built-in WinUSB driver.
+#
+# Which recorders: models.json next to this script, the driver manifest written at build
+# time from the recorder registry (tools/make_driver_manifest.py): the models, their USB
+# hardware ids, the driver version and the INF text. Read and checked by manifest.ps1.
 #
 # Runs elevated (the installer, or the app's "Set up recorder" button). Uses only
 # tools built into Windows:
-#   1. write an INF that includes Microsoft's signed winusb.inf for this one device
+#   1. write the manifest's INF, which includes Microsoft's signed winusb.inf for
+#      those devices
 #   2. catalog it (New-FileCatalog) and sign the catalog with a certificate made
 #      here and now (New-SelfSignedCertificate)
 #   3. trust that certificate on this PC (Root + TrustedPublisher), then delete
@@ -32,9 +38,9 @@ Import-Module (Join-Path $env:PSModulePath "Microsoft.PowerShell.Security") -Err
 $pnputil = Join-Path $sys "pnputil.exe"
 $icacls = Join-Path $sys "icacls.exe"
 
-# Must change whenever the INF below changes (MM/dd/yyyy, and a higher version).
-$DriverDate = "09/25/2026"
-$DriverVersion = [version]"1.0.1.0"          # 1.0.1.0: renamed to OpenEVP
+# The driver version (DriverVer) comes from the manifest; it changes whenever the INF
+# does (see DRIVER_RELEASES in tools/make_driver_manifest.py).
+$DriverVersion = $null
 # Our signer certificates, current and earlier names (the app was "ST25 Downloader").
 $SignerPatterns = "*OpenEVP driver signer*", "*ST25 Downloader driver signer*"
 function Is-OurSigner($c) { foreach ($p in $SignerPatterns) { if ($c.Subject -like $p) { return $true } }; return $false }
@@ -69,6 +75,12 @@ $cert = $null
 $pkg = $null
 $ok = $false
 try {
+    . (Join-Path $PSScriptRoot "manifest.ps1")
+    $manifest = Read-DriverManifest (Join-Path $PSScriptRoot "models.json")
+    $DriverVersion = $manifest.Version
+    Log ("driver {0} for: {1}" -f $DriverVersion, (($manifest.Models | ForEach-Object {
+        "$($_.name) ($(@($_.hardware_ids) -join ', '))" }) -join "; "))
+
     $ours = Our-Packages
 
     $current = $ours | Where-Object { [version]$_.Version -eq $DriverVersion } | Select-Object -First 1
@@ -88,45 +100,7 @@ try {
         $inf = Join-Path $pkg "st25_winusb.inf"
         $cat = Join-Path $pkg "st25_winusb.cat"
 
-        Set-Content -Path $inf -Encoding ASCII -Value @"
-[Version]
-Signature   = "`$Windows NT`$"
-Class       = USBDevice
-ClassGUID   = {88BAE032-5A81-49f0-BC3D-A4FF138216D6}
-Provider    = %Provider%
-CatalogFile = st25_winusb.cat
-DriverVer   = $DriverDate,$DriverVersion
-
-[Manufacturer]
-%Provider% = Devices, NTamd64, NTx86, NTarm64
-
-[Devices.NTamd64]
-%DeviceName% = USB_Install, USB\VID_054C&PID_0103
-
-[Devices.NTx86]
-%DeviceName% = USB_Install, USB\VID_054C&PID_0103
-
-[Devices.NTarm64]
-%DeviceName% = USB_Install, USB\VID_054C&PID_0103
-
-[USB_Install]
-Include = winusb.inf
-Needs   = WINUSB.NT
-
-[USB_Install.Services]
-Include = winusb.inf
-Needs   = WINUSB.NT.Services
-
-[USB_Install.HW]
-AddReg = Dev_AddReg
-
-[Dev_AddReg]
-HKR,,DeviceInterfaceGUIDs,0x10000,"{7C3C3F6B-2E54-4F0B-9C1B-5D2A8B3E0A25}"
-
-[Strings]
-Provider   = "OpenEVP"
-DeviceName = "Sony IC Recorder (ST) - WinUSB"
-"@
+        Set-Content -Path $inf -Encoding ASCII -Value $manifest.Inf
         Log "wrote $inf"
 
         New-FileCatalog -Path $pkg -CatalogFilePath $cat -CatalogVersion 2 | Out-Null
@@ -178,13 +152,16 @@ DeviceName = "Sony IC Recorder (ST) - WinUSB"
     }
 
     # pnputil succeeding does not prove the recorder uses WinUSB (a higher-ranked
-    # driver would win): check every connected recorder.
+    # driver would win): check every connected recorder of every model the driver covers,
+    # each device on its own.
     $bad = @()
-    foreach ($dev in @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue |
-                       Where-Object { $_.InstanceId -like "USB\VID_054C&PID_0103\*" })) {
-        $service = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName DEVPKEY_Device_Service).Data
-        Log "connected recorder $($dev.InstanceId): service '$service', status $($dev.Status)"
-        if ($service -ne "WINUSB" -and -not $restart) { $bad += "$($dev.InstanceId) uses '$service'" }
+    $present = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+    foreach ($hwid in @($manifest.Models | ForEach-Object { @($_.hardware_ids) })) {
+        foreach ($dev in @($present | Where-Object { $_.InstanceId -like "$hwid\*" })) {
+            $service = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName DEVPKEY_Device_Service).Data
+            Log "connected recorder $($dev.InstanceId): service '$service', status $($dev.Status)"
+            if ($service -ne "WINUSB" -and -not $restart) { $bad += "$($dev.InstanceId) uses '$service'" }
+        }
     }
     if ($bad.Count) { throw "the recorder is not using WinUSB: $($bad -join '; ')" }
     $ok = $true

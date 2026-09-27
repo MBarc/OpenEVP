@@ -116,3 +116,26 @@ class FakeRecorderDevice:
 
     def close(self):
         pass
+
+
+def st25_manager(ids, open_session, **kwargs):
+    """An app.devices.DeviceManager over emulated ICD-ST25s: ids() gives the
+    connection ids attached now ("<port>@<address>", or "setup:<instance>" for
+    one whose driver is not set up), open_session(id) an st25 RecorderSession
+    for one; the app uses it through the ST25 model's adapter, as it uses a
+    real one (discovered and opened like openevp.recorders.sony_st25 does)."""
+    from app.devices import DeviceManager
+    from openevp.recorders import base
+    from openevp.recorders.sony_st25 import SETUP_MESSAGE, SETUP_PREFIX, ST25Session, SonyST25
+
+    def discover():
+        found = []
+        for i in ids():
+            if i.startswith(SETUP_PREFIX):
+                found.append(base.DiscoveredDevice(i, SonyST25.model_id, "", state=base.NEEDS_DRIVER,
+                                                   message=SETUP_MESSAGE))
+            else:
+                found.append(base.DiscoveredDevice(i, SonyST25.model_id, "port " + i.split("@")[0], locator=i,
+                                                   where="on USB port " + i.split("@")[0]))
+        return found, []
+    return DeviceManager(discover, lambda model, device: ST25Session(open_session(device.locator)), **kwargs)

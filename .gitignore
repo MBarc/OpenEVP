@@ -12,9 +12,14 @@ probe-out/
 out*/
 .superpowers/
 # extracted LPEC tables, pending legal review (tools/import_lpec_tables.py)
-st25/lpec/data/
+openevp/decoders/sony_lpec/data/
 # LPEC C core, built by tools/build_lpec_core.py
+openevp/decoders/sony_lpec/lpec_core.dll
+# their locations before v0.8 (a local copy may still be there)
+st25/lpec/data/
 st25/lpec/lpec_core.dll
 # decoder test vectors: synthetic audio only (see tests/vectors/*.json)
 !tests/vectors/*.dvf
 driver-setup/
+# driver manifest, generated at build time (tools/make_driver_manifest.py)
+app/driver/models.json

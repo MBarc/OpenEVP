@@ -1,4 +1,4 @@
-"""Build the optional LPEC C core: st25/lpec/_lpec.c -> st25/lpec/lpec_core.dll.
+"""Build the optional LPEC C core: openevp/decoders/sony_lpec/_lpec.c -> openevp/decoders/sony_lpec/lpec_core.dll.
 
     python tools/build_lpec_core.py [--cc gcc]
 
@@ -8,7 +8,7 @@ bit-exactness (docs/lpec.md, "Arithmetic"): plain IEEE double arithmetic
 in source order, so no fused multiply-add (-ffp-contract=off) and no
 fast-math reassociation. -static-libgcc keeps the DLL dependent only on
 Windows' own runtime. The DLL is a build output (git-ignored); without it
-st25.lpec decodes in pure Python.
+openevp.decoders.sony_lpec decodes in pure Python.
 """
 
 import argparse
@@ -17,8 +17,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SOURCE = ROOT / "st25" / "lpec" / "_lpec.c"
-TARGET = ROOT / "st25" / "lpec" / "lpec_core.dll"
+SOURCE = ROOT / "openevp" / "decoders" / "sony_lpec" / "_lpec.c"
+TARGET = ROOT / "openevp" / "decoders" / "sony_lpec" / "lpec_core.dll"
 
 FLAGS = [
     "-O2", "-ffp-contract=off", "-fno-fast-math", "-std=c11",

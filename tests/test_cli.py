@@ -38,10 +38,10 @@ class WavFlagTests(unittest.TestCase):
         return code, buf.getvalue(), dev
 
     def test_wav_written_beside_each_dvf(self):
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             code, out, _dev = self._run(d, ["--wav"])
             self.assertEqual(code, 0)
             outdir = os.path.join(d, "A")
@@ -52,17 +52,17 @@ class WavFlagTests(unittest.TestCase):
             self.assertIn("wav saved", out)
 
     def test_without_wav_flag_no_wav_written(self):
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             code, out, _dev = self._run(d)          # no --wav
             self.assertEqual(code, 0)
             self.assertEqual(sorted(os.listdir(os.path.join(d, "A"))), sorted(DVF_NAMES))
 
     def test_decoder_unavailable_warns_once_and_still_saves_dvf(self):
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": None}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             code, out, _dev = self._run(d, ["--wav"])
             self.assertEqual(code, 0)
             self.assertIn("Note: --wav requested but", out)
@@ -72,10 +72,10 @@ class WavFlagTests(unittest.TestCase):
             self.assertEqual(out.count("Note: --wav requested"), 1)          # not per-recording
 
     def test_wav_never_overwrites_and_is_skipped_when_identical(self):
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             dev = FakeRecorderDevice(FOLDERS)
             self._run(d, ["--wav"], dev=dev)
             outdir = os.path.join(d, "A")
@@ -92,10 +92,10 @@ class WavFlagTests(unittest.TestCase):
     def test_wav_backfilled_for_a_previously_downloaded_recording(self):
         """A .dvf saved without --wav in an earlier run gets its .wav filled
         in on a later --wav run, without re-saving (or duplicating) the .dvf."""
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             self._run(d, [], dev=FakeRecorderDevice(FOLDERS))           # no --wav
             outdir = os.path.join(d, "A")
             self.assertEqual(sorted(os.listdir(outdir)), sorted(DVF_NAMES))
@@ -111,10 +111,10 @@ class WavFlagTests(unittest.TestCase):
     def test_wav_conversion_failure_is_a_note_not_a_crash(self):
         def boom(data):
             raise ValueError("bad frame")
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = boom
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             code, out, _dev = self._run(d, ["--wav"])
             self.assertEqual(code, 1)                     # problems were recorded
             self.assertIn("WAV not converted", out)
@@ -136,10 +136,10 @@ class CheckWavTests(unittest.TestCase):
         return path
 
     def test_check_wav_success_never_touches_the_recorder(self):
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data: b"RIFF" + bytes(44 - 4) + b"\0" * 16000
         with tempfile.TemporaryDirectory() as d, \
-                mock.patch.dict(sys.modules, {"st25.lpec": fake}), \
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}), \
                 mock.patch.object(cli, "Recorder", side_effect=AssertionError("must not touch the recorder")):
             path = self._write_dvf(d)
             buf = io.StringIO()
@@ -149,7 +149,7 @@ class CheckWavTests(unittest.TestCase):
         self.assertIn("OK: decoded", buf.getvalue())
 
     def test_check_wav_reports_decoder_unavailable(self):
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, {"st25.lpec": None}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             path = self._write_dvf(d)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -160,7 +160,7 @@ class CheckWavTests(unittest.TestCase):
     def test_check_wav_missing_tables_plain_message_plus_developer_hint(self):
         """The reason is the plain user-facing one; only --check-wav adds the
         developer hint on how to create the table data."""
-        from st25.lpec import TablesMissing, tables
+        from openevp.decoders.sony_lpec import TablesMissing, tables
         with tempfile.TemporaryDirectory() as d,                 mock.patch.object(tables, "load", side_effect=TablesMissing()):
             path = self._write_dvf(d)
             buf = io.StringIO()
@@ -182,9 +182,9 @@ class CheckWavTests(unittest.TestCase):
     def test_check_wav_reports_decode_failure(self):
         def boom(data):
             raise ValueError("bad frame")
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = boom
-        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             path = self._write_dvf(d)
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):

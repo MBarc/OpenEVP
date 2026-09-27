@@ -1,7 +1,7 @@
 """Exact emulation of the x87 fsin/fcos instructions.
 
-Shared by st25.lpec.tables (the generated window, FFT and twiddle tables)
-and st25.lpec.synthesis (the per-frame fcos in the LSP -> LPC conversion);
+Shared by openevp.decoders.sony_lpec.tables (the generated window, FFT and twiddle tables)
+and openevp.decoders.sony_lpec.synthesis (the per-frame fcos in the LSP -> LPC conversion);
 docs/lpec.md, "Arithmetic" and "Tables". There is exactly one
 implementation, here.
 

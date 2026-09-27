@@ -1,5 +1,8 @@
-# Undo install-winusb.ps1: remove the ST25 WinUSB driver package from this PC (the
-# recorder goes back to "no driver") and every certificate the setup created.
+# Undo install-winusb.ps1: remove the recorder WinUSB driver package from this PC (the
+# recorders go back to "no driver") and every certificate the setup created.
+# Every package OpenEVP ever installed (v0.5.0 on, the ST25-only ones included) is called
+# st25_winusb.inf whichever models it covers, so all of them are found by that name; this
+# needs no driver manifest and works even if models.json is gone.
 # Runs elevated (the uninstaller). Same hardening as install-winusb.ps1: modules only
 # from Windows' own folder, native tools by full path. Each step runs on its own, so
 # a failure in one never skips the others. Logged to <install folder>\driver-setup\

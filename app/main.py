@@ -5,31 +5,23 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 import webview
 
-from st25.cli import default_output
-from st25.protocol import PID, VID
-from st25.session import RecorderSession
-from st25.usb import list_devices
+from openevp import __version__
+from openevp.paths import default_output
 
 from . import folders, updater
 from .audio_server import AudioServer
 from .backend import Api, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
-from .pnp import needs_setup, present_instances
 from .store import AppData
 
 WEBVIEW2 = ("OpenEVP needs the Microsoft Edge WebView2 Runtime, which is part of "
             "Windows 11 and most Windows 10 PCs. Install it from "
             "https://developer.microsoft.com/microsoft-edge/webview2/ and start the app again.")
-
-
-def _recorders():
-    """Usable recorders (libusb), plus placeholders for ones still needing their driver."""
-    ids = list_devices(VID, PID)
-    return ids + needs_setup(present_instances(), len(ids))
 
 
 def _window_handle(window):
@@ -145,19 +137,157 @@ def _own_taskbar_identity():
             pass
 
 
-def main():
+# ---- --smoke: the release check's frozen GUI smoke test -------------------------
+# OpenEVP.exe --smoke [REPORT.json] starts the backend and the WebView2 page in a
+# hidden window, checks that the page loaded (its scripts, styles and every bundled
+# UI file served) and that the JS bridge answers, then exits: 0 if all is well, 1
+# if not, with the details in REPORT.json (a --windowed build has no console).
+# It uses a throwaway data folder and save folder, no updater (no network) and no
+# driver setup; without the flag nothing changes.
+SMOKE_FLAG = "--smoke"
+SMOKE_TIMEOUT = 60                      # seconds for the page to load and answer
+
+# Run in the page: start the checks that need promises (the bridge, fetching each
+# bundled UI file); their results land in window.__openevpSmoke.
+_SMOKE_START_JS = """
+window.__openevpSmoke = null;
+Promise.all([
+  window.pywebview.api.capabilities(),
+  Promise.all(%s.map(f => fetch(f, {cache: "no-store"}).then(r => [f, r.ok, r.status], e => [f, false, String(e)])))
+]).then(([caps, files]) => { window.__openevpSmoke = JSON.stringify({caps: caps, files: files}); },
+        e => { window.__openevpSmoke = JSON.stringify({error: String(e)}); });
+"true";
+"""
+# Run in the page: what loaded (synchronous).
+_SMOKE_STATE_JS = """JSON.stringify({
+  title: document.title,
+  app_js: typeof window.onBackendEvent === "function",
+  wavesurfer: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.create === "function",
+  regions: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.Regions !== "undefined",
+  style_css: Array.from(document.styleSheets).some(s => (s.href || "").endsWith("/style.css") && s.cssRules.length > 0),
+  bridge: !!(window.pywebview && window.pywebview.api && window.pywebview.api.capabilities),
+  version_shown: (document.getElementById("version") || {}).textContent || "",
+  smoke: window.__openevpSmoke === undefined ? null : window.__openevpSmoke
+})"""
+
+
+def _smoke_request(argv):
+    """(True, report path or None) for "--smoke [REPORT]", else (False, None)."""
+    if argv and argv[0] == SMOKE_FLAG and len(argv) <= 2:
+        return True, (argv[1] if len(argv) == 2 else None)
+    return False, None
+
+
+def _ui_dir():
+    base = getattr(sys, "_MEIPASS", None) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    return os.path.join(base, "app", "ui")
+
+
+def ui_files(ui_dir):
+    """Every file of the UI folder, relative and with "/" (index.html, vendor/x.js...)."""
+    found = []
+    for folder, dirs, files in os.walk(ui_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for name in sorted(files):
+            found.append(os.path.relpath(os.path.join(folder, name), ui_dir).replace(os.sep, "/"))
+    return found
+
+
+def _smoke_check(window, report):
+    """On pywebview's worker thread once the GUI loop runs: check the page, then
+    close the window (which ends webview.start())."""
+    problems = report["problems"]
+    try:
+        deadline = time.monotonic() + SMOKE_TIMEOUT
+        if not window.events.loaded.wait(SMOKE_TIMEOUT):
+            problems.append(f"the page did not load within {SMOKE_TIMEOUT} s")
+            return
+        files = ui_files(_ui_dir())
+        report["ui_files"] = files
+        want_version = f"v{__version__}"
+        started = False
+        state = {}
+        while time.monotonic() < deadline:
+            state = json.loads(window.evaluate_js(_SMOKE_STATE_JS))
+            if state["bridge"] and not started:
+                window.evaluate_js(_SMOKE_START_JS % json.dumps(files))
+                started = True
+            elif started and state["smoke"] and state["version_shown"] == want_version:
+                break
+            time.sleep(0.2)
+        report["page"] = {k: v for k, v in state.items() if k != "smoke"}
+        if state.get("title") != "OpenEVP":
+            problems.append(f"index.html did not load (title {state.get('title')!r})")
+        for key, what in (("app_js", "app.js"), ("wavesurfer", "vendor/wavesurfer.min.js"),
+                          ("regions", "vendor/regions.min.js"), ("style_css", "style.css"),
+                          ("bridge", "the JS bridge (window.pywebview.api)")):
+            if not state.get(key):
+                problems.append(f"{what} did not load in the page")
+        if state.get("version_shown") != want_version:
+            problems.append(f"app.js did not start up through the bridge (version shown "
+                            f"{state.get('version_shown')!r}, not {want_version!r})")
+        if not state.get("smoke"):
+            problems.append(f"the bridge did not answer capabilities() within {SMOKE_TIMEOUT} s")
+            return
+        smoke = json.loads(state["smoke"])
+        if "error" in smoke:
+            problems.append(f"capabilities() through the bridge failed: {smoke['error']}")
+            return
+        report["capabilities"] = smoke["caps"]
+        if smoke["caps"].get("version") != __version__:
+            problems.append(f"capabilities() answered version {smoke['caps'].get('version')!r}")
+        for name, ok, status in smoke["files"]:
+            if not ok:
+                problems.append(f"the page could not fetch {name} ({status})")
+    except Exception as e:
+        problems.append(f"the smoke check failed: {type(e).__name__}: {e}")
+    finally:
+        try:
+            window.destroy()
+        except Exception:
+            pass
+
+
+def main(argv=None):
+    """Run the app; returns the process exit code (only --smoke sets one)."""
+    smoke, smoke_report = _smoke_request(sys.argv[1:] if argv is None else argv)
+    if smoke:
+        return _smoke_main(smoke_report)
+    _run_app()
+    return 0
+
+
+def _smoke_main(report_path):
+    report = {"ok": False, "version": __version__, "problems": []}
+    home = tempfile.mkdtemp(prefix="openevp-smoke-")
+    try:
+        _run_app(smoke=(report, home))
+    except Exception as e:
+        report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+    report["ok"] = not report["problems"]
+    if report_path:
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(report, f, indent=1)
+    return 0 if report["ok"] else 1
+
+
+def _run_app(smoke=None):
+    """The app. smoke: (report, a throwaway folder) for --smoke (see above)."""
     _own_taskbar_identity()
-    running = _announce_running()   # keeps the mutex handles alive until the app closes
+    running = [] if smoke else _announce_running()   # keeps the mutex handles alive until the app closes
     cache = tempfile.mkdtemp(prefix="st25-audio-")
     manager = None
     server = None
     api = None
     store = None
     try:
-        # A playback decode stops early (audio.Cancelled) once the app is closing.
+        # A playback decode stops early (formats.Cancelled) once the app is closing.
         server = AudioServer(lambda key: recording_wav(
             manager, key, should_stop=lambda: api is not None and api.stopping()), cache)
-        manager = DeviceManager(_recorders, RecorderSession.open, on_removed=server.forget)
+        # Every supported recorder model (openevp.recorders), opened through its model.
+        manager = DeviceManager(on_removed=server.forget)
         server.start()
         window = None
 
@@ -186,20 +316,25 @@ def main():
             closing_for_update = True
             window.destroy()
 
-        default_dest, _warning = default_output()      # Documents\OpenEVP; created by the first export
-        store, store_problems = _open_store()           # the remembered Save-to folder replaces default_dest
-        frozen = getattr(sys, "frozen", False)
+        if smoke:
+            default_dest = os.path.join(smoke[1], "save")
+            store, store_problems = AppData(os.path.join(smoke[1], "appdata")), []
+        else:
+            default_dest, _warning = default_output()   # Documents\OpenEVP; created by the first export
+            store, store_problems = _open_store()       # the remembered Save-to folder replaces default_dest
+        frozen = getattr(sys, "frozen", False) and not smoke
         if frozen:
             updater.clean_old_downloads()
         api = Api(manager, emit, pick_folder, default_dest, server,
-                  driver_setup=set_up_driver if sys.platform == "win32" else None, pick_wav=pick_wav,
-                  updater=updater, quit_app=quit_for_update, can_install=frozen and sys.platform == "win32",
+                  driver_setup=set_up_driver if sys.platform == "win32" and not smoke else None,
+                  pick_wav=pick_wav, updater=None if smoke else updater, quit_app=quit_for_update,
+                  can_install=frozen and sys.platform == "win32",
                   before_install=lambda: _hand_over(running), store=store, store_problems=store_problems,
                   recycle=lambda path: folders.recycle(path, owner=_window_handle(window)))
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
         window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,
-                                       width=1100, height=720, min_size=(800, 500))
+                                       width=1100, height=720, min_size=(800, 500), hidden=bool(smoke))
 
         def on_closing():
             if closing_for_update:
@@ -224,9 +359,16 @@ def main():
         try:
             # Require WebView2: pywebview would otherwise fall back to the old MSHTML
             # engine, which cannot run this UI.
-            webview.start(gui="edgechromium", http_server=True, icon=_icon())
+            if smoke:
+                webview.start(_smoke_check, (window, smoke[0]), gui="edgechromium", http_server=True,
+                              icon=_icon())
+            else:
+                webview.start(gui="edgechromium", http_server=True, icon=_icon())
         except Exception as e:
-            _fatal(f"{WEBVIEW2}\n\n({e})")
+            if smoke:
+                smoke[0]["problems"].append(f"WebView2 did not start: {type(e).__name__}: {e}")
+            else:
+                _fatal(f"{WEBVIEW2}\n\n({e})")
     finally:
         if api is not None:
             api.shutdown()                              # joins the workers, then closes the store

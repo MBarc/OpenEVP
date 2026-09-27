@@ -1,11 +1,11 @@
-"""Optional C core for the LPEC decoder (st25/lpec/_lpec.c -> lpec_core.dll).
+"""Optional C core for the LPEC decoder (openevp/decoders/sony_lpec/_lpec.c -> lpec_core.dll).
 
 The DLL runs the per-frame parameter-to-PCM pipeline (params, synthesis,
 the x87 fcos emulation) bit for bit like the pure-Python modules; Python
-still parses the bitstream (st25.lpec.bitstream) and hands the parsed
+still parses the bitstream (openevp.decoders.sony_lpec.bitstream) and hands the parsed
 frames over in one packed int32 array. Built by tools/build_lpec_core.py;
 when the DLL is missing or fails to load, ``available()`` is False and
-st25.lpec.decoder uses pure Python (~60x slower; st25.audio.status() says
+openevp.decoders.sony_lpec.decoder uses pure Python (~60x slower; st25.audio.status() says
 so in a frozen build, where the DLL should always be present).
 """
 
@@ -62,7 +62,7 @@ def available() -> bool:
 
 
 def fcos(x: float) -> float:
-    """The DLL's x87 fcos emulation (for tests; see st25.lpec.x87.fcos)."""
+    """The DLL's x87 fcos emulation (for tests; see openevp.decoders.sony_lpec.x87.fcos)."""
     return _lib.lpec_fcos(x)
 
 

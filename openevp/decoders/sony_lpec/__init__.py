@@ -4,7 +4,7 @@ See docs/lpec.md for the algorithm this package implements.
 
 This package is importable without the extracted table data: only calling
 into the decoder needs it. `dvf_to_wav` raises `TablesMissing` (from
-`st25.lpec.tables.load()`) when `st25/lpec/data/lpec_tables.json` is absent.
+`openevp.decoders.sony_lpec.tables.load()`) when `openevp/decoders/sony_lpec/data/lpec_tables.json` is absent.
 `st25/audio.py` calls `check()` (if present) to detect that up front, so
 `capabilities()["wav_status"]` (and anything gated on `audio.available()`)
 reports "could not be loaded" immediately instead of only on the first

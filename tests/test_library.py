@@ -1,5 +1,6 @@
 """The EVP library backend: listing a folder of recordings, the background
 fingerprint indexer (events, cache, failures, cancellation) and playing files."""
+import dataclasses
 import hashlib
 import io
 import os
@@ -13,9 +14,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, make_raw  # noqa: E402
+import release_gate  # noqa: E402
 from app import backend  # noqa: E402
 from app.store import AppData  # noqa: E402
-from st25 import audio, dvf, wavinfo  # noqa: E402
+from openevp import formats  # noqa: E402
+from openevp import wavinfo  # noqa: E402
+from st25 import audio, dvf  # noqa: E402
 
 WAIT = 30
 
@@ -41,7 +45,7 @@ DECODED = wav_bytes(b"decoded", seconds=2.0)       # what the fake decoder retur
 
 
 class FakeDecoder:
-    """A stand-in st25.lpec: returns DECODED (or raises for data in `bad`), counts
+    """A stand-in openevp.decoders.sony_lpec: returns DECODED (or raises for data in `bad`), counts
     calls, and can hold the first `block` calls until released."""
 
     class Cancelled(Exception):
@@ -55,7 +59,7 @@ class FakeDecoder:
         self.started = threading.Event()
         self.release = threading.Event()
         self.saw_stop = None
-        self.module = types.ModuleType("st25.lpec")
+        self.module = types.ModuleType("openevp.decoders.sony_lpec")
         self.module.dvf_to_wav = self.decode
         self.module.Cancelled = FakeDecoder.Cancelled
 
@@ -75,7 +79,7 @@ class FakeDecoder:
         return DECODED
 
     def installed(self):
-        return mock.patch.dict(sys.modules, {"st25.lpec": self.module})
+        return mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": self.module})
 
 
 class FakeServer:
@@ -337,7 +341,7 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(len(fps), 1)
         self.assertIsNotNone(fps.pop())
 
-    @unittest.skipUnless(audio.available(), "the LPEC decoder is not available")
+    @release_gate.require(audio.available(), "the LPEC decoder is not available")
     def test_dvf_and_its_wav_share_fp_real_decoder(self):
         data = dvf_bytes()
         self.write("case/rec.dvf", data)
@@ -374,7 +378,7 @@ class LibraryTests(unittest.TestCase):
     def test_missing_decoder_is_reported_but_not_cached(self):
         self.write("x.dvf", dvf_bytes())
         api = self.new_api()
-        with mock.patch.dict(sys.modules, {"st25.lpec": None}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             status = audio.status()
             r = self.index(api)
         row = self.events.rows(r["scan_id"])[r["files"][0]["id"]]
@@ -608,7 +612,8 @@ class LibraryTests(unittest.TestCase):
         self.write("huge.dvf", dvf_bytes())
         fake = FakeDecoder()
         api = self.new_api()
-        with fake.installed(), mock.patch.object(backend, "DVF_MAX_BYTES", 100):
+        small = dataclasses.replace(formats.DVF, max_bytes=100)                 # the limit is the format's
+        with fake.installed(), mock.patch.dict(formats._registry, {".dvf": small}):
             r = self.index(api)
             again = api.list_library()
         self.assertEqual(fake.calls, 0)
@@ -745,17 +750,17 @@ class LibraryTests(unittest.TestCase):
         self.write("x.dvf", dvf_bytes())
         api = self.new_api(store=None)
         fid = api.list_library()["files"][0]["id"]
-        with mock.patch.dict(sys.modules, {"st25.lpec": None}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             r = api.play_library(fid)
             self.assertFalse(r["ok"])
             self.assertIn(audio.status(), r["error"])
-        missing_tables = types.ModuleType("st25.lpec")
+        missing_tables = types.ModuleType("openevp.decoders.sony_lpec")
         missing_tables.dvf_to_wav = lambda data: data
 
         def boom_check():
             raise RuntimeError("lpec_tables.json not found")
         missing_tables.check = boom_check
-        with mock.patch.dict(sys.modules, {"st25.lpec": missing_tables}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": missing_tables}):
             r = api.play_library(fid)
         self.assertFalse(r["ok"])
         self.assertIn("could not be loaded", r["error"])

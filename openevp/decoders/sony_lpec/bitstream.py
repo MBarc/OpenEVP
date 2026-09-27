@@ -5,7 +5,7 @@ See docs/lpec.md, "Bitstream" (Field order, Coefficient block (budget
 beta), What lag and pgidx select), and "Configuration constants". This
 module reads the raw fields a frame is made of; it does not decode them
 into physical quantities (LSPs, gains, spectral coefficients) -- that is
-st25/lpec/params.py's job, from the frame record this module returns.
+openevp/decoders/sony_lpec/params.py's job, from the frame record this module returns.
 
 Frame record shape
 -------------------
@@ -55,7 +55,7 @@ params.py's job; this module only frames how many raw bits of each kind
 the bitstream holds.
 
 Callers must supply the extracted allocation-base table ``AB`` (64 x 8
-int16, ``Tables.AB`` from st25.lpec.tables) -- this module does not load
+int16, ``Tables.AB`` from openevp.decoders.sony_lpec.tables) -- this module does not load
 tables itself, so its pure bit-reading logic is testable without the
 (git-ignored, locally-generated) table data file.
 """

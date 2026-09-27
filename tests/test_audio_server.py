@@ -10,7 +10,9 @@ import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.audio_server import AudioServer  # noqa: E402
-from st25 import wavinfo  # noqa: E402
+from openevp import wavinfo  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
+import release_gate  # noqa: E402
 
 
 def make_wav(seconds=1.0, rate=8000):
@@ -217,15 +219,15 @@ class AnalyzeTests(unittest.TestCase):
 class RealDecoderFingerprintTests(unittest.TestCase):
     """_analyze()'s fp on a real decoded recording (not a synthetic pcm_wav
     fixture) matches wavinfo.wav_fingerprint of the same WAV, and survives
-    with_markers(). Skipped cleanly when st25.lpec's extracted tables are not
-    available in this checkout."""
+    with_markers(). Skipped cleanly when openevp.decoders.sony_lpec's extracted
+    tables are not available in this checkout."""
 
     VECTOR = os.path.join(os.path.dirname(__file__), "vectors", "single-frame.dvf")
 
     def test_fp_matches_real_decoded_audio_and_survives_markers(self):
         from st25 import audio
         if not audio.available():
-            self.skipTest("st25.lpec tables are not available in this checkout")
+            release_gate.skip_or_fail(f"WAV conversion is not available: {audio.status()}")
         from app import audio_server
         with open(self.VECTOR, "rb") as f:
             dvf_bytes = f.read()

@@ -1,0 +1,99 @@
+{
+ "version": 1,
+ "recordings": {
+  "5f86e4302eda8b5df22263ad13da9232d764d467dbb027e1231483d63bc81a4c": {
+   "marks": [
+    {
+     "id": "bdd1f40558ef",
+     "start": 0.5,
+     "end": 1.25,
+     "cls": "A",
+     "note": "get out",
+     "created": "2026-09-27T00:57:49"
+    },
+    {
+     "id": "f259afd77a50",
+     "start": 1.5,
+     "end": 2.0,
+     "cls": "B",
+     "note": "",
+     "created": "2026-09-27T00:57:49"
+    }
+   ],
+   "reviewed": true,
+   "name": "A-001",
+   "duration": 2.56,
+   "imported": true,
+   "backup": {
+    "status": "saved",
+    "detail": "Saved as 001_A_001_Casey_2029_05_23.dvf, with a WAV copy (001_A_001_Casey_2029_05_23.wav).",
+    "paths": [
+     "%ROOT%\\OpenEVP\\A\\001_A_001_Casey_2029_05_23.dvf",
+     "%ROOT%\\OpenEVP\\A\\001_A_001_Casey_2029_05_23.wav"
+    ]
+   }
+  },
+  "08a6fafb1974bee3ec76281548b0afea1e90c73954797e97c90b3fa62fc33722": {
+   "marks": [
+    {
+     "id": "e9c8f4163ef3",
+     "start": 0.25,
+     "end": 0.75,
+     "cls": "C",
+     "note": "whisper?",
+     "created": "2026-09-27T00:57:49"
+    },
+    {
+     "id": "190efa14d6a0",
+     "start": 1.0,
+     "end": 1.5,
+     "cls": "C",
+     "note": "knock",
+     "created": "2026-09-27T00:57:49"
+    }
+   ],
+   "reviewed": false,
+   "name": "cell 3.wav",
+   "duration": 2.56,
+   "imported": true,
+   "backup": {
+    "status": null,
+    "detail": "",
+    "paths": []
+   }
+  },
+  "4cc5ba43d73c5072636fab4109a8efa41ef25cb616f859a518d1b89b50dfa596": {
+   "marks": [
+    {
+     "id": "525a6933f352",
+     "start": 0.1,
+     "end": 0.9,
+     "cls": "A",
+     "note": "my name",
+     "created": "2026-09-27T00:57:49"
+    }
+   ],
+   "reviewed": false,
+   "name": "A-002",
+   "duration": 3.84,
+   "imported": true,
+   "backup": {
+    "status": "failed",
+    "detail": "A-002 was not backed up: The recorder was unplugged.",
+    "paths": []
+   }
+  },
+  "b092172f2ae0522c33fd61010242e8e9ca3e1651a5e181f8df839bddd5228609": {
+   "marks": [],
+   "reviewed": true,
+   "name": "",
+   "duration": null,
+   "imported": false,
+   "backup": {
+    "status": null,
+    "detail": "",
+    "paths": []
+   }
+  }
+ }
+}

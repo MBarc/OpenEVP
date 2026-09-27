@@ -30,7 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from st25 import wavinfo
+from openevp import wavinfo
 
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
 MAX_PEAKS = 400_000                    # longer files get fewer per second (keeps the page responsive)
@@ -54,7 +54,7 @@ def _samples(data, width):
 def _analyze(f):
     """(peaks, duration, rate, fp) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per
     second of audio (at most MAX_PEAKS in all), each the loudest sample of any channel
-    in its slice, plus the sample rate and the audio fingerprint (st25.wavinfo) of the
+    in its slice, plus the sample rate and the audio fingerprint (openevp.wavinfo) of the
     decoded samples. Reads in chunks, never the whole file. A WAV with no samples
     has fp None: every empty WAV of one format would otherwise share one identity
     (and one set of marks), so it gets none and cannot be marked."""
@@ -125,7 +125,7 @@ def _stat_of(st):
 
 class AudioServer:
     def __init__(self, provider, cache_dir, max_bytes=1 << 30):
-        self._provider = provider            # (device_id, letter, number) -> WAV bytes
+        self._provider = provider            # (device_id, folder id, number) -> WAV bytes
         self._dir = cache_dir
         self._max = max_bytes
         self._token = secrets.token_urlsafe(16)
@@ -212,7 +212,7 @@ class AudioServer:
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
         duration, the sample rate (short files are then drawn from the audio itself),
-        and the audio fingerprint (st25.wavinfo) of the decoded samples."""
+        and the audio fingerprint (openevp.wavinfo) of the decoded samples."""
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
                 "fp": e["fp"]}
 

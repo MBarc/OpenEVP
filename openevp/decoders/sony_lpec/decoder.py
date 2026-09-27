@@ -13,7 +13,7 @@ int16 PCM. ``dvf_to_wav(dvf_bytes)`` validates and decodes a whole .dvf file
 and returns the WAV DVE would have written for it.
 
 EVP marks are keyed by the fingerprint of the decoded samples
-(st25.wavinfo): any change in this decoder's output -- even one sample --
+(openevp.wavinfo): any change in this decoder's output -- even one sample --
 re-keys every recording's marks, so existing marks stop matching their .dvf
 files. tests/test_wavinfo.py (GoldenFingerprintTests) guards this.
 """
@@ -25,7 +25,7 @@ import struct
 from array import array
 from typing import Callable, Iterator, List, Optional, Tuple
 
-from .. import dvf as dvf_module
+from st25 import dvf as dvf_module
 from . import _core, bitstream, params, synthesis
 from . import tables as tables_module
 
@@ -237,7 +237,7 @@ def decode_payload(payload: bytes, tables=None, use_core: Optional[bool] = None,
     """Decode a whole LPEC frame stream to little-endian int16 PCM.
 
     Mirrors DVE's loop (see _frame_chunks). ``use_core``: None uses the C
-    core (st25/lpec/_core.py) when it loaded and pure Python otherwise;
+    core (openevp/decoders/sony_lpec/_core.py) when it loaded and pure Python otherwise;
     False forces pure Python; True requires the core (RuntimeError without
     it). Both paths give identical PCM. ``should_stop``, if given, is
     polled every few dozen frames; when it returns true the decode raises

@@ -5,8 +5,11 @@
 Get the recordings off your ghost-hunting voice recorders and onto a modern
 Windows PC: one installer, no manufacturer software, no old 32-bit computer.
 
-**Supported today:** the **Sony ICD-ST25**. More recorders (the Tascam DR-60 and
-others) are planned; each one gets its own module next to `st25/`.
+- **Supported recorders:** Sony ICD-ST25
+- **Planned:** Sony ICD-ST10, Panasonic RR-DR60
+
+Each recorder is one module in `openevp/recorders/`; see
+[its README](openevp/recorders/README.md) to add one.
 
 For the ICD-ST25, OpenEVP writes `.dvf` files in the format Sony's *Digital Voice
 Editor* (DVE) saves. DVE opens them and converts them to WAV **byte-identically**
@@ -229,15 +232,22 @@ powershell -ExecutionPolicy Bypass -File build_windows.ps1
 
 It runs the tests, then builds `dist\openevp-st25.exe` (ST25 command line),
 `dist\OpenEVP\` (desktop app) and `dist\OpenEVP-Setup-<version>.exe` (the
-installer).
+installer). The tests run in the release gate (`OPENEVP_RELEASE_GATE=1`): a
+decoder test that can't run because the tables or the C core are missing or
+damaged fails the build instead of being skipped.
+
+Before publishing a release, run `python tools\release_check.py` after the
+build. It re-runs the tests in the release gate, checks the built command-line
+tool and app, and prints the manual checklist (a real recorder, the driver,
+the updater).
 
 WAV conversion needs two more things, both kept out of the repository:
 
-- the LPEC decoder's C core, `st25\lpec\lpec_core.dll`, which the build script
+- the LPEC decoder's C core, `openevp\decoders\sony_lpec\lpec_core.dll`, which the build script
   compiles with `python tools\build_lpec_core.py`. That needs a 64-bit
   MinGW-w64 `gcc` on `PATH` (the C uses GCC's `__int128`, so MSVC can't build it).
   Without the DLL the decoder still works in pure Python, about 60 times slower.
-- the LPEC table data, `st25\lpec\data\lpec_tables.json` (see *Legal*). The build
+- the LPEC table data, `openevp\decoders\sony_lpec\data\lpec_tables.json` (see *Legal*). The build
   **fails** without it. For a development build without WAV conversion, pass
   `-NoLpecTables`:
   `powershell -ExecutionPolicy Bypass -File build_windows.ps1 -NoLpecTables`.
@@ -252,10 +262,10 @@ GNU General Public License v3.0 or later; see [`LICENSE`](LICENSE).
 
 ## Legal
 
-OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony. "Sony", "ICD-ST25" and "Digital Voice Editor" are trademarks of Sony Corporation.
+OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony or Panasonic. "Sony", "ICD-ST25", "ICD-ST10" and "Digital Voice Editor" are trademarks of Sony Corporation. "Panasonic" and "RR-DR60" are trademarks of Panasonic Corporation.
 
 To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio format. They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly. The tables ship inside the installer only, as one data file
-(`st25/lpec/data/lpec_tables.json`); they are not part of this repository.
+(`openevp/decoders/sony_lpec/data/lpec_tables.json`); they are not part of this repository.
 
 OpenEVP is provided "as is", without warranty of any kind.
 

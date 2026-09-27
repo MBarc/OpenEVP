@@ -2,11 +2,11 @@
 
 docs/lpec.md's "Tables" section splits the decoder's tables into extracted
 ones (no known formula, "no, extract" in the Static tables list) and
-derivable ones (computed by st25/lpec/tables.py). This script copies only
+derivable ones (computed by openevp/decoders/sony_lpec/tables.py). This script copies only
 the extracted ones from a folder of JSON dumps of the tables in Digital
 Voice Editor's `LPEC.dll` (one file per table, with its address, size and
 element type recorded) into
-one file, `st25/lpec/data/lpec_tables.json`. That file is git-ignored:
+one file, `openevp/decoders/sony_lpec/data/lpec_tables.json`. That file is git-ignored:
 these tables are not committed to the repository (pending legal review).
 
 For each table, this script checks that the source JSON's recorded address,
@@ -31,7 +31,7 @@ from typing import Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TABLES_DIR = Path(os.environ["OPENEVP_TABLE_DUMPS"]) if os.environ.get("OPENEVP_TABLE_DUMPS") else None
-DEFAULT_OUT = REPO_ROOT / "st25" / "lpec" / "data" / "lpec_tables.json"
+DEFAULT_OUT = REPO_ROOT / "openevp" / "decoders" / "sony_lpec" / "data" / "lpec_tables.json"
 
 # doc name -> (dump file, doc address, doc shape, doc element type).
 # Addresses and shapes are docs/lpec.md, "Tables" > "Static tables (in the

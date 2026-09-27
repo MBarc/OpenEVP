@@ -3,9 +3,13 @@
 // Every async response is checked against the request it answers (sequence numbers,
 // device id), so a slow answer for a recorder the user has left is dropped.
 const $ = (id) => document.getElementById(id);
-const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: false },
-            dest: "", selected: new Set(), ws: null, playing: null,
-            loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: false, settingUp: false,
+// A recorder's folders and recordings come from its model (backend recordings()): folder
+// ids and recording numbers are opaque (any string, a number), shown only through labels
+// and textContent, and handed back to the backend as they came.
+const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
+            playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
+            dest: "", selected: new Map(), ws: null, playing: null,
+            loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
             drag: null,                                   // recordings being dragged in the library: {ids}
             // The EVP library: the listing, its scan, what is shown (see loadLibrary).
@@ -33,7 +37,8 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
-function key(device, folder, number) { return `${device}|${folder}:${number}`; }
+// One recording on a recorder, as a Map key: JSON keeps any id (":" or "|" in it, 1 vs "1") apart.
+function key(device, folder, number) { return JSON.stringify([device, folder, number]); }
 // kind: "warn" (default) or "ok"; action: optional {label, run} shown as a button.
 function banner(text, kind = "warn", action = null) {
   $("banner").hidden = !text;
@@ -51,10 +56,7 @@ function plural(n, word) { return `${n} ${word}${n === 1 ? "" : "s"}`; }
 function status(text) { $("status").textContent = text || ""; }
 function showError(r) { banner([r.error, r.advice].filter(Boolean).join(" ")); }
 // capabilities().wav_status (why WAV conversion is off, or a slow-mode warning) as a sentence.
-function wavStatus() {
-  const t = S.caps.wav_status || "WAV conversion is not available";
-  return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? "" : ".");
-}
+function wavStatus() { return sentence(S.caps.wav_status); }
 
 window.addEventListener("pywebviewready", async () => {
   S.caps = await api().capabilities();
@@ -121,12 +123,15 @@ $("update-now").onclick = async () => {
 async function poll() {
   try {
     const r = await api().devices();
-    if (!r.ok) {
-      // Show the enumeration error once (e.g. libusb failed to load); do not
-      // keep re-stamping the banner on every poll while it persists.
-      if (!S.deviceError) { showError(r); S.deviceError = true; }
-    } else {
-      if (S.deviceError) { banner(""); S.deviceError = false; }
+    // The recorder list's error (e.g. libusb failed to load), or the models whose recorders
+    // could not be looked for (the other models' recorders are still listed): each text is
+    // shown once, not re-stamped on every poll while it persists; cleared when it is gone.
+    const problem = !r.ok ? [r.error, r.advice].filter(Boolean).join(" ")
+      : (r.problems || []).map((p) => [p.error, p.advice].filter(Boolean).join(" ")).join(" ");
+    if (problem) {
+      if (S.deviceError !== problem) { banner(problem); S.deviceError = problem; }
+    } else if (S.deviceError) { banner(""); S.deviceError = ""; }
+    if (r.ok) {
       S.devices = r.devices;
       renderDevices();
     }
@@ -136,12 +141,15 @@ async function poll() {
 }
 
 function deviceLabel(d, i) {
-  if (d.state === "needs_driver" && !d.port) return "ST25 — needs setup";
-  return d.owner ? `ST25 — ${d.owner}` : `ST25 #${i + 1} (port ${d.port})`;
+  if (d.state === "needs_driver" && !d.port) return `${d.model} — needs setup`;
+  // d.port is the model's own display location ("port 1-4" for an ST25), shown as is.
+  return d.owner ? `${d.model} — ${d.owner}` : `${d.model} #${i + 1}` + (d.port ? ` (${d.port})` : "");
 }
 
+function currentFolder() { return S.folders.find((f) => f.id === S.folder) || null; }
+
 function leaveDevice() {
-  S.device = null; S.folders = {}; S.selected.clear(); S.loadSeq++;
+  S.device = null; S.folders = []; S.folder = null; S.selected.clear(); S.loadSeq++;
   if (S.playing && !S.playing.startsWith("lib|")) {        // a recorder recording; a file on this PC stays loaded
     S.playSeq++; S.ws.empty(); S.playing = null; setCurrent(null); showPlayerEmpty();
   }
@@ -230,11 +238,14 @@ function renderDevices() {
       box.appendChild(setup);
     }
     if (d.id === S.device) {
-      for (const f of Object.keys(S.folders)) {
+      for (const f of S.folders) {
         const row = document.createElement("div");
-        row.className = "folder" + (f === S.folder && S.view === "device" ? " selected" : "");
-        row.innerHTML = `<span>Folder ${f}</span><span class="muted">${S.folders[f].length}</span>`;
-        row.onclick = () => { S.folder = f; S.view = "device"; renderDevices(); renderMain(); };
+        row.className = "folder" + (f.id === S.folder && S.view === "device" ? " selected" : "");
+        const label = document.createElement("span"), count = document.createElement("span");
+        label.textContent = f.label;
+        count.className = "muted"; count.textContent = String(f.recordings.length);
+        row.append(label, count);
+        row.onclick = () => { S.folder = f.id; S.view = "device"; renderDevices(); renderMain(); };
         box.appendChild(row);
       }
     }
@@ -257,7 +268,7 @@ async function setupRecorder() {
 }
 
 async function openDevice(id) {
-  if (id === S.device && Object.keys(S.folders).length) {   // already read: just show it again
+  if (id === S.device && S.folders.length) {                // already read: just show it again
     S.view = "device"; renderDevices(); renderMain(); return;
   }
   if (S.exporting) { banner("Wait for the export to finish before switching recorders."); return; }
@@ -269,9 +280,35 @@ async function openDevice(id) {
   if (seq !== S.loadSeq || S.device !== id) return;       // the user moved on
   status("");
   if (!r.ok) { showError(r); S.device = null; renderDevices(); return; }
-  for (const f of r.folders) S.folders[f.letter] = f.recordings;
-  S.folder = r.folders.find((f) => f.recordings.length)?.letter || "A";
+  S.folders = r.folders;
+  S.folder = (r.folders.find((f) => f.recordings.length) || r.folders[0] || {}).id ?? null;
+  S.model = r.model; S.playable = !!r.playable; S.formats = r.formats || [];
+  $("device-table").classList.toggle("playable", S.playable);
+  setFormats(S.formats);
   renderDevices(); renderMain();
+}
+
+// The export menu for the recorder shown: its native format ("dvf": ".dvf (Sony original)"),
+// then WAV, greyed out with the reason when its recordings can't be converted here.
+function setFormats(list) {
+  const sel = $("format"), was = sel.value;
+  sel.textContent = "";
+  for (const f of list) {
+    const o = document.createElement("option");
+    o.value = f.value;
+    o.textContent = f.available ? f.label : `${f.label} (unavailable)`;
+    o.disabled = !f.available;
+    if (!f.available) o.title = sentence(f.reason);
+    sel.appendChild(o);
+  }
+  const keep = list.find((f) => f.value === was && f.available);
+  sel.value = keep ? was : (list.find((f) => f.available) || {}).value || "";
+}
+
+// A backend reason ("the WAV decoder could not be loaded: ...") as a sentence.
+function sentence(t) {
+  t = t || "WAV conversion is not available";
+  return t.charAt(0).toUpperCase() + t.slice(1) + (/[.!?]$/.test(t) ? "" : ".");
 }
 
 function renderMain() {
@@ -408,7 +445,7 @@ function libraryGroups() {
   const out = [];
   for (const g of groups.values()) {
     const byName = g.files.slice().sort((a, b) => a.name.localeCompare(b.name));
-    const main = byName.find((f) => f.type === "dvf") || byName[0];
+    const main = byName.find((f) => f.type !== "wav") || byName[0];   // a recorder's own file (.dvf) before its WAV
     g.main = main;
     g.copies = g.files.filter((f) => f !== main);
     g.fp = main.fp;
@@ -738,8 +775,18 @@ function renderLibraryBar() {
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
 }
 
+function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
+  const t = (S.caps.formats || {})[type];
+  return t ? !!t.playable : type === "wav";
+}
+
+function typeReason(type) {                    // why not, as a sentence
+  const t = (S.caps.formats || {})[type];
+  return sentence(t && t.reason);
+}
+
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
-  return S.caps.wav ? g.main : g.files.find((f) => f.type === "wav") || null;
+  return typePlayable(g.main.type) ? g.main : g.files.find((f) => f.type === "wav") || null;
 }
 
 function libraryPlaying(g) { return g.files.some((f) => S.playing === `lib|${f.id}`); }
@@ -781,7 +828,7 @@ function libraryRow(g) {
   tr.sig = sig;
   tr.classList.toggle("playing", libraryPlaying(g));
   tr.classList.toggle("unplayable", !playable);
-  tr.title = playable ? "" : "Can't play .dvf files. " + wavStatus();
+  tr.title = playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type);
   const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
   const toggle = cToggle.lastChild;
   toggle.hidden = !total && !expanded;
@@ -919,7 +966,7 @@ async function playLibrary(g, mark) {
     return;
   }
   const f = libraryPlayable(g);
-  if (!f) { banner("Can't play .dvf files. " + wavStatus() + " WAV files still play."); return; }
+  if (!f) { banner(`Can't play .${g.main.type} files. ` + typeReason(g.main.type) + " WAV files still play."); return; }
   const seq = ++S.playSeq;
   banner(""); status(`Loading ${f.name}…`);
   const r = await api().play_library(f.id);
@@ -1467,41 +1514,43 @@ function setupFolderTools() {
 function renderRows() {
   const rows = $("rows");
   rows.innerHTML = "";
-  const recs = S.device ? (S.folders[S.folder] || []) : [];
+  const folder = S.device ? currentFolder() : null;
+  const recs = folder ? folder.recordings : [];
   $("empty").hidden = recs.length > 0;
-  $("empty").textContent = S.device ? `Folder ${S.folder} is empty.` : "Plug in an ICD-ST25 and select it on the left.";
+  $("empty").textContent = S.device ? `${folder ? folder.label : "This folder"} is empty.`
+                                    : "Plug in an ICD-ST25 and select it on the left.";
   for (const r of recs) {
     const tr = document.createElement("tr");
-    const k = key(S.device, S.folder, r.number);
+    const k = key(S.device, folder.id, r.number);
     if (S.playing === k) tr.className = "playing";
     const box = document.createElement("input");
     box.type = "checkbox"; box.checked = S.selected.has(k); box.disabled = !!r.problem;
-    box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.add(k) : S.selected.delete(k); updateExport(); };
-    const cells = [String(r.number).padStart(3, "0"), r.when === "no date" ? "undated" : r.when, fmtTime(r.seconds), r.problem];
+    const item = { device: S.device, folder: folder.id, number: r.number };
+    box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.set(k, item) : S.selected.delete(k); updateExport(); };
+    const no = typeof r.number === "number" ? String(r.number).padStart(3, "0") : String(r.number);
+    const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), r.problem || ""];
     const first = document.createElement("td"); first.appendChild(box); tr.appendChild(first);
     cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 3) td.className = "note"; tr.appendChild(td); });
-    if (S.caps.wav) tr.onclick = () => play(S.device, S.folder, r.number);
+    if (S.playable) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
     rows.appendChild(tr);
   }
-  $("all").checked = recs.length > 0 && recs.every((r) => r.problem || S.selected.has(key(S.device, S.folder, r.number)));
+  $("all").checked = recs.length > 0 && recs.every((r) => r.problem || S.selected.has(key(S.device, folder.id, r.number)));
   updateExport();
 }
 
 $("all").onclick = () => {
-  for (const r of S.folders[S.folder] || []) {
+  const folder = currentFolder();
+  for (const r of folder ? folder.recordings : []) {
     if (r.problem) continue;
-    const k = key(S.device, S.folder, r.number);
-    $("all").checked ? S.selected.add(k) : S.selected.delete(k);
+    const k = key(S.device, folder.id, r.number);
+    $("all").checked ? S.selected.set(k, { device: S.device, folder: folder.id, number: r.number }) : S.selected.delete(k);
   }
   renderMain();
 };
 
 function selectedItems() {
-  const prefix = `${S.device}|`;
-  return [...S.selected].filter((k) => k.startsWith(prefix)).map((k) => {
-    const [folder, number] = k.slice(prefix.length).split(":");
-    return { folder, number: Number(number) };
-  });
+  return [...S.selected.values()].filter((i) => i.device === S.device)
+    .map((i) => ({ folder: i.folder, number: i.number }));
 }
 
 function updateExport() {
@@ -1661,10 +1710,9 @@ function clearSelection() {                                 // the selection onl
 
 function tick() { $("time").textContent = `${fmtTime(S.ws.getCurrentTime())} / ${fmtTime(S.ws.getDuration())}`; }
 
-async function play(device, folder, number) {
-  if (!S.caps.wav) return;
+async function play(device, folder, number, label) {
+  if (!S.playable) return;
   const seq = ++S.playSeq;
-  const label = `${folder}-${String(number).padStart(3, "0")}`;
   banner(""); $("play").disabled = true; status(`Loading ${label}…`);
   const r = await api().audio(device, folder, number);
   if (seq !== S.playSeq || S.device !== device) return;    // the user picked something else

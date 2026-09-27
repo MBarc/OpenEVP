@@ -17,7 +17,7 @@ import hashlib
 import os
 from collections import OrderedDict
 
-from st25 import audio
+from openevp import formats
 
 from . import folders
 from .devices import READY
@@ -46,6 +46,33 @@ def _plain(e):
     if isinstance(e, OSError) and e.filename:
         return f"{e.strerror or type(e).__name__} ({os.path.basename(e.filename)})"
     return str(e) or type(e).__name__
+
+
+def _kind_format(kind):
+    """The Format of a library file kind ("dvf", "wav": its extension without the dot)."""
+    return formats.by_ext("." + kind)
+
+
+def _decoder_problem(fmt):
+    """Why fmt cannot be decoded now (a phrase), or None when it can."""
+    if fmt.decoder is None:
+        return f"OpenEVP cannot convert {fmt.label} ({fmt.ext}) files to WAV"
+    if not fmt.decoder.available():
+        return fmt.decoder.reason() or "the WAV decoder is not available"
+    return None
+
+
+def _decoder_problems(kinds):
+    """{kind: why its files cannot be decoded now} for the library file kinds
+    given ("dvf", "fk2"...; WAV never has a problem), checked once per job."""
+    out = {}
+    for kind in set(kinds):
+        fmt = _kind_format(kind)
+        if fmt is not None and fmt is not formats.WAV:
+            problem = _decoder_problem(fmt)
+            if problem:
+                out[kind] = problem
+    return out
 
 
 def _fs_problem(e):
@@ -267,10 +294,13 @@ class LibraryOps:
                     continue
                 info["bytes"] += st.st_size
                 kind = os.path.splitext(e.name)[1].lower()[1:]
-                if e.name.startswith(".") or kind not in ("dvf", "wav"):
+                fmt = _kind_format(kind) if kind else None
+                if e.name.startswith(".") or fmt is None:
                     info["other_files"] += 1
                     continue
                 info["recordings"] += 1
+                if fmt.decoder is None:         # never fingerprinted, so never a marked recording's backup
+                    continue
                 cached = self._cached_fp(e.path, st.st_size, st.st_mtime_ns)
                 fp = cached.get("fp") if cached else None
                 if cached is None:
@@ -322,15 +352,13 @@ class LibraryOps:
         """(fingerprints, how many could not be fingerprinted) of recordings not in
         the index yet ([(path, kind, size, mtime_ns)] from _walk), cached as the
         indexer would; (None, n) when the app started closing meanwhile."""
-        decoder_problem = None
-        if any(kind == "dvf" for _, kind, _, _ in pending) and not audio.available():
-            decoder_problem = audio.status() or "the WAV decoder is not available"
+        problems = _decoder_problems(kind for _, kind, _, _ in pending)
         fps, failed = set(), 0
         try:
             for path, kind, size, mtime_ns in pending:
                 if self._stop.is_set():
                     return None, failed
-                row, _stored = self._index_file(path, kind, size, mtime_ns, self._stop.is_set, decoder_problem)
+                row, _stored = self._index_file(path, kind, size, mtime_ns, self._stop.is_set, problems.get(kind))
                 if row is None:                     # cancelled: the app is closing
                     return None, failed
                 if row.get("fp"):

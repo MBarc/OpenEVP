@@ -1,0 +1,29 @@
+{
+ "files": {
+  "%ROOT%\\openevp\\a\\001_a_001_casey_2029_05_23.dvf": {
+   "size": 3072,
+   "mtime_ns": 1874000000000000000,
+   "fp": "5f86e4302eda8b5df22263ad13da9232d764d467dbb027e1231483d63bc81a4c",
+   "seconds": 2.6
+  },
+  "%ROOT%\\openevp\\a\\001_a_001_casey_2029_05_23.wav": {
+   "size": 41178,
+   "mtime_ns": 1874000000000000000,
+   "fp": "5f86e4302eda8b5df22263ad13da9232d764d467dbb027e1231483d63bc81a4c",
+   "seconds": 2.6
+  },
+  "%ROOT%\\openevp\\old jail\\cell 3.wav": {
+   "size": 41004,
+   "mtime_ns": 1874000000000000000,
+   "fp": "08a6fafb1974bee3ec76281548b0afea1e90c73954797e97c90b3fa62fc33722",
+   "seconds": 2.6
+  },
+  "%ROOT%\\openevp\\old jail\\broken.dvf": {
+   "size": 150,
+   "mtime_ns": 1874000000000000000,
+   "fp": null,
+   "seconds": null,
+   "error": "broken.dvf is not a Sony ICD-ST25 recording."
+  }
+ }
+}

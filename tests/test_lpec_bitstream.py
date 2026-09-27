@@ -1,4 +1,4 @@
-"""Tests for st25.lpec.bitstream: the MSB-first bit reader, mode -> frame
+"""Tests for openevp.decoders.sony_lpec.bitstream: the MSB-first bit reader, mode -> frame
 length splitting, and full field-order / coefficient-block parsing. See
 docs/lpec.md, "Bitstream".
 """
@@ -12,7 +12,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
-from st25.lpec import TablesMissing, bitstream, tables  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
+from openevp.decoders.sony_lpec import TablesMissing, bitstream, tables  # noqa: E402
+import release_gate  # noqa: E402
 import make_test_dvf  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -288,8 +290,8 @@ class ParseFrameTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if _TABLES is None:
-            raise unittest.SkipTest(
-                "st25/lpec/data/lpec_tables.json not found; run "
+            release_gate.skip_or_fail(
+                "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run "
                 "tools/import_lpec_tables.py to generate it locally"
             )
         cls.ab = _TABLES.AB

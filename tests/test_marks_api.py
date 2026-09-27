@@ -12,11 +12,10 @@ import wave
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, FakeRecorderDevice  # noqa: E402
+from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
-from app.devices import DeviceManager  # noqa: E402
 from app.store import AppData  # noqa: E402
-from st25 import wavinfo  # noqa: E402
+from openevp import wavinfo  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
 from st25.session import RecorderSession  # noqa: E402
 
@@ -40,7 +39,7 @@ def wav_bytes(seed, seconds=1.0, rate=8000):
 
 
 def fake_decoder(decode=None):
-    mod = types.ModuleType("st25.lpec")
+    mod = types.ModuleType("openevp.decoders.sony_lpec")
     mod.dvf_to_wav = decode or (lambda data, should_stop=None: wav_bytes(data))
     return mod
 
@@ -86,7 +85,7 @@ class MarksApiTests(unittest.TestCase):
             s.connect()
             return s
 
-        self.m = DeviceManager(lambda: [ID], open_fn)
+        self.m = st25_manager(lambda: [ID], open_fn)
         self.addCleanup(self.m.close)
         self.sessions = 0
         real = self.m.with_session
@@ -105,7 +104,7 @@ class MarksApiTests(unittest.TestCase):
 
         self.emit = emit
         self.server = FakeServer()
-        self.decoder = mock.patch.dict(sys.modules, {"st25.lpec": fake_decoder()})
+        self.decoder = mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake_decoder()})
         self.decoder.start()
         self.addCleanup(self.decoder.stop)
         self.api = self.new_api()
@@ -203,7 +202,7 @@ class MarksApiTests(unittest.TestCase):
 
     def test_first_mark_backs_up_once_with_the_captured_bytes(self):
         rec = self.load()["rec"]
-        captured = self.api._dvfs[(ID, "A", 1)][0].dvf
+        captured = self.api._natives[(ID, "A", 1)][0].data
         sessions = self.sessions
         self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "hello")["ok"])
         event, p = self.wait_event()
@@ -240,7 +239,7 @@ class MarksApiTests(unittest.TestCase):
 
     def test_a_missing_capture_is_downloaded_once_and_verified(self):
         self.load()
-        self.api._dvfs.clear()                           # as if evicted while the decode stays cached
+        self.api._natives.clear()                           # as if evicted while the decode stays cached
         rec = self.load()["rec"]                         # served from the (fake) audio server's cache
         sessions = self.sessions
         self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
@@ -251,9 +250,9 @@ class MarksApiTests(unittest.TestCase):
 
     def test_a_capture_that_no_longer_matches_is_not_backed_up(self):
         self.load()
-        self.api._dvfs.clear()
+        self.api._natives.clear()
         rec = self.load()["rec"]
-        with mock.patch.dict(sys.modules, {"st25.lpec": fake_decoder(lambda d, should_stop=None: wav_bytes(b"x"))}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake_decoder(lambda d, should_stop=None: wav_bytes(b"x"))}):
             self.assertTrue(self.api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
             event, p = self.wait_event()
         self.assertEqual(event, "backup-failed")
@@ -306,14 +305,14 @@ class MarksApiTests(unittest.TestCase):
 
     def test_shutdown_joins_the_backup_worker(self):
         entered, go = threading.Event(), threading.Event()
-        real = backend.save_dvf
+        real = backend.save_native
 
         def slow(*a):
             entered.set()
             go.wait(5)
             return real(*a)
         rec = self.load()["rec"]
-        with mock.patch.object(backend, "save_dvf", slow):
+        with mock.patch.object(backend, "save_native", slow):
             self.api.add_mark(rec, 0.1, 0.4, "A", "")
             self.assertTrue(entered.wait(5))
             self.assertTrue(self.api.backing_up())
@@ -376,7 +375,7 @@ class MarksApiTests(unittest.TestCase):
 
     def test_closing_records_queued_backups_as_not_made(self):
         entered, go = threading.Event(), threading.Event()
-        real = backend.save_dvf
+        real = backend.save_native
 
         def slow(*a):
             entered.set()
@@ -384,7 +383,7 @@ class MarksApiTests(unittest.TestCase):
             return real(*a)
         first = self.load(1)["rec"]
         second = self.load(2)
-        with mock.patch.object(backend, "save_dvf", slow):
+        with mock.patch.object(backend, "save_native", slow):
             self.api.add_mark(first, 0.1, 0.4, "A", "")
             self.assertTrue(entered.wait(5))
             self.assertTrue(self.api.add_mark(second["rec"], 0.1, 0.4, "B", "")["backup_queued"])
@@ -398,7 +397,7 @@ class MarksApiTests(unittest.TestCase):
 
     def test_a_verification_stopped_by_closing_is_recorded(self):
         self.load()
-        self.api._dvfs.clear()
+        self.api._natives.clear()
         rec = self.load()["rec"]
 
         class Stopped(Exception):
@@ -408,7 +407,7 @@ class MarksApiTests(unittest.TestCase):
             raise Stopped("closing")
         mod = fake_decoder(stopped)
         mod.Cancelled = Stopped
-        with mock.patch.dict(sys.modules, {"st25.lpec": mod}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": mod}):
             self.api.add_mark(rec, 0.1, 0.4, "A", "")
             event, p = self.wait_event()
         self.assertEqual((event, p["detail"]), ("backup-failed", "A-001 was not backed up because the app closed."))
@@ -416,11 +415,11 @@ class MarksApiTests(unittest.TestCase):
 
     def test_a_capture_is_used_only_with_the_audio_it_decoded_to(self):
         first = self.load()
-        self.assertIsNotNone(self.api._recs[first["rec"]]["source"]["dvf"])
-        dl, _ = self.api._dvfs[(ID, "A", 1)]
-        self.api._dvfs[(ID, "A", 1)] = (dl, "another recording's fp")   # e.g. after a replug
+        self.assertIsNotNone(self.api._recs[first["rec"]]["source"]["native"])
+        dl, _ = self.api._natives[(ID, "A", 1)]
+        self.api._natives[(ID, "A", 1)] = (dl, "another recording's fp")   # e.g. after a replug
         again = self.load()                                            # the server's cached decode
-        self.assertIsNone(self.api._recs[again["rec"]]["source"]["dvf"])
+        self.assertIsNone(self.api._recs[again["rec"]]["source"]["native"])
 
     def test_workers_are_registered_under_a_lock(self):
         class Alive:

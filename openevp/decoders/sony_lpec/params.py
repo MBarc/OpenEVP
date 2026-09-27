@@ -1,7 +1,7 @@
 """LPEC parameter decoding: LSPs, pitch parameters, and the coefficient block.
 
 See docs/lpec.md, "Parameter decoding" and "Coefficient block". This module
-turns the raw fields of a parsed frame (st25.lpec.bitstream) into physical
+turns the raw fields of a parsed frame (openevp.decoders.sony_lpec.bitstream) into physical
 quantities:
 
 - the two parallel LSP representations of an LSP set (double, and the Q16

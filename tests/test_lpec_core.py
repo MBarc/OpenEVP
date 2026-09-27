@@ -1,7 +1,7 @@
-"""The optional C core (st25/lpec/_lpec.c -> lpec_core.dll) must be an exact
+"""The optional C core (openevp/decoders/sony_lpec/_lpec.c -> lpec_core.dll) must be an exact
 drop-in for the pure-Python decoder.
 
-- Its x87 fcos emulation matches st25.lpec.x87.fcos bit for bit.
+- Its x87 fcos emulation matches openevp.decoders.sony_lpec.x87.fcos bit for bit.
 - decode_payload through the C core gives the same PCM as the pure-Python
   path on every test vector.
 - The pure-Python path is still selectable (use_core=False) and is what
@@ -21,12 +21,13 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-from st25.lpec import x87  # noqa: E402
-from st25.lpec import _core  # noqa: E402
+import release_gate  # noqa: E402
+from openevp.decoders.sony_lpec import x87  # noqa: E402
+from openevp.decoders.sony_lpec import _core  # noqa: E402
 from test_lpec_vectors import _HAVE_TABLES, SHORT_VECTORS, python_pcm  # noqa: E402
 from test_lpec_vectors import vector_payload as _payload  # noqa: E402
 
-_NO_CORE = ("st25/lpec/lpec_core.dll is not built (or failed to load); run "
+_NO_CORE = ("openevp/decoders/sony_lpec/lpec_core.dll is not built (or failed to load); run "
             "python tools/build_lpec_core.py")
 
 
@@ -34,7 +35,7 @@ def _bits(x: float) -> int:
     return struct.unpack("<Q", struct.pack("<d", x))[0]
 
 
-@unittest.skipUnless(_core.available(), _NO_CORE)
+@release_gate.require(_core.available(), _NO_CORE)
 class CoreFcosTests(unittest.TestCase):
     """lpec_fcos == x87.fcos, bit for bit."""
 
@@ -67,14 +68,14 @@ class CoreFcosTests(unittest.TestCase):
         self._check(xs)
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
-@unittest.skipUnless(_core.available(), _NO_CORE)
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_core.available(), _NO_CORE)
 class CoreIdenticalOutputTests(unittest.TestCase):
     """decode_payload through the C core == the pure-Python decode."""
 
     def _check(self, name):
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         got = decode_payload(_payload(name), use_core=True)
         self.assertEqual(got, python_pcm(name), f"{name}: C core differs from pure Python")
 
@@ -92,14 +93,14 @@ for _order, _name in enumerate(SHORT_VECTORS, 1):
     setattr(CoreIdenticalOutputTests, _t.__name__, _t)
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
 class BackendSelectionTests(unittest.TestCase):
     """use_core=None picks the core when it loaded, else pure Python;
     use_core=True without the core is an error, not a silent fallback."""
 
     def test_default_uses_the_core_when_available(self):
-        from st25.lpec import decoder
+        from openevp.decoders.sony_lpec import decoder
         calls = []
         real = _core.decode_packed
 
@@ -119,7 +120,7 @@ class BackendSelectionTests(unittest.TestCase):
         self.assertEqual(calls, [1])
 
     def test_forcing_the_core_without_it_raises(self):
-        from st25.lpec import decoder
+        from openevp.decoders.sony_lpec import decoder
         saved = _core._lib
         _core._lib = None
         try:
@@ -132,9 +133,9 @@ class BackendSelectionTests(unittest.TestCase):
             _core._lib = saved
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
-@unittest.skipUnless(_core.available(), _NO_CORE)
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_core.available(), _NO_CORE)
 class RandomPayloadParityTests(unittest.TestCase):
     """decode_payload through the C core vs. pure Python, on payloads that
     are not real recordings: seeded random bytes, and truncated (short
@@ -148,7 +149,7 @@ class RandomPayloadParityTests(unittest.TestCase):
     """
 
     def _check(self, payload):
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         want = want_err = got = got_err = None
         try:
             want = decode_payload(payload, use_core=False)
@@ -180,17 +181,17 @@ class RandomPayloadParityTests(unittest.TestCase):
                 self._check(base[:cut])
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
-@unittest.skipUnless(_core.available(), _NO_CORE)
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_core.available(), _NO_CORE)
 class MalformedRecordTests(unittest.TestCase):
-    """decode_frame's defensive checks on the packed record (st25/lpec/
+    """decode_frame's defensive checks on the packed record (openevp/decoders/sony_lpec/
     _lpec.c, ~line 950 on): a record with a field pushed out of the range
     the pure-Python parser could ever produce must be rejected (-1 from the
     C core -> decode_frames raises RuntimeError), not read out of bounds.
 
     Each test here starts from a real, valid frame (parsed by
-    st25.lpec.bitstream, so every other field is in range) and pushes
+    openevp.decoders.sony_lpec.bitstream, so every other field is in range) and pushes
     exactly one field out of range, isolating one of the added checks.
     A test process that returns normally (raises RuntimeError, doesn't
     crash) is itself the "no crash" evidence.
@@ -198,7 +199,7 @@ class MalformedRecordTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from st25.lpec import bitstream, tables as tables_module
+        from openevp.decoders.sony_lpec import bitstream, tables as tables_module
         cls.t = tables_module.load()
 
         # single-frame's only frame: mode 0, F=1 (both LSP slots read), both
@@ -283,9 +284,9 @@ class MalformedRecordTests(unittest.TestCase):
         self._expect_rejected(frame)
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
-@unittest.skipUnless(_core.available(), _NO_CORE)
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_core.available(), _NO_CORE)
 class DefaultShapeFromTablesTests(unittest.TestCase):
     """The C core takes the default temporal shape from Tables.DEFAULT_SHAPE
     (it has no copy of its own), so the two backends cannot drift apart:
@@ -293,8 +294,8 @@ class DefaultShapeFromTablesTests(unittest.TestCase):
 
     def test_both_backends_follow_tables_default_shape(self):
         import dataclasses
-        from st25.lpec import tables as tables_module
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec import tables as tables_module
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         t = tables_module.load()
         odd = dataclasses.replace(t, DEFAULT_SHAPE=(0.5,) * 8)
         payload = _payload("tone-1000-fullscale")
@@ -304,22 +305,22 @@ class DefaultShapeFromTablesTests(unittest.TestCase):
         self.assertNotEqual(core, python_pcm("tone-1000-fullscale"))
 
 
-@unittest.skipUnless(_HAVE_TABLES,
-                     "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
 class CancelTests(unittest.TestCase):
     """should_stop interrupts a decode (both backends) with Cancelled. The
     vectors are short, so the poll interval is lowered to 4 frames here."""
 
     def setUp(self):
         from unittest import mock
-        from st25.lpec import decoder
+        from openevp.decoders.sony_lpec import decoder
         patcher = mock.patch.object(decoder, "_STOP_CHECK_FRAMES", 4)
         patcher.start()
         self.addCleanup(patcher.stop)
 
     def _run(self, use_core, stop_after):
-        from st25.lpec import Cancelled
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec import Cancelled
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         calls = []
 
         def should_stop():
@@ -334,19 +335,19 @@ class CancelTests(unittest.TestCase):
         self.assertEqual(len(self._run(False, 0)), 1)
 
     def test_a_stop_mid_stream_is_honoured(self):
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         payload = _payload("white-noise")
         polls = []
         decode_payload(payload, use_core=False, should_stop=lambda: polls.append(1) or False)
         self.assertGreater(len(polls), 1, "white-noise must be long enough to poll twice")
         self.assertEqual(len(self._run(False, 1)), 2)
 
-    @unittest.skipUnless(_core.available(), _NO_CORE)
+    @release_gate.require(_core.available(), _NO_CORE)
     def test_core_decode_can_be_stopped(self):
         self._run(True, 0)
 
     def test_not_stopping_gives_the_normal_output(self):
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         got = decode_payload(_payload("silence"), use_core=False, should_stop=lambda: False)
         self.assertEqual(got, python_pcm("silence"))
 

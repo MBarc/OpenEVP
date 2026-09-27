@@ -6,15 +6,20 @@ removed). Windows shows one admin prompt.
 """
 import ctypes
 import os
+import subprocess
 import sys
 from ctypes import wintypes
 
 SCRIPT = "install-winusb.ps1"
+MANIFEST = "models.json"
 ERROR_CANCELLED = 1223
 SEE_MASK_NOCLOSEPROCESS = 0x00000040
 SEE_MASK_NOASYNC = 0x00000100
 SW_HIDE = 0
 INFINITE = 0xFFFFFFFF
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAKE_MANIFEST = "tools/make_driver_manifest.py"
 
 
 class SetupCancelled(Exception):
@@ -25,11 +30,38 @@ class SetupRefused(Exception):
     """The script is not in a folder only administrators can change, so it is not elevated."""
 
 
+class ManifestMissing(Exception):
+    """app/driver/models.json (a build output) is not there and could not be
+    generated on the fly."""
+
+
 def script_path():
     """The bundled script: <app folder>/_internal/driver when frozen, app/driver from source."""
     frozen = getattr(sys, "_MEIPASS", None)
     base = os.path.join(frozen, "driver") if frozen else os.path.join(os.path.dirname(os.path.abspath(__file__)), "driver")
     return os.path.join(base, SCRIPT)
+
+
+def _ensure_manifest(driver_dir):
+    """From a source checkout (never when frozen: build_windows.ps1 always
+    generates and bundles it), app/driver/models.json is a build output that
+    a fresh checkout does not have. Generate it with tools/make_driver_manifest.py
+    rather than let install-winusb.ps1 fail on it with a confusing error; if that
+    itself fails, say plainly what command to run."""
+    if getattr(sys, "_MEIPASS", None):
+        return
+    manifest = os.path.join(driver_dir, MANIFEST)
+    if os.path.isfile(manifest):
+        return
+    script = os.path.join(REPO_ROOT, *MAKE_MANIFEST.split("/"))
+    try:
+        subprocess.run([sys.executable, script, "--out", manifest], check=True, cwd=REPO_ROOT,
+                       capture_output=True, text=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        detail = (getattr(e, "stderr", None) or str(e)).strip()
+        raise ManifestMissing(f"the driver manifest (app/driver/{MANIFEST}) is missing; run "
+                              f"'python {MAKE_MANIFEST}' to create it"
+                              + (f" ({detail})" if detail else "")) from e
 
 
 class _ShellExecuteInfo(ctypes.Structure):
@@ -93,11 +125,13 @@ def is_protected(path, program_files):
 
 
 def set_up_driver():
-    """Install the WinUSB driver for the ST25. Returns (exit_code, log_text).
+    """Install the WinUSB driver for the recorder models in the driver manifest
+    (driver/models.json, next to the script). Returns (exit_code, log_text).
 
     Exit codes are the script's: 0 done, 3010 done (restart recommended), 1 failed.
     """
     script = script_path()
+    _ensure_manifest(os.path.dirname(script))
     if not is_protected(script, _program_files()):
         # Elevating a script anyone could have edited would hand them admin rights.
         raise SetupRefused("it only works in the installed app (run OpenEVP-Setup to install it)")

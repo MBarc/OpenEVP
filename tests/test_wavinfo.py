@@ -7,7 +7,9 @@ import unittest
 import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import wavinfo  # noqa: E402
+from openevp import wavinfo  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
+import release_gate  # noqa: E402
 
 
 def make_wav_from_pcm(data, rate=8000, ch=1, width=2):
@@ -238,7 +240,7 @@ class GoldenFingerprintTests(unittest.TestCase):
     def test_fingerprint_of_the_decoded_vector(self):
         from st25 import audio
         if not audio.available():
-            self.skipTest("st25.lpec tables are not available in this checkout")
+            release_gate.skip_or_fail(f"WAV conversion is not available: {audio.status()}")
         with open(os.path.join(self.VECTORS, "sweep-50-4000.dvf"), "rb") as f:
             wav = audio.dvf_to_wav(f.read())
         self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(wav)), self.GOLDEN)

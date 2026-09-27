@@ -1,4 +1,4 @@
-"""WAV from .dvf, through our own LPEC decoder (st25.lpec).
+"""WAV from .dvf, through our own LPEC decoder (openevp.decoders.sony_lpec).
 
 The app greys out WAV export and playback while available() is False and
 shows status() as the reason. status() can also be set while available()
@@ -7,6 +7,8 @@ converts, in slow mode, and says so.
 """
 import importlib
 import sys
+
+DECODER = "openevp.decoders.sony_lpec"      # imported on demand: optional in a build
 
 SLOW_MODE = ("slow mode: the fast decoder could not be loaded, so converting "
              "recordings to WAV takes much longer than usual")
@@ -23,9 +25,9 @@ class Cancelled(Exception):
 def _decoder():
     """(module, None) when the decoder can be used, else (None, reason)."""
     try:
-        mod = importlib.import_module("st25.lpec")
+        mod = importlib.import_module(DECODER)
     except ModuleNotFoundError as e:
-        if e.name == "st25.lpec":
+        if e.name == DECODER:
             return None, "WAV conversion is not included in this build"
         return None, f"the WAV decoder could not be loaded: {e}"
     except ImportError as e:

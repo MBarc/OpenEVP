@@ -5,7 +5,7 @@ decoder needs into two groups:
 
 - **Extracted** tables have no known formula; they come from
   JSON dumps of the tables in Digital Voice Editor's ``LPEC.dll``, by way of ``tools/import_lpec_tables.py``, which writes them into
-  ``st25/lpec/data/lpec_tables.json`` (git-ignored, generated locally, never
+  ``openevp/decoders/sony_lpec/data/lpec_tables.json`` (git-ignored, generated locally, never
   committed).
 - **Derivable** tables are computed here from the formulas in docs/lpec.md,
   either from nothing (the "Tables generated at run time" section, plus a
@@ -15,7 +15,7 @@ decoder needs into two groups:
 ``load()`` returns a single ``Tables`` object with one attribute per table,
 named after the doc's short names (``C1``, ``GAIN``, ``S2048``, ...). It
 raises ``TablesMissing`` when the extracted data file is not present, so
-``st25.lpec`` stays importable without it; only decoding needs the data.
+``openevp.decoders.sony_lpec`` stays importable without it; only decoding needs the data.
 """
 
 from __future__ import annotations
@@ -34,6 +34,10 @@ Row = Sequence[float]        # a tuple once loaded (see _freeze)
 IntRow = Sequence[int]
 
 DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "lpec_tables.json"
+
+# Where the extracted tables lived before v0.8 (openevp/decoders/sony_lpec
+# replaced st25/lpec): a local copy may still be there.
+_OLD_DATA_FILE = Path(__file__).resolve().parents[3] / "st25" / "lpec" / "data" / "lpec_tables.json"
 
 # Extracted tables, loaded verbatim from the data file (see the "Static
 # tables" section of docs/lpec.md; every one of these is marked "no,
@@ -89,7 +93,7 @@ class Tables:
     # Every table is stored as a tuple (of tuples, for a matrix): the cached
     # Tables object is shared by every decode, on any thread.
 
-    # --- Extracted (from st25/lpec/data/lpec_tables.json) ---
+    # --- Extracted (from openevp/decoders/sony_lpec/data/lpec_tables.json) ---
     C1: Sequence[Row]       # LSP codebook stage 1, double, 64 x 10
     C2: Sequence[Row]       # LSP codebook stage 2, double, 64 x 10
     C3: Sequence[Row]       # LSP codebook stage 3, double, 64 x 10
@@ -270,6 +274,10 @@ def load(path: Path = DEFAULT_DATA_FILE) -> Tables:
     """
     path = Path(path)
     if not path.is_file():
+        if _OLD_DATA_FILE.is_file():
+            raise TablesMissing(path=path,
+                                 hint="found at the old location st25/lpec/data -- move it to "
+                                      "openevp/decoders/sony_lpec/data")
         raise TablesMissing(path=path)
 
     st = path.stat()

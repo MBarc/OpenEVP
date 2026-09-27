@@ -1,4 +1,4 @@
-"""Tests for st25.lpec.tables: sizes/types of the derivable tables (a),
+"""Tests for openevp.decoders.sony_lpec.tables: sizes/types of the derivable tables (a),
 bit-exact match against the table dumps where available (b, set
 OPENEVP_TABLE_DUMPS to their folder), and
 TablesMissing without a data file (c). See docs/lpec.md, "Tables".
@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25.lpec import TablesMissing, tables  # noqa: E402
-from st25.lpec.tables import TablesInvalid  # noqa: E402
+from openevp.decoders.sony_lpec import TablesMissing, tables  # noqa: E402
+from openevp.decoders.sony_lpec.tables import TablesInvalid  # noqa: E402
 
 
 def _zeros(name, shape):
@@ -59,7 +59,7 @@ class DerivableSizeAndTypeTests(unittest.TestCase):
     def setUpClass(cls):
         if _TABLES is None:
             raise unittest.SkipTest(
-                "st25/lpec/data/lpec_tables.json not found; run "
+                "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run "
                 "tools/import_lpec_tables.py to generate it locally"
             )
         cls.t = _TABLES
@@ -159,7 +159,7 @@ class BitExactAgainstDveReTests(unittest.TestCase):
     def setUpClass(cls):
         if _TABLES is None:
             raise unittest.SkipTest(
-                "st25/lpec/data/lpec_tables.json not found; run "
+                "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run "
                 "tools/import_lpec_tables.py to generate it locally"
             )
         if not DVE_TABLES_DIR.is_dir():
@@ -185,6 +185,25 @@ class TablesMissingTests(unittest.TestCase):
         self.assertFalse(missing_path.exists())
         with self.assertRaises(TablesMissing):
             tables.load(missing_path)
+
+    def test_hint_names_the_old_location_when_a_copy_is_still_there(self):
+        # A checkout from before v0.8 (st25/lpec -> openevp/decoders/sony_lpec)
+        # may still have its table data at the old path: say so.
+        with tempfile.TemporaryDirectory() as d:
+            old = Path(d) / "lpec_tables.json"
+            old.write_text("{}", encoding="utf-8")
+            with mock.patch.object(tables, "_OLD_DATA_FILE", old):
+                with self.assertRaises(TablesMissing) as cm:
+                    tables.load(REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json")
+            self.assertIn("old location", cm.exception.hint)
+            self.assertIn("st25/lpec/data", cm.exception.hint)
+            self.assertIn("openevp/decoders/sony_lpec/data", cm.exception.hint)
+
+    def test_hint_is_the_plain_one_when_no_old_copy_exists(self):
+        with mock.patch.object(tables, "_OLD_DATA_FILE", REPO_ROOT / "st25" / "lpec" / "data" / "lpec_tables.json"):
+            with self.assertRaises(TablesMissing) as cm:
+                tables.load(REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json")
+        self.assertNotIn("old location", cm.exception.hint)
 
 
 class InvalidTablesTests(unittest.TestCase):
@@ -306,16 +325,16 @@ class CachingTests(unittest.TestCase):
 
 
 class CheckTests(unittest.TestCase):
-    """st25.lpec.check(), which st25/audio.py uses to detect TablesMissing
-    without decoding anything, mirrors tables.load()'s availability."""
+    """openevp.decoders.sony_lpec.check(), which st25/audio.py uses to detect
+    TablesMissing without decoding anything, mirrors tables.load()'s availability."""
 
     def test_check_matches_tables_load(self):
-        from st25 import lpec
+        from openevp.decoders import sony_lpec
         if _TABLES is None:
             with self.assertRaises(TablesMissing):
-                lpec.check()
+                sony_lpec.check()
         else:
-            lpec.check()          # must not raise when the data file is present
+            sony_lpec.check()     # must not raise when the data file is present
 
 
 if __name__ == "__main__":

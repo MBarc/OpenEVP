@@ -7,7 +7,7 @@ variable names.
 
 Runs only when OPENEVP_REAL_RECORDINGS names an existing folder with that
 layout; otherwise skipped with a clear message. dvf_to_wav uses the C core when
-st25/lpec/lpec_core.dll is built (the 20 recordings, 18,622 frames, take
+openevp/decoders/sony_lpec/lpec_core.dll is built (the 20 recordings, 18,622 frames, take
 seconds); pure Python decodes at roughly 65 ms/frame (about 20 minutes).
 
 This test only reads the real recordings and DVE's WAVs into memory for
@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25.lpec import TablesMissing, tables  # noqa: E402
+from openevp.decoders.sony_lpec import TablesMissing, tables  # noqa: E402
 
 _ROOT = os.environ.get("OPENEVP_REAL_RECORDINGS", "")
 RAW_DIR = Path(_ROOT) / "Raw" / "A"
@@ -54,7 +54,7 @@ class RealRecordingTests(unittest.TestCase):
     def setUpClass(cls):
         if not _tables_present():
             raise unittest.SkipTest(
-                "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+                "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
 
     def test_finds_all_20_recordings(self):
         self.assertEqual(
@@ -64,7 +64,7 @@ class RealRecordingTests(unittest.TestCase):
 
 def _make_test(dvf_path, wav_path):
     def test(self):
-        from st25.lpec.decoder import dvf_to_wav
+        from openevp.decoders.sony_lpec.decoder import dvf_to_wav
 
         if not wav_path.is_file():
             self.fail(f"no matching {wav_path.name} in {CONVERTED_DIR}")

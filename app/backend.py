@@ -12,13 +12,23 @@ EVP marks live in the app data store (app.store.AppData), keyed by the audio
 fingerprint of the decoded samples. The page never receives a file's path, and
 it never names a recording by fingerprint: every loaded recording gets an
 opaque "rec" handle, and the marks calls take that handle (the fingerprint
-itself does reach the page, only to group copies of one recording). For a recording on a recorder the handle also holds the
-exact .dvf bytes that were decoded for playback, so the backup made when the
-recording is first marked saves exactly the audio that was marked. Backups run
+itself does reach the page, only to group copies of one recording). For a
+recording on a recorder the handle also holds its provenance: the exact native
+bytes that were decoded for playback (a .dvf for the ST25), their file name,
+their format and where they came from (recorder, folder, number), so the
+backup made when the recording is first marked saves exactly the audio that
+was marked. Backups run
 on one background worker (registered with the export worker, so shutdown()
 waits for both) and report through "backup-done" / "backup-failed" events.
 
-The EVP library lists the .dvf/.wav files of one folder tree by opaque ids.
+Recorders are reached only through their model (openevp.recorders): the
+listing, downloads and the native format (openevp.formats) with its decoder
+come from it. Folder ids and recording numbers from the page are checked
+against the recorder's own listing; exports and backups go into
+<Save to>/<folder safe_name>/<the download's file name>.
+
+The EVP library lists the recording files (the extensions of openevp.formats)
+of one folder tree by opaque ids.
 Fingerprints come from the store's index cache; files not in it are
 fingerprinted by one background indexer (also a registered worker), which
 reports "library-row" / "library-progress" / "library-done" events tagged with
@@ -32,25 +42,21 @@ import datetime
 import io
 import os
 import secrets
-import struct
 import threading
 import wave
 from collections import OrderedDict
 
-from st25 import __version__, audio, wavinfo
-from st25.cli import open_folder
-from st25.export import save_dvf, save_wav
+from openevp import __version__, formats, recorders, wavinfo
+from openevp.export import save_unique, save_wav
+from openevp.paths import open_folder
+from openevp.recorders import base as rbase
 
 from .updater import UpdateCancelled
-from st25.folder import TableError
-from st25.protocol import RecorderError
-from st25.session import LETTERS
-from st25.usb import DriverMissing, UsbError
 
 from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
-                          _file_id, _folder_id, _plain)
+                          _decoder_problem, _decoder_problems, _file_id, _folder_id, _kind_format, _plain)
 from .library_ops import (BACKUP_RECYCLED, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, SECOND_WINDOW, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
@@ -76,17 +82,44 @@ class _BackupRunning(Exception):
 
 def _download(manager, key):
     """The session's Download for one recording; raises if it cannot be played."""
-    device_id, letter, number = key
-    dl = manager.with_session(device_id, lambda s: s.download(letter, number))
+    device_id, folder_id, number = key
+    dl = manager.with_session(device_id, lambda s: s.download(folder_id, number))
     if dl.error:
         raise ValueError(f"{dl.label} cannot be played: {dl.error}")
     return dl
 
 
+def _decoder(fmt):
+    """fmt's decoder, or raise formats.DecoderUnavailable saying why there is none."""
+    if fmt.decoder is None:
+        raise formats.DecoderUnavailable(f"OpenEVP cannot convert {fmt.label} ({fmt.ext}) files to WAV")
+    return fmt.decoder
+
+
 def recording_wav(manager, key, should_stop=None):
     """WAV bytes for one recording (the AudioServer provider). ``should_stop``
-    lets app shutdown interrupt a long decode (see audio.dvf_to_wav)."""
-    return audio.dvf_to_wav(_download(manager, key).dvf, should_stop=should_stop)
+    lets app shutdown interrupt a long decode (formats.Cancelled)."""
+    fmt = manager.model(key[0]).native
+    return _decoder(fmt).to_wav(_download(manager, key).data, should_stop=should_stop)
+
+
+def save_native(fmt, data, outdir, name):
+    """Save a recorder's native file unless the format says an existing file
+    already holds the same recording (a .dvf: the same audio, ignoring the time
+    counters DVE rewrites). Never replaces a file. Returns (path, already_saved)."""
+    return save_unique(data, outdir, name, lambda existing: fmt.same(existing, data))
+
+
+def _usable_filename(fmt, name):
+    """Whether a download's file name can be written as is (A5)."""
+    return rbase.safe_name_ok(name) and name.lower().endswith(fmt.ext) and len(name) > len(fmt.ext)
+
+
+def _label(folder, number):
+    """How messages name a recording: "A-007" (folder safe name, number)."""
+    if isinstance(number, int):
+        return f"{folder['safe_name']}-{number:03d}"
+    return f"{folder['safe_name']}-{number}"
 
 
 def _investigation(path, library):
@@ -103,26 +136,15 @@ def _investigation(path, library):
 
 
 SAVED_LIMIT = 5000          # the library lists at most this many files (the page says so)
-LP_BYTES_PER_SECOND = 750   # ST25 LP audio
 
 
 def _seconds(path, kind):
     """Length of a saved file from its header only (never reads the audio)."""
-    try:
-        if kind == "wav":
-            with wave.open(path) as w:
-                return round(w.getnframes() / w.getframerate(), 1) if w.getframerate() else None
-        with open(path, "rb") as f:
-            header = f.read(468)
-        if len(header) == 468:
-            return round(struct.unpack(">I", header[464:468])[0] / LP_BYTES_PER_SECOND, 1)
-    except (OSError, EOFError, wave.Error, ZeroDivisionError):
-        pass
-    return None
+    fmt = _kind_format(kind)
+    return fmt.seconds(path) if fmt is not None else None
 
 
 INDEX_FLUSH_EVERY = 20      # the library indexer writes its cache after this many files
-DVF_MAX_BYTES = 512 << 20   # far beyond any ICD-ST25 recording (~200 hours of LP audio)
 
 
 def _stat_of(st):
@@ -138,7 +160,8 @@ def _wav_length(f):
 
 def _scan_library(folder):
     """([(investigation, name, kind, path, stat, folder_rel)], [folder_rel, ...],
-    truncated, complete): every .dvf/.wav in folder and all its subfolders -- a
+    truncated, complete): every recording file (an extension in openevp.formats:
+    .dvf, .wav...) in folder and all its subfolders -- a
     folder's files first (by name), then its subfolders in name order. Walking
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
@@ -174,7 +197,7 @@ def _scan_library(folder):
                         subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
-                if kind not in ("dvf", "wav") or not e.is_file():
+                if not kind or _kind_format(kind) is None or not e.is_file():
                     continue
                 st = e.stat()
             except OSError:
@@ -210,36 +233,87 @@ def _update_problem(e, what="Could not check for updates"):
     return f"{what}: {reason}."
 
 
+def _unwrapped(e):
+    """The decoder's own exception behind a formats.DecodeError (or another formats
+    wrapper), so messages name it as they always have ("FormatError: ...")."""
+    while isinstance(e, (formats.DecodeError, formats.DecoderUnavailable, formats.Cancelled))             and e.__cause__ is not None:
+        e = e.__cause__
+    return e
+
+
 def _error(e):
-    if isinstance(e, DriverMissing):
-        return _fail(str(e), DRIVER, NEEDS_DRIVER)
+    """The page's error for a recorder failure (base.state_for() decides the state)."""
+    e = _unwrapped(e)
     if isinstance(e, DeviceGone):
         return _fail(str(e), "", "")
-    if isinstance(e, (RecorderError, UsbError, TableError)):
-        return _fail(str(e), REPLUG, NEEDS_REPLUG)
+    if isinstance(e, rbase.DriverMissing):
+        return _fail(str(e), e.advice or DRIVER, NEEDS_DRIVER)
+    if isinstance(e, rbase.RecorderError):             # NotReady, DeviceGone, connection failures
+        return _fail(str(e), e.advice or REPLUG, NEEDS_REPLUG)
     return _fail(f"{type(e).__name__}: {e}")
 
 
-def _recording(m):
-    return {"number": m.number, "when": m.when(), "seconds": round(m.seconds(), 1),
-            "owner": m.owner, "problem": m.problem}
+def _problem(model, e):
+    """A model whose discovery failed, for the page: a recorder failure (e.g.
+    libusb could not be loaded) as the recorder list's error with its advice;
+    anything else as a plain note. The other models' recorders are still listed."""
+    if isinstance(e, rbase.RecorderError):
+        return {k: v for k, v in _error(e).items() if k in ("error", "advice")}
+    what = f"{model.name} recorders" if model is not None else "Some recorders"
+    return {"error": f"{what} could not be looked for ({type(e).__name__}: {e}).", "advice": ""}
+
+
+def _item_key(value):
+    """A folder id or recording number from the page, in a form that cannot be
+    mistaken for another (1 and "1" and True differ), or None if it is neither."""
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    return (type(value).__name__, value)
 
 
 def _parse_items(items):
-    """[(letter, number)] or None if items is not a non-empty list of valid recordings."""
+    """[(folder id, number)] or None if items is not a non-empty list of
+    {"folder", "number"} of the right types (checked against a listing later)."""
     if not isinstance(items, list) or not items:
         return None
     work = []
     for i in items:
         if not isinstance(i, dict):
             return None
-        letter, number = i.get("folder"), i.get("number")
-        if not isinstance(letter, str) or len(letter) != 1 or letter not in LETTERS:
+        folder_id, number = i.get("folder"), i.get("number")
+        if not isinstance(folder_id, str) or _item_key(number) is None:
             return None
-        if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= 0xFFFF:
-            return None
-        work.append((letter, number))
+        work.append((folder_id, number))
     return work
+
+
+def _check_listing(model, folders_, rows):
+    """Refuse a listing the app could not use safely (A5): folder ids must be
+    unique strings, safe names valid and unique ignoring case; numbers unique
+    ints or strings per folder. Raises ValueError."""
+    ids, safe = set(), set()
+    for f in folders_:
+        if not isinstance(f, dict) or not isinstance(f.get("id"), str) or not isinstance(f.get("label"), str):
+            raise ValueError(f"{model.name} reported a folder OpenEVP cannot use")
+        if f["id"] in ids or not rbase.safe_name_ok(f.get("safe_name")) or f["safe_name"].casefold() in safe:
+            raise ValueError(f"{model.name} reported a folder OpenEVP cannot use")
+        ids.add(f["id"])
+        safe.add(f["safe_name"].casefold())
+        numbers = set()
+        for r in rows[f["id"]]:
+            k = _item_key(r.get("number")) if isinstance(r, dict) else None
+            if k is None or k in numbers:
+                raise ValueError(f"{model.name} reported a recording OpenEVP cannot use")
+            numbers.add(k)
+
+
+def _recording(folder, r):
+    """One recording row for the page."""
+    seconds = r.get("seconds")
+    return {"number": r["number"], "label": _label(folder, r["number"]),
+            "recorded": r.get("recorded_label") or "",
+            "seconds": round(seconds, 1) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None,
+            "owner": r.get("owner"), "problem": r.get("problem") or None}
 
 
 class Api(LibraryOps):
@@ -268,7 +342,8 @@ class Api(LibraryOps):
         self._store_problems = list(store_problems)   # why the store could not be opened (from main.py)
         self._recs_lock = threading.Lock()
         self._recs = OrderedDict()            # rec handle -> {"fp", "duration", "name", "label", "source"}
-        self._dvfs = OrderedDict()            # (device_id, letter, number) -> (Download, fp of its decode)
+        self._natives = OrderedDict()         # (device_id, folder id, number) -> (Download, fp of its decode)
+        self._listings = {}                   # device_id -> the recorder's listing (see _read_listing)
         self._backup_lock = threading.Lock()
         self._backup_queue = OrderedDict()    # fp -> (rec, entry): one pending backup per recording
         self._backup_running = None           # fp being backed up right now
@@ -293,42 +368,135 @@ class Api(LibraryOps):
                 self._dest = saved
 
     def capabilities(self):
-        """What this app can do. Store problems (a damaged marks file set aside, a
-        second window) are reported here, once, for the page to show."""
+        """What this app can do. wav / wav_status: whether the recorders' native
+        formats can be converted to WAV (played, marked), and why not, or a
+        slow-mode warning. formats: per library file type ("dvf", "wav"...),
+        whether it can be played and why not. Store problems (a damaged marks
+        file set aside, a second window) are reported here, once, for the page
+        to show."""
         store = self._store
-        return {"wav": audio.available(), "wav_status": audio.status(), "version": __version__,
+        natives = []
+        for m in recorders.supported():
+            if m.native is not formats.WAV and m.native not in natives:
+                natives.append(m.native)
+        decoders = [f.decoder for f in natives if f.decoder is not None]
+        unavailable = [d for d in decoders if not d.available()]
+        if unavailable:
+            wav_status = unavailable[0].reason() or "the WAV decoder is not available"
+        else:
+            wav_status = next((w for w in (d.warning() for d in decoders) if w), None)
+        kinds = {}
+        for f in formats.all():
+            problem = _decoder_problem(f)
+            kinds[f.ext[1:]] = {"label": f.label, "playable": problem is None, "reason": problem}
+        return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
                 "store_problems": self._store_problems + (store.problems() if store is not None else [])}
 
     def devices(self):
+        """{"ok", "devices": [{"id", "model_id", "model", "port", "state", "message",
+        "owner"}], "problems": [{"error", "advice"}]}: problems are models whose
+        recorders could not be looked for (the other models' recorders are still listed)."""
         try:
-            return {"ok": True, "devices": self._manager.refresh()}
+            rows, failed = self._manager.refresh(problems=True)
         except Exception as e:
             return _error(e)
+        present = {d["id"] for d in rows}
+        with self._recs_lock:               # a replug is a new connection id: drop the old one's caches
+            for device_id in [d for d in self._listings if d not in present]:
+                del self._listings[device_id]
+            for key in [k for k in self._natives if k[0] not in present]:
+                del self._natives[key]
+        return {"ok": True, "devices": rows, "problems": [_problem(m, e) for m, e in failed]}
+
+    def _read_listing(self, device_id):
+        """Read a recorder's folders and recordings, check them (A5) and remember
+        them for this connection: {"model", "folders": [folder], "rows": {folder id:
+        [row]}}. Raises what the manager or the session raised, or ValueError."""
+        model = self._manager.model(device_id)
+
+        def read(s):
+            folders_ = s.folders()
+            return folders_, {f["id"]: s.recordings(f["id"]) for f in folders_}
+        folders_, rows = self._manager.with_session(device_id, read)
+        _check_listing(model, folders_, rows)
+        listing = {"model": model, "folders": [dict(f) for f in folders_], "rows": rows}
+        with self._recs_lock:
+            self._listings[device_id] = listing
+        return listing
+
+    def _listing(self, device_id):
+        """The remembered listing of a connection (read once if there is none)."""
+        with self._recs_lock:
+            listing = self._listings.get(device_id)
+        return listing if listing is not None else self._read_listing(device_id)
+
+    def _find(self, device_id, folder_id, number):
+        """(model, folder, row) of a recording the page names, checked against the
+        recorder's own listing (never trusted as is); None if there is no such one."""
+        if not isinstance(folder_id, str) or _item_key(number) is None:
+            return None
+        listing = self._listing(device_id)
+        folder = next((f for f in listing["folders"] if f["id"] == folder_id), None)
+        if folder is None:
+            return None
+        row = next((r for r in listing["rows"][folder_id] if _item_key(r["number"]) == _item_key(number)), None)
+        return None if row is None else (listing["model"], folder, row)
+
+    def _export_formats(self, model):
+        """A model's export menu: its native format, then WAV (unavailable, with
+        the reason, when its decoder cannot run). [{"value", "label", "available", "reason"}]"""
+        native = model.native
+        out = [{"value": native.ext[1:], "label": f"{native.ext} ({native.label})", "available": True,
+                "reason": None}]
+        if native is not formats.WAV:
+            problem = _decoder_problem(native)
+            out.append({"value": "wav", "label": "WAV", "available": problem is None, "reason": problem})
+        return out
 
     def recordings(self, device_id):
+        """The recorder's folders and recordings, read afresh: {"ok", "model",
+        "model_id", "folders": [{"id", "label", "recordings": [row]}], "formats"
+        (the export menu), "playable", "play_reason" (why not, or None)}."""
         try:
-            by_letter = self._manager.with_session(device_id, lambda s: [(l, s.messages(l)) for l in LETTERS])
+            listing = self._read_listing(device_id)
         except Exception as e:
             return _error(e)
-        return {"ok": True, "folders": [{"letter": l, "recordings": [_recording(m) for m in msgs]}
-                                        for l, msgs in by_letter]}
+        model = listing["model"]
+        problem = _decoder_problem(model.native)
+        return {"ok": True, "model": model.name, "model_id": model.model_id,
+                "folders": [{"id": f["id"], "label": f["label"],
+                             "recordings": [_recording(f, r) for r in listing["rows"][f["id"]]]}
+                            for f in listing["folders"]],
+                "formats": self._export_formats(model), "playable": problem is None, "play_reason": problem}
 
-    def audio(self, device_id, letter, number):
-        if not audio.available():
-            return _fail(f"Playback: {audio.status()}.")
-        work = _parse_items([{"folder": letter, "number": number}])
-        if work is None:
+    def audio(self, device_id, folder_id, number):
+        # The model comes with the remembered listing: a play served from the decode
+        # cache never waits behind an export's download on the device thread.
+        try:
+            model = self._listing(device_id)["model"]
+        except Exception as e:
+            return _error(e)
+        fmt = model.native
+        problem = _decoder_problem(fmt)
+        if problem:
+            return _fail(f"Playback: {problem}.")
+        try:
+            found = self._find(device_id, folder_id, number)
+        except Exception as e:
+            return _error(e)
+        if found is None:
             return _fail("No such recording.")
-        key = (device_id, *work[0])
-        letter, number = work[0]
+        _model, folder, row = found
+        number = row["number"]
+        key = (device_id, folder_id, number)
 
         made = []
 
         def make():                      # runs only when the audio server has no decode cached
             dl = _download(self._manager, key)
             made.append(dl)
-            return audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
+            return _decoder(fmt).to_wav(dl.data, should_stop=self._stop.is_set)
         try:
             info = self._server.prepare(key, make=make)
         except Exception as e:
@@ -337,18 +505,21 @@ class Api(LibraryOps):
         with self._recs_lock:
             if made:                     # decoded by this call: info describes exactly these bytes
                 dl = made[-1]
-                _bounded_put(self._dvfs, key, (dl, fp))
+                _bounded_put(self._natives, key, (dl, fp))
             else:                        # a cached decode: trust a capture only with the same audio
-                held = self._dvfs.get(key)
+                held = self._natives.get(key)
                 dl = held[0] if held is not None and fp is not None and held[1] == fp else None
                 if dl is not None:
-                    self._dvfs.move_to_end(key)
+                    self._natives.move_to_end(key)
         # Without the captured bytes (evicted meanwhile, or not matching) a backup downloads
         # once more and checks the audio is still the same before trusting it (_device_audio).
-        label = f"{letter}-{number:03d}"
-        source = {"kind": "device", "device": device_id, "letter": letter, "number": number, "label": label,
-                  "dvf": dl.dvf if dl else None, "dvf_name": dl.name if dl else None}
-        return self._loaded(info, dl.name if dl else label, label, source)
+        # The provenance (A2): the native bytes, their file name and format, and where
+        # they came from; kept with the handle, so a backup works after an unplug too.
+        label = _label(folder, number)
+        source = {"kind": "device", "device": device_id, "model": model.model_id, "format": fmt,
+                  "folder": folder_id, "safe_name": folder["safe_name"], "number": number, "label": label,
+                  "native": dl.data if dl else None, "native_name": dl.filename if dl else None}
+        return self._loaded(info, dl.filename if dl else label, label, source)
 
     # ---- recording handles and marks ------------------------------------------
     def _loaded(self, info, name, label, source, extra=None):
@@ -535,61 +706,70 @@ class Api(LibraryOps):
                             f"{entry['source']['label']} was not backed up because the app closed.")
 
     def _device_audio(self, entry):
-        """(dvf bytes, dvf name, WAV or None) for a recorder recording's handle. When
-        the handle has no captured bytes, the recording is downloaded once more, and
-        trusted only if it decodes to the same audio that was loaded (then the WAV
-        from that check is returned too). Raises ValueError in plain words."""
+        """(native bytes, their file name, WAV or None) for a recorder recording's
+        handle. When the handle has no captured bytes, the recording is downloaded
+        once more from the same recorder, folder and number, and trusted only if it
+        decodes to the same audio that was loaded (then the WAV from that check is
+        returned too). Raises ValueError in plain words."""
         src = entry["source"]
         with self._recs_lock:
-            if src["dvf"] is not None:
-                return src["dvf"], src["dvf_name"], None
+            if src["native"] is not None:
+                return src["native"], src["native_name"], None
         try:
-            dl = _download(self._manager, (src["device"], src["letter"], src["number"]))
+            dl = _download(self._manager, (src["device"], src["folder"], src["number"]))
         except ValueError:
             raise
         except Exception as e:
             raise ValueError(_error(e)["error"]) from e
-        wav = audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
+        if not _usable_filename(src["format"], dl.filename):
+            raise ValueError(f"the recorder gave {src['label']} a file name OpenEVP cannot use")
+        wav = _decoder(src["format"]).to_wav(dl.data, should_stop=self._stop.is_set)
         if wavinfo.wav_fingerprint(io.BytesIO(wav)) != entry["fp"]:
             raise ValueError(f"{src['label']} on the recorder is no longer the recording that was marked. "
                              "Load it again, then retry.")
         with self._recs_lock:
-            src["dvf"], src["dvf_name"] = dl.dvf, dl.name
-        return dl.dvf, dl.name, wav
+            src["native"], src["native_name"] = dl.data, dl.filename
+        return dl.data, dl.filename, wav
 
     def _backup(self, fp, rec, entry):
-        """Save the recording's .dvf into <Save to>/<letter>/, then (with the decoder)
-        a WAV copy with the marks. "saved" once the .dvf is there; a failed WAV copy
-        is reported in the detail, not as a failed backup."""
+        """Save the recording's native file (a .dvf for the ST25) into
+        <Save to>/<folder safe name>/, then (with the decoder) a WAV copy with the
+        marks. "saved" once the native file is there; a failed WAV copy is
+        reported in the detail, not as a failed backup."""
         src = entry["source"]
         label = src["label"]
+        fmt = src["format"]
         try:
-            data, dvf_name, wav = self._device_audio(entry)
-        except audio.Cancelled:                       # the app is closing; retried on the next mark
+            data, native_name, wav = self._device_audio(entry)
+        except formats.Cancelled:                     # the app is closing; retried on the next mark
             self._closed_before_backup(fp, rec, entry)
             return
         except ValueError as e:
             self._backup_result(fp, rec, entry, "failed", f"{label} was not backed up: {e}")
             return
-        outdir = os.path.join(self._dest, src["letter"])
+        if not _usable_filename(fmt, native_name):
+            self._backup_result(fp, rec, entry, "failed",
+                                f"{label} was not backed up: the recorder gave it a file name OpenEVP cannot use.")
+            return
+        outdir = os.path.join(self._dest, src["safe_name"])
         try:
             os.makedirs(outdir, exist_ok=True)
-            path, already = save_dvf(data, outdir, dvf_name)
+            path, already = save_native(fmt, data, outdir, native_name)
         except OSError as e:
             self._backup_result(fp, rec, entry, "failed", f"{label} was not backed up: {_plain(e)}")
             return
         name = os.path.basename(path)
         detail = f"{name} was already saved" if already else f"Saved as {name}"
         paths = [path]                                # remembered: deleting them undoes the backup
-        if audio.available():
-            wav_name = os.path.splitext(dvf_name)[0] + ".wav"
+        if _decoder_problem(fmt) is None:
+            wav_name = os.path.splitext(native_name)[0] + ".wav"
             try:
                 if wav is None:
-                    wav = audio.dvf_to_wav(data, should_stop=self._stop.is_set)
+                    wav = _decoder(fmt).to_wav(data, should_stop=self._stop.is_set)
                 wav_path, _ = save_wav(wavinfo.with_markers(wav, self._store.marks(fp)), outdir, wav_name)
                 paths.append(wav_path)
                 detail += f", with a WAV copy ({os.path.basename(wav_path)})"
-            except audio.Cancelled:
+            except formats.Cancelled:
                 detail += ", but the WAV copy was not made because the app is closing"
             except Exception as e:
                 detail += f", but the WAV copy failed: {_plain(e)}"
@@ -628,7 +808,7 @@ class Api(LibraryOps):
 
     def export_marked(self, rec):
         """Save a WAV with the current marks of the loaded recording into the Save-to
-        folder: <letter>/ for a recorder recording; for a file in the library, the
+        folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
         any other file goes into the Save-to folder itself. Never replaces a file: identical bytes
         count as already saved, anything else gets a numbered name.
@@ -672,25 +852,30 @@ class Api(LibraryOps):
         src = entry["source"]
         try:
             if src["kind"] == "device":
-                if not audio.available():
-                    return _fail(f"WAV export: {audio.status()}.")
+                problem = _decoder_problem(src["format"])
+                if problem:
+                    return _fail(f"WAV export: {problem}.")
                 try:
-                    data, dvf_name, wav = self._device_audio(entry)
+                    data, native_name, wav = self._device_audio(entry)
                 except ValueError as e:
                     return _fail(str(e))
+                if not _usable_filename(src["format"], native_name):
+                    return _fail(f"The recorder gave {src['label']} a file name OpenEVP cannot use.")
                 if wav is None:
-                    wav = audio.dvf_to_wav(data, should_stop=self._stop.is_set)
-                outdir = os.path.join(self._dest, src["letter"])
-                out_name = os.path.splitext(dvf_name)[0] + ".wav"
+                    wav = _decoder(src["format"]).to_wav(data, should_stop=self._stop.is_set)
+                outdir = os.path.join(self._dest, src["safe_name"])
+                out_name = os.path.splitext(native_name)[0] + ".wav"
             else:
                 path = src["path"]
                 name = os.path.basename(path)
                 with open(path, "rb") as f:
                     raw = f.read()
-                if name.lower().endswith(".dvf"):
-                    if not audio.available():
-                        return _fail(f"WAV export: {audio.status()}.")
-                    wav = audio.dvf_to_wav(raw, should_stop=self._stop.is_set)
+                fmt = formats.by_ext(os.path.splitext(name)[1])
+                if fmt is not None and fmt is not formats.WAV:
+                    problem = _decoder_problem(fmt)
+                    if problem:
+                        return _fail(f"WAV export: {problem}.")
+                    wav = _decoder(fmt).to_wav(raw, should_stop=self._stop.is_set)
                 else:
                     wav = raw
                 del raw
@@ -704,10 +889,15 @@ class Api(LibraryOps):
                 outdir = os.path.join(self._dest, investigation) if investigation else self._dest
                 out_name = os.path.splitext(name)[0] + ".wav"
             marked = wavinfo.with_markers(wav, marks)
-        except audio.Cancelled:
+        except formats.Cancelled:
             return _fail(CLOSING)
         except OSError as e:
             return _fail(f"Could not read {entry['name']}: {_plain(e)}")
+        except formats.DecodeError as e:                 # as the decoder's own error was before
+            cause = _unwrapped(e)
+            if isinstance(cause, ValueError):
+                return _fail(f"Could not add the marks to {entry['name']}: {cause}")
+            return _error(cause)
         except ValueError as e:
             return _fail(f"Could not add the marks to {entry['name']}: {e}")
         except Exception as e:
@@ -774,25 +964,28 @@ class Api(LibraryOps):
     # ---- files on disk (library files and WAVs opened from the file dialog) -------
     def _play_file(self, path):
         """The player's result for a .wav (served in place, its embedded markers
-        imported once) or a .dvf (decoded through the audio server) on disk."""
+        imported once) or another recording file, e.g. a .dvf (decoded through the
+        audio server by its format's decoder), on disk."""
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
         name = os.path.basename(path)
         source = {"kind": "file", "path": path}
         try:
-            if name.lower().endswith(".wav"):
+            fmt = formats.by_ext(os.path.splitext(name)[1])
+            if fmt is None or fmt is formats.WAV:
                 info = self._server.prepare_file(path)
                 source["stat"] = info.pop("stat", None)
                 imported = self._import_markers(path, info, name, source["stat"])
                 return self._loaded(info, name, name, source, {"name": name, "imported": imported})
-            if not audio.available():
-                return _fail(f"Playing .dvf files: {audio.status()}.")
+            problem = _decoder_problem(fmt)
+            if problem:
+                return _fail(f"Playing {fmt.ext} files: {problem}.")
             st = os.stat(path)
-            key = ("dvf", os.path.normcase(path), st.st_size, st.st_mtime_ns)
+            key = (fmt.ext[1:], os.path.normcase(path), st.st_size, st.st_mtime_ns)
 
             def decode():
                 with open(path, "rb") as f:
-                    return audio.dvf_to_wav(f.read(), should_stop=self._stop.is_set)
+                    return _decoder(fmt).to_wav(f.read(), should_stop=self._stop.is_set)
             return self._loaded(self._server.prepare(key, make=decode), name, name, source, {"name": name})
         except Exception as e:
             return _fail(f"Could not play {name}: {_plain(e)}")
@@ -849,7 +1042,7 @@ class Api(LibraryOps):
         return picked
 
     def list_library(self):
-        """Every .dvf/.wav in the library folder and all its subfolders (at most
+        """Every recording file (.dvf, .wav...) in the library folder and all its subfolders (at most
         SAVED_LIMIT). Returns at once, from the folder listing and the fingerprint
         cache: files not fingerprinted yet have fp None and go to the background
         indexer, whose "library-row", "library-progress" and "library-done" events
@@ -885,7 +1078,11 @@ class Api(LibraryOps):
             fid = _file_id(path)
             table[fid] = path
             fp = error = seconds = None
-            if store is None:
+            fmt = _kind_format(kind)
+            if fmt.decoder is None:
+                # Listed, never fingerprinted or cached: no decoder is not the file's fault.
+                seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {_decoder_problem(fmt)}."
+            elif store is None:
                 seconds = _seconds(path, kind)
             else:
                 cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
@@ -971,13 +1168,11 @@ class Api(LibraryOps):
             return self._stop.is_set() or self._scan_folder != folder or self._fs_op
         unflushed = 0
         try:
-            decoder_problem = None
-            if any(p[2] == "dvf" for p in pending) and not audio.available():
-                decoder_problem = audio.status()
+            problems = _decoder_problems(p[2] for p in pending)
             for done, (fid, path, kind, size, mtime_ns) in enumerate(pending, 1):
                 if superseded():
                     return
-                row, stored = self._index_file(path, kind, size, mtime_ns, cancelled, decoder_problem)
+                row, stored = self._index_file(path, kind, size, mtime_ns, cancelled, problems.get(kind))
                 if stored:
                     unflushed += 1
                     if unflushed >= INDEX_FLUSH_EVERY:
@@ -1047,6 +1242,7 @@ class Api(LibraryOps):
                     **self._fp_marks(hit.get("fp"))}, False
         fp = length = error = None
         cacheable = True
+        fmt = _kind_format(kind)
         try:
             if kind == "wav":
                 fp = wavinfo.wav_fingerprint(path, should_stop=cancelled)
@@ -1055,19 +1251,19 @@ class Api(LibraryOps):
                 # Not the file's fault: nothing is cached, so a later scan tries
                 # again once the decoder is there.
                 error, cacheable = decoder_problem, False
-            elif size > DVF_MAX_BYTES:
-                error = f"{name} is too large to be an ICD-ST25 recording."
+            elif fmt.max_bytes is not None and size > fmt.max_bytes:
+                error = f"{name} is too large to be {fmt.a_recording()}."
             else:
                 with open(path, "rb") as f:
                     data = f.read()
-                wav = audio.dvf_to_wav(data, should_stop=cancelled)
+                wav = _decoder(fmt).to_wav(data, should_stop=cancelled)
                 del data
                 fp = wavinfo.wav_fingerprint(io.BytesIO(wav))
                 length = _wav_length(io.BytesIO(wav))
                 del wav
-        except (audio.Cancelled, wavinfo.Stopped):
+        except (formats.Cancelled, wavinfo.Stopped):
             return None, False
-        except (MemoryError, audio.DecoderUnavailable) as e:   # not the file's fault: not kept
+        except (MemoryError, formats.DecoderUnavailable) as e:   # not the file's fault: not kept
             fp, error, cacheable = None, _plain(e), False
         except OSError as e:                    # locked or vanished: may work next time
             fp, error, cacheable = None, _plain(e), False
@@ -1239,18 +1435,32 @@ class Api(LibraryOps):
             return _fail(CLOSING)
         if self._second_window():
             return _fail(EXPORT_SECOND_WINDOW)
-        if fmt not in ("dvf", "wav"):
+        try:
+            model = self._listing(device_id)["model"]
+        except Exception as e:
+            return _error(e)
+        menu = {f["value"]: f for f in self._export_formats(model)}
+        if not isinstance(fmt, str) or fmt not in menu:
             return _fail(f"Unknown format {fmt!r}.")
-        if fmt == "wav" and not audio.available():
-            return _fail(f"WAV export: {audio.status()}.")
+        if not menu[fmt]["available"]:
+            return _fail(f"WAV export: {menu[fmt]['reason']}.")
         work = _parse_items(items)
         if work is None:
             return _fail("Nothing valid is selected.")
         if not isinstance(dest, str) or not dest:
             return _fail("Choose a folder to save to.")
+        try:
+            found = [self._find(device_id, folder_id, number) for folder_id, number in work]
+        except Exception as e:
+            return _error(e)
+        if not all(found):
+            return _fail("Nothing valid is selected.")
+        work = [(folder, row["number"]) for _model, folder, row in found]
+        to_wav = fmt == "wav" and model.native is not formats.WAV
         if not self._busy.acquire(blocking=False):
             return _fail("An export is already running.")
-        thread = threading.Thread(target=self._export, args=(device_id, work, fmt, dest, job), name="export")
+        thread = threading.Thread(target=self._export, args=(device_id, model.native, work, to_wav, dest, job),
+                                  name="export")
         with self._workers_lock:              # started and registered in one step against shutdown()
             if self._stop.is_set():
                 self._busy.release()
@@ -1303,7 +1513,10 @@ class Api(LibraryOps):
         if self._store is not None:
             self._store.close()
 
-    def _export(self, device_id, work, fmt, dest, job):
+    def _export(self, device_id, native, work, to_wav, dest, job):
+        """Download each recording (on the device thread), then save it (here, never
+        inside a recorder call) as <dest>/<folder safe name>/<its file name>: the
+        native file, or a WAV with the recording's marks (to_wav)."""
         saved = skipped = 0
         notes = []
 
@@ -1311,31 +1524,34 @@ class Api(LibraryOps):
             self._emit("export-failed", {**err, "job": job, "saved": saved, "skipped": skipped, "notes": notes})
 
         try:
-            for i, (letter, number) in enumerate(work, 1):
+            for i, (folder, number) in enumerate(work, 1):
                 if self._stop.is_set():
                     failed(_fail("Stopped because the app is closing."))
                     return
                 try:
-                    dl = self._manager.with_session(device_id, lambda s, l=letter, n=number: s.download(l, n))
+                    dl = self._manager.with_session(device_id, lambda s, f=folder["id"], n=number: s.download(f, n))
                 except Exception as e:
                     failed(_error(e))
                     return
                 if dl.error:
                     notes.append(f"{dl.label}: not saved ({dl.error})")
                     continue
-                outdir = os.path.join(dest, letter)
+                if not _usable_filename(native, dl.filename):
+                    notes.append(f"{dl.label}: not saved (the recorder gave it a file name OpenEVP cannot use)")
+                    continue
+                outdir = os.path.join(dest, folder["safe_name"])
                 try:
                     os.makedirs(outdir, exist_ok=True)
-                    if fmt == "dvf":
-                        _, done = save_dvf(dl.dvf, outdir, dl.name)
+                    if not to_wav:
+                        _, done = save_native(native, dl.data, outdir, dl.filename)
                     else:
-                        wav = audio.dvf_to_wav(dl.dvf, should_stop=self._stop.is_set)
+                        wav = _decoder(native).to_wav(dl.data, should_stop=self._stop.is_set)
                         wav, problem = self._marked_wav(wav)
                         if problem:
                             notes.append(f"{dl.label}: {problem}")
-                        _, done = save_wav(wav, outdir, dl.name[:-4] + ".wav")
+                        _, done = save_wav(wav, outdir, os.path.splitext(dl.filename)[0] + ".wav")
                         del wav
-                except audio.Cancelled:            # the window was closed during a long decode
+                except formats.Cancelled:          # the window was closed during a long decode
                     failed(_fail("Stopped because the app is closing."))
                     return
                 except OSError as e:

@@ -9,7 +9,7 @@ test_lpec_core checks the C core against these same decodes. The long
 the C core when lpec_core.dll is built (a few seconds), and in pure Python
 (several minutes) only when OPENEVP_SLOW_TESTS=1 is set.
 
-Needs the git-ignored extracted table data (st25/lpec/data/lpec_tables.json);
+Needs the git-ignored extracted table data (openevp/decoders/sony_lpec/data/lpec_tables.json);
 skipped when it is absent.
 """
 
@@ -22,7 +22,9 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
-from st25.lpec import TablesMissing, _core, tables  # noqa: E402
+sys.path.insert(0, os.path.dirname(__file__))
+import release_gate  # noqa: E402
+from openevp.decoders.sony_lpec import TablesMissing, _core, tables  # noqa: E402
 import make_test_dvf  # noqa: E402
 
 VECTORS_DIR = Path(__file__).resolve().parent / "vectors"
@@ -75,13 +77,13 @@ def vector_payload(name: str) -> bytes:
 def python_pcm(name: str) -> bytes:
     """The pure-Python decode of a vector (cached: test_lpec_core compares
     the C core against it)."""
-    from st25.lpec.decoder import decode_payload
+    from openevp.decoders.sony_lpec.decoder import decode_payload
     return decode_payload(vector_payload(name), use_core=False)
 
 
-@unittest.skipUnless(
+@release_gate.require(
     _HAVE_TABLES,
-    "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
+    "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
 )
 class ShortVectorTests(unittest.TestCase):
     """Pure-Python decode_payload(payload) == the committed .pcm, byte for
@@ -114,21 +116,21 @@ class BytesConsumedTests(unittest.TestCase):
     behaviour and framing", "Short input")."""
 
     def test_a_complete_frame_consumes_its_length(self):
-        from st25.lpec.decoder import _bytes_consumed
+        from openevp.decoders.sony_lpec.decoder import _bytes_consumed
         self.assertEqual(_bytes_consumed(48, 48), 48)
         self.assertEqual(_bytes_consumed(36, 60), 36)
 
     def test_a_short_frame_wraps_and_reports_its_second_pass_position(self):
-        from st25.lpec.decoder import _bytes_consumed
+        from openevp.decoders.sony_lpec.decoder import _bytes_consumed
         # 48 bytes read from 36: all 36, then 12 more from the start.
         self.assertEqual(_bytes_consumed(48, 36), 12)
         # 48 bytes read from 24: exactly two passes, ends at the end.
         self.assertEqual(_bytes_consumed(48, 24), 24)
 
 
-@unittest.skipUnless(
+@release_gate.require(
     _HAVE_TABLES,
-    "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
+    "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
 )
 class WavOutputTests(unittest.TestCase):
     """dvf_to_wav: the canonical 44-byte header Digital Voice Editor writes,
@@ -140,7 +142,7 @@ class WavOutputTests(unittest.TestCase):
         "01 00 01 00 40 1f 00 00 80 3e 00 00 02 00 10 00".replace(" ", ""))
 
     def test_header_is_the_canonical_44_bytes_then_the_pcm(self):
-        from st25.lpec.decoder import decode_payload, dvf_to_wav
+        from openevp.decoders.sony_lpec.decoder import decode_payload, dvf_to_wav
         import make_test_dvf
 
         with open(VECTORS_DIR / "single-frame.dvf", "rb") as f:
@@ -164,7 +166,7 @@ class WavOutputTests(unittest.TestCase):
         """The header is exactly what Python's wave module writes for this PCM."""
         import io
         import wave
-        from st25.lpec.decoder import decode_payload, dvf_to_wav
+        from openevp.decoders.sony_lpec.decoder import decode_payload, dvf_to_wav
         import make_test_dvf
 
         with open(VECTORS_DIR / "tone-440-quiet.dvf", "rb") as f:
@@ -183,13 +185,13 @@ class WavOutputTests(unittest.TestCase):
 
     def test_rejects_a_damaged_or_non_lp_file(self):
         from st25 import dvf
-        from st25.lpec.decoder import dvf_to_wav
+        from openevp.decoders.sony_lpec.decoder import dvf_to_wav
 
         with self.assertRaises(dvf.FormatError):
             dvf_to_wav(b"not a dvf file at all")
 
 
-@unittest.skipUnless(
+@release_gate.require(
     _core.available() or _SLOW_TESTS,
     "lpec_core.dll not built (python tools/build_lpec_core.py) and pure Python "
     "takes ~4 min; build the DLL or set OPENEVP_SLOW_TESTS=1",
@@ -200,15 +202,15 @@ class LongMixedShaTests(unittest.TestCase):
     (docs/lpec.md, "Status"). Also reports (does not assert) how long the
     decode took."""
 
-    @unittest.skipUnless(
+    @release_gate.require(
         _HAVE_TABLES,
-        "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
+        "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
     )
     def test_sha256_matches_and_reports_timing(self):
         import hashlib
         import json
         import time
-        from st25.lpec.decoder import decode_payload
+        from openevp.decoders.sony_lpec.decoder import decode_payload
         import make_test_dvf
 
         with open(VECTORS_DIR / "long-mixed-10min.dvf", "rb") as f:
@@ -228,17 +230,17 @@ class LongMixedShaTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(got).hexdigest(), meta["pcm_sha256"])
 
 
-@unittest.skipUnless(
+@release_gate.require(
     _HAVE_TABLES,
-    "st25/lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
+    "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py",
 )
 class DecoderStateTests(unittest.TestCase):
     """reset() is the partial ResetDecoder of docs/lpec.md, "State between
     frames"."""
 
     def test_reset_clears_only_what_resetdecoder_clears(self):
-        from st25.lpec import bitstream
-        from st25.lpec.decoder import Decoder
+        from openevp.decoders.sony_lpec import bitstream
+        from openevp.decoders.sony_lpec.decoder import Decoder
 
         dec = Decoder()
         with open(VECTORS_DIR / "tone-440-quiet.dvf", "rb") as f:

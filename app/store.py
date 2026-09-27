@@ -156,7 +156,7 @@ def _check_common(start, end, cls, note):
 def _parse_import_mark(item, duration):
     """One imported marker -> a mark dict, or None if it's not usable.
 
-    ``item`` is one of st25.wavinfo.read_markers()'s dicts: {"start", "end",
+    ``item`` is one of openevp.wavinfo.read_markers()'s dicts: {"start", "end",
     "note"}, where "note" is the raw RIFF label text -- "EVP <cls>: <note>"
     (or bare "EVP <cls>") for marks OpenEVP wrote, or arbitrary text left by
     another tool.

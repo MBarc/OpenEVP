@@ -4,7 +4,7 @@ Run on Windows with the ICD-ST25 bound to WinUSB (Zadig until the installer exis
 Record date, app version and result for each line.
 
 1. Start the app with the recorder unplugged: "No recorder connected".
-2. Plug it in: within about 2 s it appears as "ST25 #1 (port …)".
+2. Plug it in: within about 2 s it appears as "Sony ICD-ST25 #1 (port …)".
 3. Click it: folders A–E appear with counts; folder A lists 20 recordings with the
    same dates and lengths as `st25-download --list`.
 4. Select all in A, export as .dvf to an empty folder: "20 saved"; the files are

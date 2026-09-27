@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, FakeRecorderDevice  # noqa: E402
+from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
 from app.devices import NEEDS_REPLUG, DeviceManager  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
@@ -40,7 +40,7 @@ class BackendTests(unittest.TestCase):
             s.connect()
             return s
 
-        self.m = DeviceManager(lambda: [ID], open_fn)
+        self.m = st25_manager(lambda: [ID], open_fn)
         self.addCleanup(self.m.close)
         self.events = []
         self.done = threading.Event()
@@ -144,11 +144,16 @@ class BackendTests(unittest.TestCase):
     def test_recordings(self):
         r = self.api.recordings(ID)
         self.assertTrue(r["ok"])
+        self.assertEqual((r["model"], r["model_id"]), ("Sony ICD-ST25", "sony-icd-st25"))
+        self.assertEqual([(f["id"], f["label"]) for f in r["folders"]],
+                         [(l, f"Folder {l}") for l in "ABCDE"])
         a = r["folders"][0]
-        self.assertEqual(a["letter"], "A")
         self.assertEqual([x["number"] for x in a["recordings"]], [1, 2])
-        self.assertEqual(a["recordings"][0]["when"], "2029-05-23 19:54:04")
+        self.assertEqual([x["label"] for x in a["recordings"]], ["A-001", "A-002"])
+        self.assertEqual(a["recordings"][0]["recorded"], "2029-05-23 19:54:04")
         self.assertEqual([f["recordings"] for f in r["folders"][1:]], [[], [], [], []])
+        self.assertEqual([f["value"] for f in r["formats"]], ["dvf", "wav"])
+        self.assertEqual(r["formats"][0]["label"], ".dvf (Sony original)")
 
     def test_export_dvf_then_rerun_skips(self):
         with tempfile.TemporaryDirectory() as d:
@@ -175,7 +180,7 @@ class BackendTests(unittest.TestCase):
             self.assertEqual(self.wait()[0], "export-done")
 
     def test_wav_needs_decoder(self):
-        with mock.patch.dict(sys.modules, {"st25.lpec": None}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": None}):
             caps = self.api.capabilities()
             self.assertFalse(caps["wav"])
             self.assertIn("not included in this build", caps["wav_status"])
@@ -184,18 +189,18 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.server.prepared, [])
 
     def test_wav_tables_missing_is_reported_not_crashed(self):
-        """st25.lpec exists (imports fine) but its extracted table data does
+        """openevp.decoders.sony_lpec exists (imports fine) but its extracted table data does
         not: capabilities() must say "could not be loaded", and both wav
         export and live playback must be refused cleanly rather than blowing
         up on the first attempt."""
         class FakeTablesMissing(RuntimeError):
             pass
 
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
         fake.TablesMissing = FakeTablesMissing
         fake.check = mock.Mock(side_effect=FakeTablesMissing("lpec_tables.json not found"))
-        with mock.patch.dict(sys.modules, {"st25.lpec": fake}):
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
             caps = self.api.capabilities()
             self.assertFalse(caps["wav"])
             self.assertIn("could not be loaded", caps["wav_status"])
@@ -208,9 +213,9 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.server.prepared, [])
 
     def test_export_wav_and_audio_with_decoder(self):
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
-        with mock.patch.dict(sys.modules, {"st25.lpec": fake}), tempfile.TemporaryDirectory() as d:
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}), tempfile.TemporaryDirectory() as d:
             self.api.export(ID, [{"folder": "A", "number": 1}], "wav", d, 1)
             self.assertEqual(self.wait()[0], "export-done")
             self.assertEqual(os.listdir(os.path.join(d, "A")), ["001_A_001_Casey_2029_05_23.wav"])
@@ -221,6 +226,21 @@ class BackendTests(unittest.TestCase):
                                  "backup_needed": False})
             self.assertEqual(self.server.prepared, [(ID, "A", 1)])
             self.assertEqual(backend.recording_wav(self.m, (ID, "A", 1))[:4], b"RIFF")
+
+    def test_a_decoder_failure_is_named_as_before(self):
+        """The decoder's own exception, not the formats.DecodeError wrapping it."""
+        class FormatError(ValueError):
+            pass
+
+        for exc, text in ((FormatError("bad frame header"), "FormatError: bad frame header"),
+                          (ArithmeticError("band overflow"), "ArithmeticError: band overflow")):
+            fake = types.ModuleType("openevp.decoders.sony_lpec")
+
+            def dvf_to_wav(data, should_stop=None, exc=exc):
+                raise exc
+            fake.dvf_to_wav = dvf_to_wav
+            with self.subTest(exc=text), mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
+                self.assertEqual(self.api.audio(ID, "A", 1), {"ok": False, "error": text, "advice": "", "state": "ready"})
 
     def test_closing_the_app_interrupts_a_wav_decode(self):
         """The export passes the backend's stop event into the decode: a long
@@ -236,10 +256,10 @@ class BackendTests(unittest.TestCase):
             if should_stop():
                 raise FakeCancelled("stopped")
             return b"RIFF" + data[:8]
-        fake = types.ModuleType("st25.lpec")
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
         fake.dvf_to_wav = dvf_to_wav
         fake.Cancelled = FakeCancelled
-        with mock.patch.dict(sys.modules, {"st25.lpec": fake}), tempfile.TemporaryDirectory() as d:
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}), tempfile.TemporaryDirectory() as d:
             self.api.export(ID, [{"folder": "A", "number": 1}, {"folder": "A", "number": 2}], "wav", d, 1)
             event, payload = self.wait()
             self.assertEqual(event, "export-failed")
@@ -262,17 +282,32 @@ class BackendTests(unittest.TestCase):
         r = self.api.devices()
         self.assertTrue(r["ok"])
         self.assertEqual(r["devices"][0]["id"], ID)
+        self.assertEqual((r["devices"][0]["model"], r["devices"][0]["port"]), ("Sony ICD-ST25", "port 1-4"))
+        self.assertEqual(r["problems"], [])
 
     def test_devices_reports_enumeration_failure_without_raising(self):
         def boom():
-            raise UsbError("libusb_init failed: not found")
-        m = DeviceManager(boom, lambda device_id: None)
+            raise RuntimeError("libusb_init failed: not found")
+        m = DeviceManager(boom)
         self.addCleanup(m.close)
         api = backend.Api(m, self.events.append, lambda: None, "DEST", self.server)
         self.addCleanup(api.shutdown)
         r = api.devices()
         self.assertFalse(r["ok"])
         self.assertIn("libusb_init failed", r["error"])
+
+    def test_libusb_failure_is_shown_with_its_advice(self):
+        """The real discovery: libusb failing is the ST25 model's problem, shown as
+        today's devices() error (its text and the replug advice)."""
+        m = DeviceManager()
+        self.addCleanup(m.close)
+        api = backend.Api(m, self.events.append, lambda: None, "DEST", self.server)
+        self.addCleanup(api.shutdown)
+        with mock.patch("openevp.recorders.sony_st25.list_devices",
+                        side_effect=UsbError("libusb_init failed: not found")),                 mock.patch("openevp.pnp.present_instances", return_value=[]):
+            r = api.devices()
+        self.assertEqual((r["ok"], r["devices"]), (True, []))
+        self.assertEqual(r["problems"], [{"error": "libusb_init failed: not found", "advice": backend.REPLUG}])
 
     def test_choose_destination_swallows_picker_errors(self):
         def picker(start):
@@ -286,6 +321,7 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(self.api.export(ID, [{"folder": "A", "number": 1}], "dvf", "D", 1)["ok"])
 
     def test_shutdown_stops_between_recordings_and_refuses_new_exports(self):
+        self.api.recordings(ID)                    # listed first, as the page does
         real = self.m.with_session
 
         def closing_after_first_download(device_id, fn):

@@ -66,6 +66,34 @@ class MainImportTests(unittest.TestCase):
         self.assertIn("WAV with its EVP marks", text)
         self.assertIn("backup of a marked recording", main._close_question(False, True, True)[1])
 
+    def test_only_an_explicit_smoke_flag_starts_the_smoke_test(self):
+        """--smoke is for tools/release_check.py; any other command line runs the app as before."""
+        main = self.main()
+        self.assertEqual(main._smoke_request([]), (False, None))
+        self.assertEqual(main._smoke_request(["/RELAUNCH"]), (False, None))
+        self.assertEqual(main._smoke_request(["x", "--smoke"]), (False, None))
+        self.assertEqual(main._smoke_request(["--smoke"]), (True, None))
+        self.assertEqual(main._smoke_request(["--smoke", "r.json"]), (True, "r.json"))
+        with mock.patch.object(main, "_run_app") as run, mock.patch.object(main, "_smoke_main") as smoke:
+            self.assertEqual(main.main([]), 0)
+        run.assert_called_once_with()
+        smoke.assert_not_called()
+
+    def test_smoke_reports_a_failed_start_with_exit_1(self):
+        main = self.main()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(main, "_run_app", side_effect=RuntimeError("no WebView2")):
+            report = os.path.join(d, "r.json")
+            self.assertEqual(main.main(["--smoke", report]), 1)
+            with open(report, encoding="utf-8") as f:
+                self.assertIn("no WebView2", f.read())
+
+    def test_smoke_lists_every_ui_file(self):
+        main = self.main()
+        files = main.ui_files(main._ui_dir())
+        self.assertTrue({"index.html", "app.js", "style.css", "favicon.svg", "vendor/wavesurfer.min.js",
+                         "vendor/regions.min.js"} <= set(files))
+
 
 if __name__ == "__main__":
     unittest.main()

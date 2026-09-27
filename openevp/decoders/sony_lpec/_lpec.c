@@ -1,10 +1,10 @@
 /*
  * LPEC decoder core: the per-frame parameter-to-PCM pipeline in C.
  *
- * An exact port of st25/lpec/params.py, synthesis.py, x87.py (fcos) and the
+ * An exact port of openevp/decoders/sony_lpec/params.py, synthesis.py, x87.py (fcos) and the
  * per-frame part of decoder.py; see docs/lpec.md. The frame fields come
- * already parsed (st25/lpec/bitstream.py, packed by st25/lpec/_core.py),
- * and the tables come from st25/lpec/tables.py.
+ * already parsed (openevp/decoders/sony_lpec/bitstream.py, packed by openevp/decoders/sony_lpec/_core.py),
+ * and the tables come from openevp/decoders/sony_lpec/tables.py.
  *
  * Bit-exactness rules (docs/lpec.md, "Arithmetic"):
  * - every real is an IEEE double (x64 SSE2); no long double, no FMA
@@ -34,7 +34,7 @@ typedef unsigned __int128 u128;
 typedef __int128 s128;
 
 /* ------------------------------------------------------------------------
- * x87 fcos emulation (st25/lpec/x87.py)
+ * x87 fcos emulation (openevp/decoders/sony_lpec/x87.py)
  *
  * Reduce the exact input by the nearest multiple of pi/2, pi rounded to 66
  * bits; evaluate sin/cos of the remainder to ~120 bits in fixed point;
@@ -204,7 +204,7 @@ static i64 pmod(i64 a, i64 b) { i64 r = a % b; return r < 0 ? r + b : r; }
 static i64 cdiv(i64 a, i64 b) { return a / b; }   /* C: toward zero */
 
 /* ------------------------------------------------------------------------
- * Tables (order fixed by st25/lpec/_core.py)
+ * Tables (order fixed by openevp/decoders/sony_lpec/_core.py)
  * ---------------------------------------------------------------------- */
 
 enum {
@@ -235,11 +235,11 @@ static const int OVERLAP[4] = {256, 256, 512, 512};
 static const double Q15 = 3.0517578125e-05;
 static const double PI_C = 3.14159265359;
 
-/* Table row counts (st25/lpec/tables.py: C1/C2/C3/PT/PQ 64 rows, SHAPES/GAIN
+/* Table row counts (openevp/decoders/sony_lpec/tables.py: C1/C2/C3/PT/PQ 64 rows, SHAPES/GAIN
  * 128, BG1/BG2 64, VQ2/VQ4/VQ8 256), i.e. the bitstream field widths that
  * index them (bitstream.py: 6-bit LSP/pgidx/band-gain indices, 7-bit
  * lag/global-gain/shape indices, 8-bit VQ indices). Frame records come from
- * this repo's own parser (st25/lpec/bitstream.py via _core.py's packing),
+ * this repo's own parser (openevp/decoders/sony_lpec/bitstream.py via _core.py's packing),
  * but decode_frame validates them defensively rather than trusting the
  * packed ints to stay in range.
  */
@@ -949,7 +949,7 @@ static void pitch_params(const Tables *T, int lag, int pgidx, double *taps, cons
     }
 }
 
-/* Frame record layout: see st25/lpec/_core.py (pack_frame). */
+/* Frame record layout: see openevp/decoders/sony_lpec/_core.py (pack_frame). */
 #define HDR 17
 
 static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
