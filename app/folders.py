@@ -167,11 +167,12 @@ class Pins:
     inside stay free to change. A no-op off Windows."""
 
     def __init__(self):
-        self._held = {}                          # normcased path -> handle
+        self._held = {}                          # (normcased path, followed) -> handle
 
-    def add(self, path):
-        """Hold path (a folder); raises OSError when it cannot be opened."""
-        key = os.path.normcase(os.path.abspath(path))
+    def add(self, path, follow=False):
+        """Hold path (a folder); raises OSError when it cannot be opened. A link
+        is held itself, or with follow, the folder it leads to."""
+        key = (os.path.normcase(os.path.abspath(path)), follow)
         if sys.platform != "win32" or key in self._held:
             return
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -180,17 +181,19 @@ class Pins:
         kernel32.CreateFileW.restype = ctypes.c_void_p
         # GENERIC_READ, not just attributes: Windows checks share modes only for
         # handles with data access.
+        flags = FILE_FLAG_BACKUP_SEMANTICS | (0 if follow else FILE_FLAG_OPEN_REPARSE_POINT)
         handle = kernel32.CreateFileW(os.path.abspath(path), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                      None, OPEN_EXISTING,
-                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
+                                      None, OPEN_EXISTING, flags, None)
         if handle is None or handle == _INVALID_HANDLE:
             err = ctypes.get_last_error()
             raise OSError(None, ctypes.FormatError(err).strip(), path, err)
         self._held[key] = handle
 
     def chain(self, root, path):
-        """Hold root and every folder from it down to path (path included)."""
+        """Hold root (the name, and the folder it leads to when it is a link)
+        and every folder from it down to path (path included)."""
         self.add(root)
+        self.add(root, follow=True)
         rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
         if rel == os.curdir:
             return
@@ -201,13 +204,13 @@ class Pins:
 
     def release(self, path):
         """Let go of one folder (before it is renamed or recycled by this process)."""
-        handle = self._held.pop(os.path.normcase(os.path.abspath(path)), None)
+        handle = self._held.pop((os.path.normcase(os.path.abspath(path)), False), None)
         if handle is not None:
             ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
 
     def close(self):
         for key in list(self._held):
-            self.release(key)
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(self._held.pop(key)))
 
     def __enter__(self):
         return self
@@ -329,11 +332,12 @@ def bin_refuses(root, size, guid_of=None, settings_of=None):
     return capacity is not None and size > capacity * 1024 * 1024
 
 
-def recycle(path, owner=None):
+def recycle(path, owner=None, before=None):
     """Move one folder (or file) to the Recycle Bin, or raise RecycleError in
     plain words. Never deletes permanently on purpose: a drive without a Recycle
     Bin, a Recycle Bin set to delete immediately and a folder too big for it are
-    refused before anything happens. owner: the app window's handle, or None."""
+    refused before anything happens. owner: the app window's handle, or None.
+    before: called right before the shell is asked (to let go of the folder)."""
     if sys.platform != "win32":
         raise RecycleError("The Recycle Bin is only available on Windows.")
     path = os.path.abspath(path)
@@ -372,6 +376,8 @@ def recycle(path, owner=None):
         info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
         if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
             raise RecycleError(NO_RECYCLE_BIN)
+        if before is not None:
+            before()
         code = shell32.SHFileOperationW(ctypes.byref(op))
     finally:
         if hr >= 0:                                      # S_OK or S_FALSE; not RPC_E_CHANGED_MODE

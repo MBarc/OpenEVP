@@ -31,6 +31,8 @@ LIB_CHANGED = "The library changed. Refresh and try again."
 INDEXER_BUSY = "The library is busy checking a recording. Try again in a moment."
 PATH_TOO_LONG = "The folder path would be too long for Windows. Choose a shorter name."
 BACKUP_RECYCLED = "The backup was moved to the Recycle Bin."
+BACKUP_UNCHECKED = ("The backup could not be checked before a library folder was deleted "
+                    "(it may have been in it); back it up again.")
 ROOT_CHANGED = "The library folder changed. Refresh and try again."
 SECOND_WINDOW = "Another OpenEVP window is open; organise folders there."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
@@ -189,15 +191,12 @@ class LibraryOps:
         """A file or folder moved from old to new: re-key the fingerprint cache
         (marks follow, nothing is decoded again), the read-only session cache, rec
         handles and the files the audio server serves in place. Decoded .dvf
-        entries are left alone (they decode again when next played)."""
+        entries are left alone (they decode again when next played). Backup
+        paths are not here: _move_backups() records them before the rename."""
         old, new = os.path.abspath(old), os.path.abspath(new)
         store = self._store
         copied = {}
         if store is not None:
-            try:
-                store.move_backup_paths(old, new)       # a backup moved is still a backup
-            except (StoreReadOnly, StoreUnavailable):
-                pass
             try:
                 store.move_index_prefix(old, new)
             except (StoreReadOnly, StoreUnavailable):
@@ -226,11 +225,23 @@ class LibraryOps:
         if retarget is not None:
             retarget(old, new)
 
+    def _move_backups(self, old, new):
+        """Record that the backup files at or under old are about to be at new --
+        before they move, so that a backup is never lost track of. Raises
+        StoreReadOnly/StoreUnavailable when that cannot be saved (the caller then
+        does not move anything). Returns an undo function (None: nothing to undo)."""
+        store = self._store
+        if store is None:
+            return None
+        if not store.move_backup_paths(old, new):
+            return None
+        return lambda: store.move_backup_paths(new, old)
+
     def _walk(self, path):
         """A fresh look at everything in a folder (never through a symlink or
         junction): counts, and the cached fingerprints of its recordings."""
         info = {"recordings": 0, "with_evps": 0, "unindexed": 0, "other_files": 0, "subfolders": 0,
-                "bytes": 0, "fps": set(), "pending": []}
+                "bytes": 0, "fps": set(), "pending": [], "unknown": 0}
         stack = [path]
         while stack:
             where = stack.pop()
@@ -239,6 +250,7 @@ class LibraryOps:
                     entries = list(it)
             except OSError:
                 info["unindexed"] += 1          # unreadable: whatever is in it is unknown
+                info["unknown"] += 1
                 continue
             for e in entries:
                 try:
@@ -263,6 +275,8 @@ class LibraryOps:
                 if cached is None:
                     info["unindexed"] += 1
                     info["pending"].append((e.path, kind, st.st_size, st.st_mtime_ns))
+                elif not fp:
+                    info["unknown"] += 1        # could not be fingerprinted (damaged, unreadable)
                 if fp:
                     info["fps"].add(fp)
                     r = self._store.recording(fp)
@@ -271,75 +285,60 @@ class LibraryOps:
         return info
 
     def _backups_in(self, path, walked, fingerprint=False):
-        """{fp: (its backup record, its backup files found in path)} for every
-        recorder backup recorded as saved that deleting path would take: one of
-        the files it saved (recorded with the backup) is in path. A backup whose
-        files are not known -- saved before OpenEVP recorded them, or none of
-        them is where it was recorded -- falls back to its fingerprint: a
-        recording in path with no copy left elsewhere in the library (counting
-        one too many only offers a needless Retry backup). walked: _walk(path);
-        with fingerprint, its recordings not fingerprinted yet are fingerprinted
-        first when such a backup exists (None if the app closes meanwhile)."""
+        """{fp: (its backup record, its backup files found in path, the detail to
+        record)} for every recorder backup recorded as saved that deleting path
+        may take: one of the files it saved (recorded with the backup) is in
+        path, or a recording in path has its fingerprint (the union: counting
+        one too many only offers a needless Retry backup). walked: _walk(path).
+
+        With fingerprint (a delete), recordings in path not fingerprinted yet are
+        fingerprinted first; if some recording there still has no fingerprint,
+        every saved backup whose files are not all where they were recorded
+        might be it, and is included as unchecked. None if the app closes
+        meanwhile."""
         if self._store is None:
             return {}
-        found, legacy = {}, set()
-        for fp, paths in self._store.saved_backups().items():
-            if not any(os.path.lexists(p) for p in paths):
-                legacy.add(fp)
-                continue
-            there = [p for p in paths if folders.under(p, path) and os.path.lexists(p)]
-            if there:
-                found[fp] = there
-        if legacy and fingerprint and walked["pending"]:
-            fps = self._fingerprint(walked["pending"])
+        saved = self._store.saved_backups()
+        if not saved:
+            return {}
+        unknown = walked["unknown"] + (len(walked["pending"]) if not fingerprint else 0)
+        if fingerprint and walked["pending"]:
+            fps, failed = self._fingerprint(walked["pending"])
             if fps is None:
                 return None
             walked["fps"] |= fps
-        legacy &= walked["fps"]
-        legacy -= self._fps_outside(path, legacy)
-        found.update((fp, []) for fp in legacy)
-        return {fp: (self._store.backup_record(fp), there) for fp, there in found.items()}
+            unknown += failed
+        found = {}
+        for fp, paths in saved.items():
+            there = [p for p in paths if folders.under(p, path) and os.path.lexists(p)]
+            if there or fp in walked["fps"]:
+                found[fp] = (there, BACKUP_RECYCLED)
+            elif fingerprint and unknown and not (paths and all(os.path.lexists(p) for p in paths)):
+                found[fp] = ([], BACKUP_UNCHECKED)
+        return {fp: (self._store.backup_record(fp), there, detail) for fp, (there, detail) in found.items()}
 
     def _fingerprint(self, pending):
-        """The fingerprints of recordings not in the index yet ([(path, kind,
-        size, mtime_ns)] from _walk), cached as the indexer would; None when the
-        app started closing meanwhile."""
+        """(fingerprints, how many could not be fingerprinted) of recordings not in
+        the index yet ([(path, kind, size, mtime_ns)] from _walk), cached as the
+        indexer would; (None, n) when the app started closing meanwhile."""
         decoder_problem = None
         if any(kind == "dvf" for _, kind, _, _ in pending) and not audio.available():
-            decoder_problem = audio.status()
-        fps = set()
+            decoder_problem = audio.status() or "the WAV decoder is not available"
+        fps, failed = set(), 0
         try:
             for path, kind, size, mtime_ns in pending:
                 if self._stop.is_set():
-                    return None
+                    return None, failed
                 row, _stored = self._index_file(path, kind, size, mtime_ns, self._stop.is_set, decoder_problem)
                 if row is None:                     # cancelled: the app is closing
-                    return None
+                    return None, failed
                 if row.get("fp"):
                     fps.add(row["fp"])
+                else:
+                    failed += 1
         finally:
             self._flush_index()
-        return fps
-
-    def _fps_outside(self, folder, wanted):
-        """Which of the fingerprints `wanted` have a copy in the library (latest
-        listing) outside folder."""
-        with self._lib_lock:
-            paths = list(self._library.values())
-        found = set()
-        for path in paths:
-            if not wanted - found:
-                break
-            if folders.under(path, folder):
-                continue
-            try:
-                st = os.stat(path)
-            except OSError:
-                continue
-            cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
-            if cached and cached.get("fp") in wanted:
-                found.add(cached["fp"])
-        return found
+        return fps, failed
 
     @staticmethod
     def _rel(root, path):
@@ -422,10 +421,20 @@ class LibraryOps:
             if folders.name_taken(parent, name, ignore=old_name):
                 return _fail(f'There is already something named "{name}" here.')
             try:
+                undo = self._move_backups(old, target)
+            except (StoreReadOnly, StoreUnavailable) as e:
+                return _fail(f"{old_name} was not renamed: the recorder backups in it could not be "
+                             f"recorded at their new place ({e}).")
+            try:
                 self._rename(old, target)
-            except FileExistsError:
-                return _fail(f'There is already something named "{name}" here.')
             except OSError as e:
+                if undo is not None:
+                    try:
+                        undo()
+                    except (StoreReadOnly, StoreUnavailable):
+                        pass                        # a stale path: found by fingerprint all the same
+                if isinstance(e, FileExistsError):
+                    return _fail(f'There is already something named "{name}" here.')
                 return _fail(f"{old_name} was not renamed: {_fs_problem(e)}.")
             try:                                    # renamed: nothing below may report otherwise
                 self._retarget_prefix(old, target)
@@ -529,15 +538,16 @@ class LibraryOps:
             # saved, nothing is deleted.
             if candidates:
                 try:
-                    self._store.set_backups({fp: {"status": "failed", "detail": BACKUP_RECYCLED}
-                                             for fp in candidates})
+                    self._store.set_backups({fp: {"status": "failed", "detail": detail}
+                                             for fp, (_, _, detail) in candidates.items()})
                 except (StoreReadOnly, StoreUnavailable, ValueError) as e:
                     return _fail(f"{name} was not deleted: the recorder backups in it could not be "
                                  f"marked as not backed up ({e}).")
             error = None
-            pins.release(path)                      # the Recycle Bin moves it; its parents stay held
             try:
-                self._recycle(os.path.abspath(path))
+                # The folder stays held until just before the shell moves it (a
+                # held folder cannot be recycled); the library folder stays held.
+                self._recycle(os.path.abspath(path), before=lambda: pins.release(path))
             except folders.RecycleError as e:
                 error = str(e)
             except Exception as e:
@@ -556,15 +566,15 @@ class LibraryOps:
 
     def _backups_left(self, path, candidates):
         """After a delete: the candidates (see _backups_in) whose backup is still
-        all there (a file in use, a cancelled delete), recorded as saved again."""
+        there for sure (a file in use, a cancelled delete) -- its recorded files
+        in the folder all remain, or a recording with its fingerprint remains in
+        the folder -- recorded as saved again. Unchecked ones stay failed."""
         left_fps = self._walk(path)["fps"] if os.path.lexists(path) else set()
         kept = {}
-        for fp, (record, there) in candidates.items():
-            if there:
-                still = all(os.path.lexists(p) for p in there)
-            else:
-                still = fp in left_fps or bool(self._fps_outside(path, {fp}))
-            if still:
+        for fp, (record, there, detail) in candidates.items():
+            if detail != BACKUP_RECYCLED:
+                continue
+            if (there and all(os.path.lexists(p) for p in there)) or (not there and fp in left_fps):
                 kept[fp] = record
         if kept:
             self._store.set_backups(kept)
@@ -671,14 +681,26 @@ class LibraryOps:
                 if folders.too_long(dest):
                     result["failed"].append({"name": name, "error": "The new path would be too long for Windows."})
                     break
-                try:
-                    if os.path.lexists(dest):       # os.rename replaces a file outside Windows
-                        raise FileExistsError(dest)
-                    self._rename(path, dest)
-                except FileExistsError:
+                if os.path.lexists(dest):           # os.rename replaces a file outside Windows
                     taken.add(new_name.casefold())
                     continue
+                try:
+                    undo = self._move_backups(path, dest)
+                except (StoreReadOnly, StoreUnavailable) as e:
+                    result["failed"].append({"name": name, "error": f"Its recorder backup could not be "
+                                                                    f"recorded at the new place ({e})."})
+                    break
+                try:
+                    self._rename(path, dest)
                 except OSError as e:
+                    if undo is not None:
+                        try:
+                            undo()
+                        except (StoreReadOnly, StoreUnavailable):
+                            pass                    # a stale path: found by fingerprint all the same
+                    if isinstance(e, FileExistsError):
+                        taken.add(new_name.casefold())
+                        continue
                     problem = _fs_problem(e)
                     result["failed"].append({"name": name, "error": problem[:1].upper() + problem[1:] + "."})
                     break
