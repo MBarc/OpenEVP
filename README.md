@@ -139,20 +139,27 @@ subfolders first, then that folder's recordings. Click a folder row to select
 it; double-click it, or press Enter while it's selected, to open it. Click a
 step in the breadcrumb to jump back up, or press Backspace to go up one
 level. Folders can nest as deep as you like. Turn on **All recordings** to
-switch to today's flat, filterable list of every recording in the library
+switch to a flat, filterable list of every recording in the library
 instead, with no folders.
 
 **New investigation** creates a folder inside the one you're viewing, with
 the name box left empty (the investigation may have been days ago) — type a
 name and click Create. Select a folder to **Rename** it, or **Delete** it.
-Delete moves the folder to the Recycle Bin — it's never deleted for good —
-and asks first, listing what's inside: how many recordings and how many have
-EVPs (or that not all have been checked yet), any recorder backups that
+Delete asks first, listing what's inside: how many recordings and how many
+have EVPs (or that not all have been checked yet), any recorder backups that
 would go with it (those recordings get **Retry backup** afterward), other
 files such as photos or video, subfolders, and the total size. If it's your
 Save-to folder, the confirmation says so, since exporting there will just
-create it again. Deleting is refused on a drive with no Recycle Bin, such as
-some network or external drives — use File Explorer for those instead.
+create it again. The folder goes to the Recycle Bin; OpenEVP refuses when
+Windows couldn't recycle it — on a drive with no Recycle Bin (such as some
+network or external drives), when the Recycle Bin is set to delete files
+immediately, or when the folder is too big for it — and says to use File
+Explorer instead. Should Windows still find it can't recycle something, it
+asks before deleting anything for good. If a file in the folder is in use,
+what could be recycled is, the rest stays where it was, and OpenEVP says so.
+
+A second OpenEVP window can't create, rename, delete or move anything in the
+library; organise folders in the first window.
 
 Move recordings between folders by ticking their checkboxes and clicking
 **Move to…**, or by dragging a row onto a folder or a breadcrumb step. Marks
