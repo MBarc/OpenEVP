@@ -1,5 +1,6 @@
 """Library folder operations of the Api (a mixin): create, rename, delete (to
-the Recycle Bin only) and move recordings, always inside the library folder.
+the Recycle Bin only), and move and rename recordings, always inside the
+library folder.
 
 Each operation holds the Api's _busy lock (no export, WAV with marks or update
 meanwhile), refuses while a backup is queued or written or when another
@@ -745,3 +746,140 @@ class LibraryOps:
                 break
             else:
                 result["failed"].append({"name": name, "error": "No free name was found for it."})
+
+    def rename_files(self, file_ids, new_stem):
+        """Give library files (by id: one recording's files, all in one folder) the
+        name new_stem, each keeping its own extension (a .dvf and its .wav stay
+        together). Nothing is overwritten: a name taken there (ignoring case) is
+        refused before anything is renamed, except a change of case of the file's
+        own name; if a later file cannot be renamed, the ones already renamed are
+        named back. Marks follow (same fingerprint). {"ok", "renamed": [{"from",
+        "to"}], "ids": {old file id: new file id}}."""
+        try:
+            return self._rename_files(file_ids, new_stem)
+        except Exception as e:
+            return _fail(f"The recording was not renamed: {_plain(e)}")
+
+    def _rename_files(self, file_ids, new_stem):
+        if not isinstance(file_ids, list) or not file_ids or not all(isinstance(i, str) for i in file_ids):
+            return _fail("Nothing valid is selected.")
+        stem, problem = folders.clean_name(new_stem, what="file")
+        if problem:
+            return _fail(problem)
+        found = self._lib_paths("root")
+        if found is None:
+            return _fail(LIB_CHANGED)
+        root = found[0]
+        paths = OrderedDict()
+        for fid in file_ids:
+            path = self._library_file(fid)
+            if path is None:
+                return _fail(LIB_CHANGED)
+            paths[fid] = os.path.abspath(path)
+        where = {os.path.normcase(os.path.dirname(p)) for p in paths.values()}
+        if len(where) != 1:
+            return _fail("Only files in one folder can be renamed together.")
+        folder = os.path.dirname(next(iter(paths.values())))
+        refused = self._fs_begin()
+        if refused:
+            return refused
+        pins = folders.Pins()
+        try:
+            refused = self._usable(root, folder, allow_root=True, pins=pins)
+            if refused:
+                return refused
+            # Every target is checked before anything is renamed.
+            plan, targets = [], {}
+            for fid, path in paths.items():
+                name = os.path.basename(path)
+                if not os.path.isfile(path) or not folders.inside(root, path):
+                    return _fail(f"{name} is no longer there. Refresh the list.")
+                new_name = stem + os.path.splitext(name)[1]
+                other = targets.get(new_name.casefold())
+                if other is not None and other != name:
+                    return _fail(f'{other} and {name} would both be named "{new_name}". '
+                                 "Rename one of them in File Explorer.")
+                targets[new_name.casefold()] = name
+                dest = os.path.join(folder, new_name)
+                if new_name != name:
+                    if folders.too_long(dest):
+                        return _fail("The new name would make the path too long for Windows. "
+                                     "Choose a shorter name.")
+                    if folders.name_taken(folder, new_name, ignore=name):
+                        return _fail(f'There is already a file named "{new_name}" here. Nothing was renamed.')
+                plan.append((fid, path, dest))
+            done = []                               # (path, dest, undo backups) renamed so far
+            for fid, path, dest in plan:
+                if path == dest:
+                    continue
+                name, new_name = os.path.basename(path), os.path.basename(dest)
+                case_only = os.path.normcase(path) == os.path.normcase(dest)
+                problem = None
+                if not case_only and os.path.lexists(dest):    # os.rename replaces a file outside Windows
+                    problem = f'There is already a file named "{new_name}" here'
+                else:
+                    try:
+                        undo = self._move_backups(path, dest)
+                    except (StoreReadOnly, StoreUnavailable) as e:
+                        problem = (f"{name} was not renamed: its recorder backup could not be "
+                                   f"recorded under the new name ({e})")
+                    else:
+                        try:
+                            self._rename(path, dest)
+                        except OSError as e:
+                            self._undo_backups(undo)
+                            problem = (f'There is already a file named "{new_name}" here'
+                                       if isinstance(e, FileExistsError)
+                                       else f"{name} was not renamed: {_fs_problem(e)}")
+                        else:
+                            done.append((fid, path, dest, undo))
+                if problem:
+                    return self._roll_back_renames(done, problem)
+            result = {"ok": True, "renamed": [], "ids": {}}
+            for fid, path, dest in plan:
+                result["ids"][fid] = _file_id(dest)
+            for fid, path, dest, _undo in done:
+                result["renamed"].append({"from": os.path.basename(path), "to": os.path.basename(dest)})
+                try:
+                    self._retarget_prefix(path, dest)
+                except Exception:
+                    pass                            # renamed all the same; fingerprinted again later
+            if done:
+                self._flush_index()
+            return result
+        finally:
+            pins.close()
+            self._fs_end()
+
+    @staticmethod
+    def _undo_backups(undo):
+        if undo is not None:
+            try:
+                undo()
+            except (StoreReadOnly, StoreUnavailable):
+                pass                                # a stale path: found by fingerprint all the same
+
+    def _roll_back_renames(self, done, problem):
+        """A file of a recording could not be renamed: name back the ones renamed
+        before it (latest first), with their backup paths. The _fail() saying so;
+        a file that cannot be named back keeps its new name, and is re-keyed there."""
+        stuck, ids = [], {}
+        for fid, path, dest, undo in reversed(done):
+            try:
+                self._rename(dest, path)
+            except OSError:
+                stuck.append(os.path.basename(dest))
+                ids[fid] = _file_id(dest)
+                try:
+                    self._retarget_prefix(path, dest)
+                except Exception:
+                    pass
+                continue
+            self._undo_backups(undo)
+        if stuck:
+            self._flush_index()
+            problem += (f". {', '.join(reversed(stuck))} could not be given "
+                        f"{'its' if len(stuck) == 1 else 'their'} old name back")
+        else:
+            problem += ". Nothing was renamed"
+        return {**_fail(problem + "."), "ids": ids}

@@ -26,22 +26,23 @@ class RecycleError(Exception):
 
 # ---- names ------------------------------------------------------------------------
 
-def clean_name(name):
+def clean_name(name, what="folder"):
     """(name, None) with surrounding spaces removed, or (None, plain reason) when
-    it cannot be a folder name on Windows."""
+    it cannot be a folder name on Windows. what: the word the reasons use ("folder",
+    or "file" for a recording's new name without its extension)."""
     if not isinstance(name, str):
-        return None, "Type a name for the folder."
+        return None, f"Type a name for the {what}."
     name = name.strip()
     if not name:
-        return None, "Type a name for the folder."
+        return None, f"Type a name for the {what}."
     if len(name) > MAX_NAME:
-        return None, f"A folder name can be at most {MAX_NAME} characters."
+        return None, f"A {what} name can be at most {MAX_NAME} characters."
     if name in (".", "..") or name.startswith("."):
-        return None, "A folder name cannot start with a dot."
+        return None, f"A {what} name cannot start with a dot."
     if any(c in _FORBIDDEN or ord(c) < 32 for c in name):
-        return None, 'A folder name cannot contain any of < > : " / \\ | ? * or control characters.'
+        return None, f'A {what} name cannot contain any of < > : " / \\ | ? * or control characters.'
     if name.endswith("."):
-        return None, "A folder name cannot end with a dot."
+        return None, f"A {what} name cannot end with a dot."
     if name.split(".")[0].strip().upper() in _RESERVED:
         return None, f'"{name}" is a name Windows reserves for devices. Choose another name.'
     return name, None

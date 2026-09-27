@@ -171,8 +171,11 @@ could be recycled is, the rest stays where it was, and OpenEVP says so.
 
 Right-click in the library for the same tools: on an empty part of the list,
 **New folder**; on a folder, **Open**, **Rename** or **Delete**; on a recording,
-**Play** or **Move to…** (all the ticked recordings, if you right-click a
+**Play**, **Rename…** or **Move to…** (all the ticked recordings, if you right-click a
 ticked one).
+
+**Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that folder get the new name,
+each keeping its extension; a name that's already taken is refused, and marks stay with it.
 
 A second OpenEVP window can't create, rename, delete or move anything in the
 library, and can't export; do those in the first window.

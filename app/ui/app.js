@@ -751,6 +751,7 @@ function libraryKeys(e) {
     scheduleLibraryRender();
     return;
   }
+  if (e.key === "F2") { renameKey(e); return; }
   if (L.flat) return;
   const row = e.target.closest && e.target.closest("tr.lib-folder");
   if (e.key === "Enter" && row && row === e.target && L.folderById.has(row.folderId)) {
@@ -760,6 +761,23 @@ function libraryKeys(e) {
     e.preventDefault();
     libraryUp();
   }
+}
+
+// F2: rename the recording row (or folder row) that has the focus, else the selected folder,
+// else the recording in the player -- as File Explorer does.
+function renameKey(e) {
+  const L = S.lib, at = e.target.closest ? e.target : null;
+  const recRow = at && at.closest("tr.lib-row"), folderRow = at && at.closest("tr.lib-folder");
+  let g = recRow && recRow.group, folderId = null;
+  if (!g) {
+    if (folderRow && !L.flat) folderId = folderRow.folderId;
+    else if (L.selFolder && !L.flat) folderId = L.selFolder;
+    else g = L.shown.find(libraryPlaying) || null;
+  }
+  if (!g && !folderId) return;
+  e.preventDefault();
+  if (g) { if (canRenameRecording(g)) renameRecordingDialog(g); }
+  else if (canChangeFolder(folderId)) { L.selFolder = folderId; renameFolderDialog(); }
 }
 
 function renderLibraryBar() {
@@ -794,6 +812,7 @@ function libraryToolsReady() {
 function canNewFolder() { return libraryToolsReady() && !S.lib.flat && S.lib.folderById.has(S.lib.folderId); }
 function canChangeFolder(id) { return libraryToolsReady() && S.lib.folderById.has(id) && id !== "root"; }   // rename, delete
 function canMove(ids) { return libraryToolsReady() && ids.length > 0 && S.lib.folders.length >= 2; }
+function canRenameRecording(g) { return libraryToolsReady() && groupPickIds(g).length > 0; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
   const t = (S.caps.formats || {})[type];
@@ -818,6 +837,7 @@ function libraryRow(g) {
   if (!tr) {
     tr = document.createElement("tr");
     tr.className = "lib-row";
+    tr.tabIndex = 0;                           // reachable with Tab; F2 renames it
     for (let i = 0; i < 7; i++) tr.appendChild(document.createElement("td"));
     const pick = document.createElement("input");
     pick.type = "checkbox"; pick.className = "lib-pick"; pick.title = "Select (to move it)";
@@ -1373,6 +1393,47 @@ async function deleteFolderDialog() {
   });
 }
 
+// ---- Rename a recording: its files in the folder shown get one new name, each its own extension ----
+function fileStem(name) { const dot = name.lastIndexOf("."); return dot > 0 ? name.slice(0, dot) : name; }
+
+function renameRecordingDialog(g) {
+  const L = S.lib, ids = groupPickIds(g).filter((id) => L.byId.has(id));
+  if (!ids.length || L.op) return;
+  const names = ids.map((id) => L.byId.get(id).name);
+  folderDialog({
+    title: `Rename “${g.main.name}”`,
+    body: names.length > 1 ? [dialogText(`${names.join(" and ")} are renamed together; each keeps its extension.`)] : null,
+    name: fileStem(g.main.name), ok: "Rename",
+    run: async (name) => {
+      const held = heldLibraryFile(), touched = !!held && ids.includes(held.id);
+      if (touched) unloadPlayer();
+      const r = await libraryOp("Renaming the recording…", () => api().rename_files(ids, name));
+      const newIds = r.ids || {};
+      if (!r.ok) {
+        finishFolderOp(async () => {                     // a file that could not be named back has a new id
+          await loadLibrary();
+          if (touched) reloadHeld(held, newIds[held.id] || held.id);
+        });
+        return errorText(r);
+      }
+      const renamed = r.renamed || [];
+      banner(renamed.length ? `Renamed ${renamed.map((x) => `“${x.from}” to “${x.to}”`).join(", ")}.`
+                            : "The name is unchanged.", "ok");
+      for (const [from, to] of Object.entries(newIds)) {
+        if (from !== to && L.selected.delete(from)) L.selected.add(to);
+      }
+      // The playing highlight follows its file to the new id.
+      const playingId = S.playing && S.playing.startsWith("lib|") ? S.playing.slice(4) : null;
+      if (playingId && newIds[playingId]) S.playing = `lib|${newIds[playingId]}`;
+      finishFolderOp(async () => {
+        await loadLibrary();
+        if (touched) reloadHeld(held, newIds[held.id] || held.id);
+      });
+      return null;
+    },
+  });
+}
+
 // ---- Move to… (the folder tree) and the move itself ----
 // ids: the files to move (default: the recordings ticked).
 function moveDialog(ids = [...S.lib.selected]) {
@@ -1560,6 +1621,9 @@ function libraryMenuItems(target) {
     return [
       { label: "Play", disabled: !playable, title: playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
+      // Rename… is for the row clicked (its files in the folder shown), ticked or not.
+      { label: "Rename…", disabled: !canRenameRecording(g), title: L.op ? "Wait for the operation to finish" : "",
+        run: () => renameRecordingDialog(g) },
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
     ];
   }

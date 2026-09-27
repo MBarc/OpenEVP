@@ -3,7 +3,8 @@
 // its listing (labels as text, never markup), the export menu comes from its model, and
 // selections hand the backend back the exact folder ids and recording numbers, even with
 // ":" or "|" in them. The EVP Library's right-click menu runs the same code as the folder tools
-// (New folder, Rename, Delete, Move to…), with the same enabled state. Prints "ok" or throws.
+// (New folder, Rename, Delete, Move to…), with the same enabled state; a recording row adds
+// Rename… (and F2), which sends the ids of that recording's files in the folder shown. Prints "ok" or throws.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -337,7 +338,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const realTimeout = context.setTimeout;
   context.setTimeout = (fn, ms) => { if (!ms) setImmediate(fn); return 0; };   // finishFolderOp runs
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false]]);
   choose("Play");
   await settle();
   assert.deepStrictEqual(ops.pop(), ["play", "r3"]);
@@ -352,7 +353,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);                                  // ticked: both ticked recordings
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move 2 recordings to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move 2 recordings to…", false]]);
   choose("Move 2 recordings to…");
   assert.strictEqual($("folder-dialog-title").textContent, "Move 2 recordings to…");
   pick("f2").onclick();
@@ -362,12 +363,84 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r3").cells[1]);                                  // not ticked: just itself
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false]]);
   L.op = true;
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Move to…", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", true], ["Move to…", true]]);
   L.op = false;
   press("Escape");
+
+  // Rename… on a recording row: the dialog shows its main file's name without the extension
+  // (all of it selected), and sends the ids of that recording's files in the folder shown.
+  api.rename_files = async (ids, name) => { ops.push(["rename", ids, name]);
+                                            return { ok: true, renamed: [{ from: "c.wav", to: "Knock.wav" }], ids: { r3: "r9" } }; };
+  vm.runInContext(`S.playing = "lib|r3";`, context);
+  rightClick(recRow("r3").cells[1]);
+  choose("Rename…");
+  assert.ok(menu.hidden && dialogShown());
+  assert.strictEqual($("folder-dialog-title").textContent, "Rename “c.wav”");
+  assert.strictEqual($("folder-dialog-name").value, "c");
+  assert.ok(!$("folder-dialog-name").hidden && $("folder-dialog-body").hidden);
+  $("folder-dialog-name").value = "Knock";
+  await context.folderDialogOk();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())), ["rename", ["r3"], "Knock"]);
+  assert.ok(!dialogShown());
+  assert.strictEqual(vm.runInContext("S.playing", context), "lib|r9");     // the highlight follows the new id
+  assert.strictEqual($("banner-text").textContent, "Renamed “c.wav” to “Knock.wav”.");
+  await settle();
+  vm.runInContext(`S.playing = null;`, context);
+  // A failed rename keeps the dialog open with the reason.
+  api.rename_files = async (ids, name) => { ops.push(["rename", ids, name]);
+                                            return { ok: false, error: 'There is already a file named "a.wav" here.' }; };
+  rightClick(recRow("r3").cells[1]);
+  choose("Rename…");
+  $("folder-dialog-name").value = "a";
+  await context.folderDialogOk();
+  assert.ok(dialogShown());
+  assert.strictEqual($("folder-dialog-error").textContent, 'There is already a file named "a.wav" here.');
+  context.closeFolderDialog();
+  await settle();
+  ops.length = 0;
+  // A recording with a .dvf and its .wav copy: both files go, the .dvf's name is shown.
+  const listed = await api.list_library();
+  api.list_library = async () => ({ ...listed, scan_id: 4, files: [...listed.files,
+    { ...libFile("r4", "x.dvf", "root", "fpX"), type: "dvf" }, libFile("r5", "x.wav", "root", "fpX")] });
+  await context.loadLibrary();
+  await settle();
+  api.rename_files = async (ids, name) => { ops.push(["rename", ids, name]); return { ok: true, renamed: [], ids: {} }; };
+  // F2 on the focused row opens the same dialog.
+  recRow("r4").focus();
+  let k = press("F2");
+  assert.ok(k.defaultPrevented && dialogShown());
+  assert.strictEqual($("folder-dialog-title").textContent, "Rename “x.dvf”");
+  assert.strictEqual($("folder-dialog-name").value, "x");
+  assert.ok(/x\.dvf and x\.wav are renamed together/.test($("folder-dialog-body").textContent));
+  await context.folderDialogOk();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.pop())).slice(0, 2), ["rename", ["r4", "r5"]]);
+  await settle();
+  // F2 on a folder row renames the folder; off while an operation runs or in a second window.
+  folderRow("f1").focus();
+  k = press("F2");
+  assert.ok(k.defaultPrevented);
+  assert.strictEqual($("folder-dialog-title").textContent, "Rename “Old Mill”");
+  context.closeFolderDialog();
+  L.selFolder = null;
+  L.op = true;
+  recRow("r4").focus();
+  press("F2");
+  assert.ok(!dialogShown());
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[1], ["Rename…", true]);
+  press("Escape");
+  L.op = false;
+  vm.runInContext(`S.caps.marks_read_only = true;`, context);
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[1], ["Rename…", true]);
+  press("Escape");
+  press("F2");
+  assert.ok(!dialogShown());
+  vm.runInContext(`S.caps.marks_read_only = false;`, context);
+  document.activeElement = null;
   context.setTimeout = realTimeout;
 
   // All recordings (no folders): empty space offers nothing, but the browser menu stays off there.
@@ -375,7 +448,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   e = rightClick($("empty"));
   assert.ok(e.defaultPrevented && menu.hidden);
   rightClick(recRow("r1").cells[1]);
-  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Move 2 recordings to…"]);
+  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Rename…", "Move 2 recordings to…"]);
   fire([window], "scroll", {});
   assert.ok(menu.hidden, "scrolling closes it");
   L.flat = false;

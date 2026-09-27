@@ -69,6 +69,8 @@ table[hidden] { display: none; }
 tr.lib-folder { outline: none; user-select: none; }
 tr.lib-folder:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
 tr.lib-folder.selected td { background: var(--line); }
+tr.lib-row { outline: none; }
+tr.lib-row:focus-visible td { box-shadow: inset 0 2px 0 var(--accent), inset 0 -2px 0 var(--accent); }
 /* Folder management: the tools, recordings picked for a move, drop targets while dragging */
 #library-tools { display: inline-flex; gap: 4px; }
 #library-tools button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 4px;
