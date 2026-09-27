@@ -104,6 +104,15 @@ def is_link(path):
     return _link_stat(os.lstat(path))
 
 
+_HIDDEN_OR_SYSTEM = 0x2 | 0x4          # FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM
+
+
+def entry_is_hidden(entry):
+    """Is an os.DirEntry marked hidden or system on Windows (AppData, $RECYCLE.BIN,
+    System Volume Information...)? Always False elsewhere."""
+    return bool(getattr(entry.stat(follow_symlinks=False), "st_file_attributes", 0) & _HIDDEN_OR_SYSTEM)
+
+
 def entry_is_link(entry):
     """is_link() for an os.DirEntry, from what the folder listing already read
     (on any Python version: DirEntry.is_junction only exists from 3.12)."""
@@ -151,7 +160,10 @@ COINIT_APARTMENTTHREADED = 0x2
 MAX_PATH = 260
 
 NO_RECYCLE_BIN = "This drive has no Recycle Bin. Delete the folder in File Explorer if you really mean to."
-IN_USE = "Some files are in use and were not moved to the Recycle Bin."
+NO_ROOM = ("This folder can't go to the Recycle Bin (it is too big for it, or the Recycle Bin is set to "
+           "delete files immediately). Delete it in File Explorer if you really mean to.")
+IN_USE = "{} was not (completely) moved to the Recycle Bin: a file is in use, or deleting was cancelled."
+BITBUCKET = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
 
 _BITS64 = ctypes.sizeof(ctypes.c_void_p) == 8
 
@@ -177,9 +189,77 @@ class SHQUERYRBINFO(ctypes.Structure):
                 ("i64NumItems", ctypes.c_int64)]
 
 
+def volume_guid(root):
+    """The "{GUID}" of the volume mounted at a drive root ("C:\\"), or None."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetVolumeNameForVolumeMountPointW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+    kernel32.GetVolumeNameForVolumeMountPointW.restype = ctypes.c_int
+    buf = ctypes.create_unicode_buffer(64)
+    if not kernel32.GetVolumeNameForVolumeMountPointW(root, buf, len(buf)):
+        return None
+    name = buf.value                        # \\?\Volume{GUID}\
+    start, end = name.find("{"), name.find("}")
+    return name[start:end + 1] if 0 <= start < end else None
+
+
+def bin_settings(guid):
+    """The Recycle Bin settings Windows keeps for one volume (per user):
+    {"NukeOnDelete": int, "MaxCapacity": int (MB)}, with only the values found."""
+    import winreg
+    found = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, BITBUCKET + "\\" + guid) as key:
+            for value in ("NukeOnDelete", "MaxCapacity"):
+                try:
+                    data, kind = winreg.QueryValueEx(key, value)
+                except OSError:
+                    continue
+                if kind == winreg.REG_DWORD and isinstance(data, int):
+                    found[value] = data
+    except OSError:
+        pass                                # never configured: Windows' defaults apply
+    return found
+
+
+def tree_size(path):
+    """Bytes in path and everything in it (links not followed; unreadable parts skipped)."""
+    total, stack = 0, [path]
+    while stack:
+        try:
+            with os.scandir(stack.pop()) as it:
+                entries = list(it)
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if entry_is_link(e):
+                    continue
+                if e.is_dir(follow_symlinks=False):
+                    stack.append(e.path)
+                else:
+                    total += e.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total
+
+
+def bin_refuses(root, size, guid_of=None, settings_of=None):
+    """Would the Recycle Bin of the drive at root delete something of `size` bytes
+    for good: is it set to delete files immediately, or is size beyond its
+    capacity? Missing settings mean Windows' defaults: not immediate, and an
+    unknown capacity is never a reason to refuse."""
+    guid = (guid_of or volume_guid)(root)
+    settings = (settings_of or bin_settings)(guid) if guid else {}
+    if settings.get("NukeOnDelete"):
+        return True
+    capacity = settings.get("MaxCapacity")
+    return capacity is not None and size > capacity * 1024 * 1024
+
+
 def recycle(path, owner=None):
     """Move one folder (or file) to the Recycle Bin, or raise RecycleError in
-    plain words. Never deletes permanently: a drive without a Recycle Bin is
+    plain words. Never deletes permanently on purpose: a drive without a Recycle
+    Bin, a Recycle Bin set to delete immediately and a folder too big for it are
     refused before anything happens. owner: the app window's handle, or None."""
     if sys.platform != "win32":
         raise RecycleError("The Recycle Bin is only available on Windows.")
@@ -206,6 +286,11 @@ def recycle(path, owner=None):
 
     if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
         raise RecycleError(NO_RECYCLE_BIN)
+    # FOF_WANTNUKEWARNING only asks before deleting for good (and a Yes would
+    # delete): refuse up front whatever the Recycle Bin would not take. The
+    # warning stays as a backstop for a case this does not foresee.
+    if bin_refuses(root, tree_size(path)):
+        raise RecycleError(NO_ROOM)
     source = ctypes.create_unicode_buffer(path + "\0")   # double-NUL terminated; kept referenced
     op = SHFILEOPSTRUCTW(hwnd=owner or None, wFunc=FO_DELETE,
                          pFrom=ctypes.cast(source, ctypes.c_wchar_p), pTo=None, fFlags=RECYCLE_FLAGS)
@@ -222,5 +307,5 @@ def recycle(path, owner=None):
     if code == 0 and not op.fAnyOperationsAborted and not os.path.lexists(path):
         return
     if code == 0:
-        raise RecycleError(IN_USE)
+        raise RecycleError(IN_USE.format(name))
     raise RecycleError(f"{name} was not moved to the Recycle Bin (code 0x{code & 0xFFFFFFFF:x}).")

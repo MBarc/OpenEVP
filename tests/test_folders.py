@@ -427,10 +427,12 @@ class DeleteTests(FolderApiBase):
             self.recycled.append(path)
             os.remove(os.path.join(path, "gone.wav"))
             os.remove(os.path.join(path, "A", "photo.jpg"))
-            raise folders.RecycleError(folders.IN_USE)
+            raise folders.RecycleError(folders.IN_USE.format("Old Mill"))
         api._recycle = shell
         res = api.delete_folder(self.folder(r, "Old Mill"))
-        self.assertEqual((res["ok"], res["error"], res["backups"]), (False, folders.IN_USE, 1))
+        self.assertEqual((res["ok"], res["error"], res["backups"]),
+                         (False, "Old Mill was not (completely) moved to the Recycle Bin: a file is in use, "
+                                 "or deleting was cancelled.", 1))
         self.assertTrue(os.path.isfile(locked))
         self.assertEqual(self.store.backup(fps["gone.wav"])["status"], "failed")
         self.assertEqual(self.store.backup(fps["locked.wav"])["status"], "saved")
@@ -782,6 +784,117 @@ class MoveTests(FolderApiBase):
         self.assertEqual(res["renamed"], [{"from": "y.wav", "to": "y (2).wav"}])
         entry = api._entry(loaded["rec"])
         self.assertEqual((entry["name"], os.path.basename(entry["source"]["path"])), ("y (2).wav", "y (2).wav"))
+
+
+class RecycleBinSettingsTests(unittest.TestCase):
+    """Refused up front what the Recycle Bin would delete for good (a fake registry)."""
+    GUID = "{5f1394b7-0000-0000-0000-000000000000}"
+
+    def refuses(self, settings, size, guid=GUID):
+        asked = []
+
+        def settings_of(g):
+            asked.append(g)
+            return settings
+        result = folders.bin_refuses("C:\\", size, guid_of=lambda root: guid, settings_of=settings_of)
+        self.assertEqual(asked, [guid] if guid else [])
+        return result
+
+    def test_immediate_delete_and_capacity(self):
+        mb = 1024 * 1024
+        self.assertTrue(self.refuses({"NukeOnDelete": 1}, 1))
+        self.assertTrue(self.refuses({"NukeOnDelete": 1, "MaxCapacity": 50000}, 1))
+        self.assertTrue(self.refuses({"NukeOnDelete": 0, "MaxCapacity": 10}, 10 * mb + 1))
+        self.assertFalse(self.refuses({"NukeOnDelete": 0, "MaxCapacity": 10}, 10 * mb))
+        self.assertTrue(self.refuses({"MaxCapacity": 0}, 1))
+
+    def test_missing_settings_mean_windows_defaults(self):
+        self.assertFalse(self.refuses({}, 10 ** 12))                  # capacity unknown: never refused on size
+        self.assertFalse(self.refuses({"NukeOnDelete": 0}, 10 ** 12))
+        self.assertFalse(self.refuses({"NukeOnDelete": 1}, 1, guid=None))   # no volume GUID: nothing known
+
+    def test_registry_reader(self):
+        class Key:
+            def __init__(self, values):
+                self.values = values
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+        fake = types.SimpleNamespace(HKEY_CURRENT_USER="HKCU", REG_DWORD=4, REG_SZ=1)
+        opened = []
+
+        def open_key(hive, sub, values):
+            opened.append((hive, sub))
+            if values is None:
+                raise FileNotFoundError(2, "missing")
+            return Key(values)
+
+        def query(key, name):
+            if name not in key.values:
+                raise FileNotFoundError(2, "missing")
+            return key.values[name]
+        for values, expected in (({"NukeOnDelete": (1, 4), "MaxCapacity": (300, 4)},
+                                   {"NukeOnDelete": 1, "MaxCapacity": 300}),
+                                  ({"MaxCapacity": ("300", 1)}, {}),                  # not a DWORD: ignored
+                                  ({}, {}), (None, {})):
+            fake.OpenKey = lambda hive, sub, v=values: open_key(hive, sub, v)
+            fake.QueryValueEx = query
+            with mock.patch.dict(sys.modules, {"winreg": fake}):
+                self.assertEqual(folders.bin_settings(self.GUID), expected)
+        self.assertEqual(opened[0], ("HKCU", folders.BITBUCKET + "\\" + self.GUID))
+
+    def test_tree_size(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "a", "b"))
+            for rel, n in (("x", 3), ("a/y", 5), ("a/b/z", 7)):
+                with open(os.path.join(d, *rel.split("/")), "wb") as f:
+                    f.write(b"." * n)
+            self.assertEqual(folders.tree_size(d), 15)
+
+    @unittest.skipUnless(WINDOWS, "Windows only")
+    def test_recycle_refuses_before_the_shell_is_asked(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = os.path.join(d, "Old Mill")
+            os.makedirs(target)
+            with open(os.path.join(target, "a.wav"), "wb") as f:
+                f.write(b"x" * 10)
+            kernel32 = ctypes.WinDLL("kernel32")
+            kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+            if kernel32.GetDriveTypeW(os.path.splitdrive(target)[0] + "\\") != folders.DRIVE_FIXED:
+                self.skipTest("the temp folder is not on a fixed drive")
+            for settings in ({"NukeOnDelete": 1}, {"MaxCapacity": 0}):
+                with mock.patch.object(folders, "bin_settings", return_value=settings):
+                    with self.assertRaises(folders.RecycleError) as caught:
+                        folders.recycle(target)
+                self.assertEqual(str(caught.exception), folders.NO_ROOM)
+                self.assertTrue(os.path.isfile(os.path.join(target, "a.wav")))
+
+    def test_messages(self):
+        self.assertIn("can't go to the Recycle Bin", folders.NO_ROOM)
+        self.assertEqual(folders.IN_USE.format("Old Mill"),
+                         "Old Mill was not (completely) moved to the Recycle Bin: a file is in use, "
+                         "or deleting was cancelled.")
+        self.assertEqual(folders.RECYCLE_FLAGS & folders.FOF_WANTNUKEWARNING, folders.FOF_WANTNUKEWARNING)
+
+
+@unittest.skipUnless(WINDOWS, "hidden and system attributes are Windows-only")
+class HiddenFolderTests(FolderApiBase):
+    def test_hidden_and_system_folders_are_not_listed(self):
+        self.write("AppData/x.wav", wav_bytes(b"x"))
+        self.write("Sys/y.wav", wav_bytes(b"y"))
+        self.write("Shown/z.wav", wav_bytes(b"z"))
+        set_attrs = ctypes.windll.kernel32.SetFileAttributesW
+        set_attrs.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        self.assertTrue(set_attrs(os.path.join(self.lib, "AppData"), 0x2))      # hidden
+        self.assertTrue(set_attrs(os.path.join(self.lib, "Sys"), 0x4))          # system
+        self.addCleanup(set_attrs, os.path.join(self.lib, "Sys"), 0x80)
+        self.addCleanup(set_attrs, os.path.join(self.lib, "AppData"), 0x80)
+        r = self.new_api().list_library()
+        self.assertEqual([f["rel"] for f in r["folders"]], [[], ["Shown"]])
+        self.assertEqual([f["name"] for f in r["files"]], ["z.wav"])
 
 
 if __name__ == "__main__":

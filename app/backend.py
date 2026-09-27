@@ -141,7 +141,8 @@ def _scan_library(folder):
     folder's files first (by name), then its subfolders in name order. Walking
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
-    "._x.wav" companions, temp files, hidden folders) are skipped. complete is
+    "._x.wav" companions, temp files, hidden folders) and folders Windows marks
+    hidden or system (AppData, $RECYCLE.BIN...) are skipped. complete is
     False when a folder could not be read (its files are missing from the
     list). investigation is the first folder under `folder` ("" for files
     directly in it). The folders list holds every subfolder walked (including
@@ -168,7 +169,8 @@ def _scan_library(folder):
                 if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
-                    subdirs.append(e)
+                    if not folders.entry_is_hidden(e):  # AppData, System Volume Information...
+                        subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
                 if kind not in ("dvf", "wav") or not e.is_file():
