@@ -164,7 +164,11 @@ td.note { color: var(--warn); }
 .modal[hidden] { display: none; }
 .modal-card { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 20px 24px; width: min(520px, 90vw); box-shadow: 0 8px 30px rgba(0, 0, 0, .3); }
 .modal-card h2 { margin: 0 0 12px; font-size: 18px; }
-#update-notes { max-height: 200px; overflow: auto; white-space: pre-wrap; font-size: 13px; border-left: 3px solid var(--line); padding-left: 10px; }
+#update-notes { max-height: 240px; overflow: auto; font-size: 13px; border-left: 3px solid var(--line); padding-left: 10px; }
+#update-notes p, #update-notes ul, #update-notes ol { margin: 0 0 8px; }
+#update-notes ul, #update-notes ol { padding-left: 20px; }
+#update-notes h4 { margin: 8px 0 4px; font-size: 13px; }
+#update-notes code { font-family: Consolas, monospace; background: var(--line); padding: 0 3px; border-radius: 3px; }
 #update-notes:empty { display: none; }
 .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 button.primary { background: var(--accent); color: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 14px; cursor: pointer; }

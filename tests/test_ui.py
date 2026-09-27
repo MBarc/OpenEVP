@@ -15,6 +15,11 @@ class PageTests(unittest.TestCase):
                              encoding="utf-8", timeout=60)
         self.assertEqual((run.returncode, run.stdout.strip()), (0, "ok"), run.stderr)
 
+    def test_release_notes_render_as_markdown(self):
+        run = subprocess.run([NODE, os.path.join(HERE, "notes_check.js")], capture_output=True, text=True,
+                             encoding="utf-8", timeout=60)
+        self.assertEqual((run.returncode, run.stdout.strip()), (0, "ok"), run.stderr)
+
     def test_the_page_parses(self):
         run = subprocess.run([NODE, "--check", os.path.join(HERE, "..", "app", "ui", "app.js")],
                              capture_output=True, text=True, encoding="utf-8", timeout=60)

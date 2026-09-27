@@ -162,6 +162,7 @@ Promise.all([
 _SMOKE_STATE_JS = """JSON.stringify({
   title: document.title,
   app_js: typeof window.onBackendEvent === "function",
+  notes_js: typeof renderNotes === "function",
   wavesurfer: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.create === "function",
   regions: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.Regions !== "undefined",
   style_css: Array.from(document.styleSheets).some(s => (s.href || "").endsWith("/style.css") && s.cssRules.length > 0),
@@ -218,7 +219,7 @@ def _smoke_check(window, report):
         report["page"] = {k: v for k, v in state.items() if k != "smoke"}
         if state.get("title") != "OpenEVP":
             problems.append(f"index.html did not load (title {state.get('title')!r})")
-        for key, what in (("app_js", "app.js"), ("wavesurfer", "vendor/wavesurfer.min.js"),
+        for key, what in (("app_js", "app.js"), ("notes_js", "notes.js"), ("wavesurfer", "vendor/wavesurfer.min.js"),
                           ("regions", "vendor/regions.min.js"), ("style_css", "style.css"),
                           ("bridge", "the JS bridge (window.pywebview.api)")):
             if not state.get(key):

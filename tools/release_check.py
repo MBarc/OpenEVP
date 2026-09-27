@@ -327,7 +327,7 @@ def check_gui():
         except (OSError, ValueError):
             return [f"OpenEVP.exe --smoke wrote no report (exit {code}){': ' + out if out else ''}"]
     page = report.get("page", {})
-    loaded = [k for k in ("app_js", "wavesurfer", "regions", "style_css", "bridge") if page.get(k)]
+    loaded = [k for k in ("app_js", "notes_js", "wavesurfer", "regions", "style_css", "bridge") if page.get(k)]
     print(f"   page: title {page.get('title')!r}, loaded {', '.join(loaded) or 'nothing'}, "
           f"version shown {page.get('version_shown')!r}")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
