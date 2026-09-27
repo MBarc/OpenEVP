@@ -125,15 +125,18 @@ def inside(root, path, allow_root=False):
     on disk (realpath) and must end up exactly where its name says, so a folder
     swapped for a junction since the listing is refused. path must exist."""
     try:
-        real_root = os.path.normcase(os.path.realpath(root))
-        real = os.path.normcase(os.path.realpath(path))
-        if is_link(path):
-            return False
-    except (OSError, ValueError):
-        return False
-    try:
         rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
     except ValueError:                       # another drive
+        return False
+    try:
+        real_root = os.path.normcase(os.path.realpath(root))
+        real = os.path.normcase(os.path.realpath(path))
+        # The library folder itself may be a link the user chose (a redirected
+        # Documents, say); whether it changed since the listing is checked by
+        # the caller (library_ops._root_identity).
+        if rel != os.curdir and is_link(path):
+            return False
+    except (OSError, ValueError):
         return False
     if rel == os.curdir:
         return allow_root and real == real_root
@@ -142,6 +145,76 @@ def inside(root, path, allow_root=False):
     if not real.startswith(real_root.rstrip(os.sep) + os.sep):
         return False
     return real == os.path.normcase(os.path.join(real_root, rel))
+
+
+# ---- pinning folders for the length of an operation (Windows) -------------------------
+
+GENERIC_READ = 0x80000000
+FILE_SHARE_READ = 0x1
+FILE_SHARE_WRITE = 0x2
+OPEN_EXISTING = 3
+FILE_FLAG_BACKUP_SEMANTICS = 0x02000000      # needed to open a folder
+FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000    # a link is held itself, never what it points to
+_INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
+class Pins:
+    """Open handles on folders, shared for reading and writing but not for
+    deleting: while one is held, nobody (this process included) can rename,
+    move or delete that folder -- or any folder above it, since Windows does
+    not rename a folder with an open handle inside it -- so it cannot be
+    swapped for a junction halfway through an operation. Files and folders
+    inside stay free to change. A no-op off Windows."""
+
+    def __init__(self):
+        self._held = {}                          # normcased path -> handle
+
+    def add(self, path):
+        """Hold path (a folder); raises OSError when it cannot be opened."""
+        key = os.path.normcase(os.path.abspath(path))
+        if sys.platform != "win32" or key in self._held:
+            return
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        # GENERIC_READ, not just attributes: Windows checks share modes only for
+        # handles with data access.
+        handle = kernel32.CreateFileW(os.path.abspath(path), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      None, OPEN_EXISTING,
+                                      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, None)
+        if handle is None or handle == _INVALID_HANDLE:
+            err = ctypes.get_last_error()
+            raise OSError(None, ctypes.FormatError(err).strip(), path, err)
+        self._held[key] = handle
+
+    def chain(self, root, path):
+        """Hold root and every folder from it down to path (path included)."""
+        self.add(root)
+        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+        if rel == os.curdir:
+            return
+        where = os.path.abspath(root)
+        for part in rel.split(os.sep):
+            where = os.path.join(where, part)
+            self.add(where)
+
+    def release(self, path):
+        """Let go of one folder (before it is renamed or recycled by this process)."""
+        handle = self._held.pop(os.path.normcase(os.path.abspath(path)), None)
+        if handle is not None:
+            ctypes.windll.kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+    def close(self):
+        for key in list(self._held):
+            self.release(key)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
 
 
 # ---- the Recycle Bin (Windows) ------------------------------------------------------

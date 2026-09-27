@@ -17,6 +17,8 @@ import hashlib
 import os
 from collections import OrderedDict
 
+from st25 import audio
+
 from . import folders
 from .devices import READY
 from .store import StoreReadOnly, StoreUnavailable
@@ -118,9 +120,16 @@ class LibraryOps:
             seen = self._library_root
         return seen is None or _root_identity(root) != seen
 
-    def _usable(self, root, path, allow_root=False):
+    def _usable(self, root, path, allow_root=False, pins=None):
         """None when path is still a folder inside the unchanged library folder,
-        else the _fail() saying why not. Checked right before acting."""
+        else the _fail() saying why not. With pins (folders.Pins), the library
+        folder and every folder down to path are held first, so that what is
+        checked here stays true until the operation lets go of them."""
+        if pins is not None:
+            try:
+                pins.chain(root, path)
+            except (OSError, ValueError):
+                return _fail(LIB_CHANGED)
         if self._root_moved(root):
             return _fail(ROOT_CHANGED)
         if not os.path.isdir(path) or not folders.inside(root, path, allow_root=allow_root):
@@ -221,8 +230,7 @@ class LibraryOps:
         """A fresh look at everything in a folder (never through a symlink or
         junction): counts, and the cached fingerprints of its recordings."""
         info = {"recordings": 0, "with_evps": 0, "unindexed": 0, "other_files": 0, "subfolders": 0,
-                "bytes": 0, "fps": set(), "dest_fps": set()}
-        dest = self._dest
+                "bytes": 0, "fps": set(), "pending": []}
         stack = [path]
         while stack:
             where = stack.pop()
@@ -254,37 +262,64 @@ class LibraryOps:
                 fp = cached.get("fp") if cached else None
                 if cached is None:
                     info["unindexed"] += 1
+                    info["pending"].append((e.path, kind, st.st_size, st.st_mtime_ns))
                 if fp:
                     info["fps"].add(fp)
-                    if dest and folders.under(e.path, dest):
-                        info["dest_fps"].add(fp)
                     r = self._store.recording(fp)
                     if r is not None and r["marks"]:
                         info["with_evps"] += 1
         return info
 
-    def _backups_in(self, path, walked):
+    def _backups_in(self, path, walked, fingerprint=False):
         """{fp: (its backup record, its backup files found in path)} for every
         recorder backup recorded as saved that deleting path would take: one of
-        the files it saved (recorded with the backup) is in path. A backup saved
-        before OpenEVP recorded those files falls back to its fingerprint: a
-        recording in path, inside the Save-to folder, with no copy left elsewhere
-        in the library. Files outside the Save-to folder never count then (they
-        are the user's own copies). walked: _walk(path)."""
+        the files it saved (recorded with the backup) is in path. A backup whose
+        files are not known -- saved before OpenEVP recorded them, or none of
+        them is where it was recorded -- falls back to its fingerprint: a
+        recording in path with no copy left elsewhere in the library (counting
+        one too many only offers a needless Retry backup). walked: _walk(path);
+        with fingerprint, its recordings not fingerprinted yet are fingerprinted
+        first when such a backup exists (None if the app closes meanwhile)."""
         if self._store is None:
             return {}
         found, legacy = {}, set()
         for fp, paths in self._store.saved_backups().items():
-            if not paths:
+            if not any(os.path.lexists(p) for p in paths):
                 legacy.add(fp)
                 continue
             there = [p for p in paths if folders.under(p, path) and os.path.lexists(p)]
             if there:
                 found[fp] = there
-        legacy &= walked["dest_fps"]
+        if legacy and fingerprint and walked["pending"]:
+            fps = self._fingerprint(walked["pending"])
+            if fps is None:
+                return None
+            walked["fps"] |= fps
+        legacy &= walked["fps"]
         legacy -= self._fps_outside(path, legacy)
         found.update((fp, []) for fp in legacy)
         return {fp: (self._store.backup_record(fp), there) for fp, there in found.items()}
+
+    def _fingerprint(self, pending):
+        """The fingerprints of recordings not in the index yet ([(path, kind,
+        size, mtime_ns)] from _walk), cached as the indexer would; None when the
+        app started closing meanwhile."""
+        decoder_problem = None
+        if any(kind == "dvf" for _, kind, _, _ in pending) and not audio.available():
+            decoder_problem = audio.status()
+        fps = set()
+        try:
+            for path, kind, size, mtime_ns in pending:
+                if self._stop.is_set():
+                    return None
+                row, _stored = self._index_file(path, kind, size, mtime_ns, self._stop.is_set, decoder_problem)
+                if row is None:                     # cancelled: the app is closing
+                    return None
+                if row.get("fp"):
+                    fps.add(row["fp"])
+        finally:
+            self._flush_index()
+        return fps
 
     def _fps_outside(self, folder, wanted):
         """Which of the fingerprints `wanted` have a copy in the library (latest
@@ -328,8 +363,9 @@ class LibraryOps:
         refused = self._fs_begin(pause=False)
         if refused:
             return refused
+        pins = folders.Pins()
         try:
-            refused = self._usable(root, parent, allow_root=True)
+            refused = self._usable(root, parent, allow_root=True, pins=pins)
             if refused:
                 return refused
             target = os.path.join(parent, name)
@@ -345,6 +381,7 @@ class LibraryOps:
                 return _fail(f"Could not create {name}: {_plain(e)}")
             return {"ok": True, "id": _folder_id(self._rel(root, target))}
         finally:
+            pins.close()
             self._fs_end()
 
     def rename_folder(self, folder_id, name):
@@ -368,8 +405,11 @@ class LibraryOps:
         refused = self._fs_begin()
         if refused:
             return refused
+        pins = folders.Pins()
         try:
-            refused = self._usable(root, old)
+            # Held down to its parent: the folder itself must stay free to be renamed.
+            refused = self._usable(root, os.path.dirname(os.path.abspath(old)), allow_root=True, pins=pins)
+            refused = refused or self._usable(root, old)
             if refused:
                 return refused
             parent, old_name = os.path.split(os.path.abspath(old))
@@ -395,6 +435,7 @@ class LibraryOps:
             self._flush_index()
             return {"ok": True, "id": _folder_id(self._rel(root, target))}
         finally:
+            pins.close()
             self._fs_end()
 
     @staticmethod
@@ -474,12 +515,15 @@ class LibraryOps:
         refused = self._fs_begin()
         if refused:
             return refused
+        pins = folders.Pins()
         try:
-            refused = self._usable(root, path)
+            refused = self._usable(root, path, pins=pins)
             if refused:
                 return refused
             name = os.path.basename(os.path.normpath(path))
-            candidates = self._backups_in(path, self._walk(path))
+            candidates = self._backups_in(path, self._walk(path), fingerprint=True)
+            if candidates is None:
+                return _fail(CLOSING)
             # The backups going with the folder show as not backed up (Retry
             # backup) -- recorded before anything is deleted: if that cannot be
             # saved, nothing is deleted.
@@ -491,6 +535,7 @@ class LibraryOps:
                     return _fail(f"{name} was not deleted: the recorder backups in it could not be "
                                  f"marked as not backed up ({e}).")
             error = None
+            pins.release(path)                      # the Recycle Bin moves it; its parents stay held
             try:
                 self._recycle(os.path.abspath(path))
             except folders.RecycleError as e:
@@ -506,6 +551,7 @@ class LibraryOps:
                 return {**_fail(error), "backups": len(lost)}
             return {"ok": True, "backups": len(lost)}
         finally:
+            pins.close()
             self._fs_end()
 
     def _backups_left(self, path, candidates):
@@ -553,10 +599,16 @@ class LibraryOps:
         refused = self._fs_begin()
         if refused:
             return refused
+        pins = folders.Pins()
         try:
-            refused = self._usable(root, target, allow_root=True)
+            refused = self._usable(root, target, allow_root=True, pins=pins)
             if refused:
                 return refused
+            for path in paths.values():             # the folders the files come from
+                try:
+                    pins.chain(root, os.path.dirname(os.path.abspath(path)))
+                except (OSError, ValueError):
+                    pass                            # gone: the file is reported below
             result = {"ok": True, "moved": 0, "skipped": 0, "renamed": [], "failed": [], "ids": {}}
             groups = OrderedDict()                  # stem -> [(file id, path)]
             here = os.path.normcase(os.path.abspath(target))
@@ -590,6 +642,7 @@ class LibraryOps:
                 result.update(_fail(summary))
             return result
         finally:
+            pins.close()
             self._fs_end()
 
     def _move_group(self, group, target, result):

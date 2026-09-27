@@ -67,6 +67,7 @@ NO_AUDIO = "This recording has no audio to mark."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
+EXPORT_SECOND_WINDOW = "Another OpenEVP window is open; export there."
 
 
 class _BackupRunning(Exception):
@@ -639,6 +640,8 @@ class Api(LibraryOps):
         sees it and waits for it before closing the store."""
         if self._store is None:
             return _fail(NO_MARKS)
+        if self._second_window():
+            return _fail(EXPORT_SECOND_WINDOW)
         entry = self._entry(rec)
         if entry is None:
             return _fail(RELOAD)
@@ -1226,9 +1229,16 @@ class Api(LibraryOps):
                     pass                        # used for this session; not remembered
         return picked
 
+    def _second_window(self):
+        """Another OpenEVP window holds the store: it may be renaming or deleting
+        the folders this one would write into, so this one does not export."""
+        return self._store is not None and self._store.read_only
+
     def export(self, device_id, items, fmt, dest, job):
         if self._stop.is_set():
             return _fail(CLOSING)
+        if self._second_window():
+            return _fail(EXPORT_SECOND_WINDOW)
         if fmt not in ("dvf", "wav"):
             return _fail(f"Unknown format {fmt!r}.")
         if fmt == "wav" and not audio.available():
