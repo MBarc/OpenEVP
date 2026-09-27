@@ -17,7 +17,7 @@ const S = { devices: [], device: null, folder: "A", folders: {}, caps: { wav: fa
                    // Folder view (see libraryGroups): the folder shown, by id and by its relative path
                    // parts (ids change when an ancestor is renamed; the path finds it again), or flat.
                    folders: [], folderById: new Map(), folderId: "root", folderRel: [], flat: false,
-                   folderEls: new Map(), selFolder: null, paused: false,
+                   folderEls: new Map(), selFolder: null, paused: false, pausedRetry: false,
                    selected: new Set(),                   // file ids of the recordings picked (checkboxes) for a move
                    shown: [],                             // the recording groups shown (select all)
                    op: false, renderHeld: false,          // a folder operation running; a redraw held back by a drag
@@ -330,7 +330,11 @@ async function loadLibrary() {
   for (const [event, p] of buffered) if (p.scan_id === L.scanId) libraryEvent(event, p);
   scheduleLibraryRender();
   // A newer scan started while this listing was on its way (listings racing each other).
-  if (buffered.some(([, p]) => p.scan_id > L.scanId)) loadLibrary();
+  if (buffered.some(([, p]) => p.scan_id > L.scanId)) { loadLibrary(); return; }
+  // A folder operation overlapped this listing, so the indexer was not started: once no
+  // operation of ours runs, list once more (never in a loop: only after an unpaused listing).
+  if (r.paused && !L.op && !L.pausedRetry) { L.pausedRetry = true; loadLibrary(); }
+  else if (!r.paused) L.pausedRetry = false;
 }
 
 // "library-row" / "-progress" / "-done". Events of an older listing are dropped; events that
@@ -1157,6 +1161,15 @@ async function libraryOp(what, call) {
 // After the dialog has closed: list again (and whatever follows), without holding the dialog open.
 function finishFolderOp(then) { setTimeout(() => { then().catch((e) => banner(String(e))); }, 0); }
 
+// A refused or failed operation still lists again: it paused the indexer, and part of it may be done.
+function relistAfterFailure() { finishFolderOp(loadLibrary); }
+
+// The Save-to folder follows a rename of the folder holding it (the backend already uses the new one).
+async function refreshDest() {
+  const d = await api().default_destination();
+  if (d && d !== S.dest) { S.dest = d; $("dest").textContent = d; }
+}
+
 // ---- the recording in the player, around an operation ----
 function heldLibraryFile() {                   // the library file in the player, or null
   if (!S.current || !S.playing || !S.playing.startsWith("lib|")) return null;
@@ -1218,7 +1231,7 @@ function newFolderDialog() {
     name: "", ok: "Create",
     run: async (name) => {
       const r = await libraryOp("Creating the folder…", () => api().create_folder(here.id, name));
-      if (!r.ok) return errorText(r);
+      if (!r.ok) { relistAfterFailure(); return errorText(r); }
       banner(`Created “${name.trim()}”.`, "ok");
       finishFolderOp(async () => { await loadLibrary(); selectFolderRow(r.id); });
       return null;
@@ -1236,13 +1249,15 @@ function renameFolderDialog() {
       if (touched) unloadPlayer();
       const r = await libraryOp("Renaming the folder…", () => api().rename_folder(d.id, name));
       if (!r.ok) {
-        if (touched) reloadHeld(held, held.id);        // still where it was
+        if (touched) await reloadHeld(held, held.id);  // still where it was
+        relistAfterFailure();
         return errorText(r);
       }
       const newName = name.trim(), oldRel = d.rel.slice(), newRel = [...oldRel.slice(0, -1), newName];
       banner(`Renamed “${d.name}” to “${newName}”.`, "ok");
       libraryFolderRenamed(oldRel, newRel);            // the folder shown keeps its place if it was inside
       finishFolderOp(async () => {
+        await refreshDest();
         await loadLibrary();
         selectFolderRow(r.id);
         if (touched) {
@@ -1259,7 +1274,7 @@ async function deleteFolderDialog() {
   const L = S.lib, d = L.folderById.get(L.selFolder);
   if (!d || d.id === "root" || L.op) return;
   const info = await libraryOp("Looking into the folder…", () => api().folder_info(d.id));
-  if (!info.ok) { showError(info); loadLibrary(); return; }
+  if (!info.ok) { showError(info); relistAfterFailure(); return; }
   const list = document.createElement("ul");
   const item = (text) => { const li = document.createElement("li"); li.textContent = text; list.appendChild(li); };
   let evps;
@@ -1349,8 +1364,7 @@ async function moveRecordings(ids, targetId) {
     parts.push(`Not moved: ${failed.map((x) => `${x.name} (${String(x.error).replace(/\.$/, "")})`).join(" · ")}.`);
   }
   banner(parts.join(" "), r.ok && !failed.length ? "ok" : "warn");
-  if (r.ok && !failed.length) L.selected.clear();
-  else for (const id of moved) L.selected.delete(id);
+  for (const id of (r.ok && !failed.length ? ids : moved)) L.selected.delete(id);
   // The playing highlight follows its file to the new id.
   const playingId = S.playing && S.playing.startsWith("lib|") ? S.playing.slice(4) : null;
   if (playingId && newIds[playingId]) S.playing = `lib|${newIds[playingId]}`;
@@ -1408,7 +1422,7 @@ function setupDragAndDrop() {
       e.preventDefault();
       const ids = S.drag.ids, to = el.folderId;
       endDrag();
-      moveRecordings(ids, to);
+      moveRecordings(ids, to).catch((err) => { banner(String(err)); loadLibrary(); });
     });
   }
   // Anything else dropped on the page (files from Explorer, say) is swallowed: the window must
@@ -1424,6 +1438,11 @@ function setupDragAndDrop() {
     e.preventDefault();
     endDrag();
   });
+  // No pointer goes down and the window is not focused again while a drag runs: if either
+  // happens with a drag still recorded, its dragend was missed. Clear it.
+  window.addEventListener("pointerdown", () => { if (S.drag) endDrag(); }, true);
+  window.addEventListener("mousedown", () => { if (S.drag) endDrag(); }, true);
+  window.addEventListener("focus", () => { if (S.drag) endDrag(); });
 }
 
 function setupFolderTools() {
