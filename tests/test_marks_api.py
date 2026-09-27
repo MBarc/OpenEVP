@@ -217,7 +217,10 @@ class MarksApiTests(unittest.TestCase):
         with open(os.path.join(folder, DVF_1), "rb") as f:
             self.assertEqual(f.read(), captured)
         self.assertEqual([m["note"] for m in wavinfo.read_markers(os.path.join(folder, WAV_1))], ["EVP A: hello"])
-        self.assertEqual(self.api.get_marks(rec)["backup"]["status"], "saved")
+        self.assertEqual(self.api.get_marks(rec)["backup"], {"status": "saved", "detail": p["detail"]})  # no paths
+        fp = self.api._entry(rec)["fp"]
+        self.assertEqual(sorted(self.store.backup_record(fp)["paths"]),       # remembered for deleting
+                         [os.path.join(os.path.abspath(folder), n) for n in (DVF_1, WAV_1)])
         self.assertTrue(self.api.add_mark(rec, 0.5, 0.7, "B", "")["ok"])   # a second mark: no second backup
         self.api.shutdown()
         self.assertEqual([e for e, _ in self.events if e.startswith("backup")], ["backup-done"])

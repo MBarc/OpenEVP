@@ -61,7 +61,11 @@ def _index_key(path):
 
 def _blank_recording():
     return {"marks": [], "reviewed": False, "name": "", "duration": None,
-            "imported": False, "backup": {"status": None, "detail": ""}}
+            "imported": False, "backup": _blank_backup()}
+
+
+def _blank_backup():
+    return {"status": None, "detail": "", "paths": []}
 
 
 def _clamp_duration(duration, marks):
@@ -227,10 +231,12 @@ def _clean_recording(rec):
         imported = False
     backup = rec.get("backup")
     if not isinstance(backup, dict) or backup.get("status") not in _BACKUP_STATUSES:
-        backup = {"status": None, "detail": ""}
+        backup = _blank_backup()
     else:
         detail = backup.get("detail", "")
-        backup = {"status": backup.get("status"), "detail": detail if isinstance(detail, str) else ""}
+        paths = backup.get("paths", [])        # absent before OpenEVP 0.8: no paths known
+        backup = {"status": backup.get("status"), "detail": detail if isinstance(detail, str) else "",
+                  "paths": [p for p in paths if isinstance(p, str) and p] if isinstance(paths, list) else []}
     cleaned_marks, dropped = [], 0
     for m in marks_in:
         cm = _clean_mark(m, duration)
@@ -486,7 +492,7 @@ class AppData:
                 "duration": rec["duration"],
                 "reviewed": rec["reviewed"],
                 "imported": rec["imported"],
-                "backup": dict(rec["backup"]),
+                "backup": {"status": rec["backup"]["status"], "detail": rec["backup"]["detail"]},
                 "marks": sorted((dict(m) for m in rec["marks"]), key=lambda m: m["start"]),
             }
 
@@ -628,21 +634,80 @@ class AppData:
             self._save_marks(new_data)
 
     def backup(self, fp):
+        """{"status", "detail"} of a recording's backup (its file paths: backup_record())."""
         with self._lock:
             rec = self._data["recordings"].get(fp)
-            return dict(rec["backup"]) if rec else {"status": None, "detail": ""}
+            return {"status": rec["backup"]["status"], "detail": rec["backup"]["detail"]} if rec                 else {"status": None, "detail": ""}
 
-    def set_backup(self, fp, status, detail=""):
+    def backup_record(self, fp):
+        """The whole backup record: {"status", "detail", "paths"} (the saved files)."""
+        with self._lock:
+            rec = self._data["recordings"].get(fp)
+            b = rec["backup"] if rec else _blank_backup()
+            return {"status": b["status"], "detail": b["detail"], "paths": list(b["paths"])}
+
+    def saved_backups(self):
+        """{fp: [paths of its saved backup files]} for every backup recorded as saved
+        (an empty list for one saved before the paths were recorded)."""
+        with self._lock:
+            return {fp: list(rec["backup"]["paths"]) for fp, rec in self._data["recordings"].items()
+                    if rec["backup"]["status"] == "saved"}
+
+    @staticmethod
+    def _checked_backup(status, detail, paths):
+        if status not in _BACKUP_STATUSES:
+            raise ValueError(f"Unknown backup status {status!r}.")
+        if not isinstance(detail, str):
+            raise ValueError("detail must be text.")
+        paths = list(paths or ())
+        if not all(isinstance(p, str) and p for p in paths):
+            raise ValueError("paths must be text.")
+        return {"status": status, "detail": detail, "paths": [os.path.abspath(p) for p in paths]}
+
+    def set_backup(self, fp, status, detail="", paths=()):
+        """Record a backup status; paths are the files a saved backup wrote (the .dvf
+        and its WAV copy), so that deleting them can be noticed."""
+        self.set_backups({fp: {"status": status, "detail": detail, "paths": paths}})
+
+    def set_backups(self, records):
+        """Several backup records ({fp: {"status", "detail", "paths"}}) in one write:
+        all of them are saved, or none."""
         with self._lock:
             self._require_writable()
-            if status not in _BACKUP_STATUSES:
-                raise ValueError(f"Unknown backup status {status!r}.")
-            if not isinstance(detail, str):
-                raise ValueError("detail must be text.")
+            checked = {fp: self._checked_backup(r.get("status"), r.get("detail", ""), r.get("paths"))
+                       for fp, r in records.items()}
+            if not checked:
+                return
             new_data = copy.deepcopy(self._data)
-            rec = new_data["recordings"].setdefault(fp, _blank_recording())
-            rec["backup"] = {"status": status, "detail": detail}
+            for fp, backup in checked.items():
+                new_data["recordings"].setdefault(fp, _blank_recording())["backup"] = backup
             self._save_marks(new_data)
+
+    def move_backup_paths(self, old, new):
+        """A file or folder moved from old to new: backup paths at or under old now
+        name the same place under new. Returns how many paths changed."""
+        with self._lock:
+            self._require_writable()
+            old_key, new_abs = _index_key(old), os.path.abspath(new)
+            under = old_key.rstrip(os.sep) + os.sep
+            new_data, changed = None, 0
+            for fp, rec in self._data["recordings"].items():
+                paths = rec["backup"]["paths"]
+                if not any(_index_key(p) == old_key or _index_key(p).startswith(under) for p in paths):
+                    continue
+                if new_data is None:
+                    new_data = copy.deepcopy(self._data)
+                moved = []
+                for p in paths:
+                    k = _index_key(p)
+                    if k == old_key or k.startswith(under):
+                        p = new_abs + os.path.abspath(p)[len(old_key):]
+                        changed += 1
+                    moved.append(p)
+                new_data["recordings"][fp]["backup"]["paths"] = moved
+            if new_data is not None:
+                self._save_marks(new_data)
+            return changed
 
     def summary(self):
         with self._lock:

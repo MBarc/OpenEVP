@@ -226,6 +226,47 @@ class StoreTests(unittest.TestCase):
                 store.set_backup("fp1", "bogus")
             store.close()
 
+    def test_backup_paths_are_kept_moved_and_reloaded(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            save = os.path.join(d, "Save")
+            dvf, wav = os.path.join(save, "A", "x.dvf"), os.path.join(save, "A", "x.wav")
+            store.set_backup("fp1", "saved", "Saved as x.dvf", [dvf, wav])
+            store.set_backup("fp2", "saved", "old style")                 # no paths known
+            store.set_backup("fp3", "failed", "no", [dvf])
+            self.assertEqual(store.backup("fp1"), {"status": "saved", "detail": "Saved as x.dvf"})
+            self.assertEqual(store.recording("fp1")["backup"], {"status": "saved", "detail": "Saved as x.dvf"})
+            self.assertEqual(store.backup_record("fp1")["paths"], [dvf, wav])
+            self.assertEqual(store.saved_backups(), {"fp1": [dvf, wav], "fp2": []})
+            moved = os.path.join(d, "Save 2")
+            self.assertEqual(store.move_backup_paths(save, moved), 3)      # fp3's path follows too
+            self.assertEqual(store.move_backup_paths(os.path.join(d, "elsewhere"), save), 0)
+            self.assertEqual(store.backup_record("fp1")["paths"],
+                             [os.path.join(moved, "A", "x.dvf"), os.path.join(moved, "A", "x.wav")])
+            with self.assertRaises(ValueError):
+                store.set_backups({"fp1": {"status": "saved", "detail": "", "paths": [5]}})
+            store.set_backups({"fp1": {"status": "failed", "detail": "gone"}, "fp2": {"status": "failed"}})
+            self.assertEqual(store.backup_record("fp1"), {"status": "failed", "detail": "gone", "paths": []})
+            store.close()
+            reloaded = AppData(d)
+            self.assertEqual(reloaded.backup_record("fp3")["paths"], [os.path.join(moved, "A", "x.dvf")])
+            reloaded.close()
+
+    def test_marks_file_without_backup_paths_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            data = {"version": 1, "recordings": {
+                "fp1": {"marks": [], "reviewed": False, "name": "", "duration": None, "imported": False,
+                        "backup": {"status": "saved", "detail": "Saved as x.dvf"}},
+                "fp2": {"marks": [], "reviewed": False, "name": "", "duration": None, "imported": False,
+                        "backup": {"status": "saved", "detail": "", "paths": "not a list"}}}}
+            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            store = AppData(d)
+            self.assertEqual(store.backup("fp1"), {"status": "saved", "detail": "Saved as x.dvf"})
+            self.assertEqual(store.saved_backups(), {"fp1": [], "fp2": []})
+            self.assertEqual(store.problems(), [])
+            store.close()
+
     def test_concurrency_smoke(self):
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)

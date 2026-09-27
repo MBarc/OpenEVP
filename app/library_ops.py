@@ -2,8 +2,10 @@
 the Recycle Bin only) and move recordings, always inside the library folder.
 
 Each operation holds the Api's _busy lock (no export, WAV with marks or update
-meanwhile), refuses while a backup is queued or written, and pauses the
-library indexer (_fs_op) before it touches a file. Everything that remembers a
+meanwhile), refuses while a backup is queued or written or when another
+OpenEVP window holds the store, refuses when the library folder itself now
+resolves elsewhere than at the last listing, and pauses the library indexer
+(_fs_op) before it touches a file. Everything that remembers a
 path -- the fingerprint cache, rec handles, files served in place -- is
 re-keyed to the new place, so marks follow and nothing is decoded again.
 
@@ -27,7 +29,12 @@ LIB_CHANGED = "The library changed. Refresh and try again."
 INDEXER_BUSY = "The library is busy checking a recording. Try again in a moment."
 PATH_TOO_LONG = "The folder path would be too long for Windows. Choose a shorter name."
 BACKUP_RECYCLED = "The backup was moved to the Recycle Bin."
+ROOT_CHANGED = "The library folder changed. Refresh and try again."
+SECOND_WINDOW = "Another OpenEVP window is open; organise folders there."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
+RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
+RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
+_SHARING = (5, 32, 33)      # ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
 
 
 def _plain(e):
@@ -75,6 +82,15 @@ def _folder_id(rel_parts):
                         .encode("utf-8", "surrogatepass")).hexdigest()[:16]
 
 
+def _root_identity(root):
+    """(where the library folder really is, is it itself a link) -- or None when
+    it cannot be resolved. Recorded by each listing, checked by each operation."""
+    try:
+        return os.path.normcase(os.path.realpath(root)), folders.is_link(root)
+    except (OSError, ValueError):
+        return None
+
+
 class LibraryOps:
     """Folder operations; mixed into app.backend.Api (uses its locks, store and caches)."""
 
@@ -93,14 +109,48 @@ class LibraryOps:
             return None
         return root, path
 
+    def _root_moved(self, root):
+        """Is the library folder no longer what the latest listing saw: does it
+        resolve somewhere else now, or has it become a symlink or junction? (A
+        library folder swapped for a junction would otherwise carry every
+        folder id to another place on disk.)"""
+        with self._lib_lock:
+            seen = self._library_root
+        return seen is None or _root_identity(root) != seen
+
+    def _usable(self, root, path, allow_root=False):
+        """None when path is still a folder inside the unchanged library folder,
+        else the _fail() saying why not. Checked right before acting."""
+        if self._root_moved(root):
+            return _fail(ROOT_CHANGED)
+        if not os.path.isdir(path) or not folders.inside(root, path, allow_root=allow_root):
+            return _fail(LIB_CHANGED)
+        return None
+
+    def _rename(self, src, dst):
+        """os.rename, tried again for about a second while a file is briefly in use
+        (an antivirus scan, the search indexer, a player letting go)."""
+        for attempt in range(RENAME_TRIES):
+            try:
+                return os.rename(src, dst)
+            except OSError as e:
+                if getattr(e, "winerror", None) not in _SHARING or attempt == RENAME_TRIES - 1:
+                    raise
+            self._stop.wait(RENAME_PAUSE)
+
     def _fs_begin(self, pause=True):
         """Start a folder operation: None, or the _fail() saying why not. Holds
         _busy until _fs_end(). With pause, the indexer is stopped between files
         first (and no new indexer job or backup starts until _fs_end())."""
         if self._stop.is_set():
             return _fail(CLOSING)
+        if self._store is not None and self._store.read_only:
+            # Another window holds the store: it could be exporting or backing up
+            # into these folders, and backup states could not be recorded here.
+            return _fail(SECOND_WINDOW)
         if not self._busy.acquire(blocking=False):
             return _fail(FS_BUSY)
+        self._fs_busy = True                # exporting() is not this
         indexer = None
         if pause:
             with self._lib_lock:
@@ -123,6 +173,7 @@ class LibraryOps:
             if self._fs_op:
                 self._fs_op = False
                 self._fs_gen += 1
+        self._fs_busy = False
         self._busy.release()
 
     def _retarget_prefix(self, old, new):
@@ -134,6 +185,10 @@ class LibraryOps:
         store = self._store
         copied = {}
         if store is not None:
+            try:
+                store.move_backup_paths(old, new)       # a backup moved is still a backup
+            except (StoreReadOnly, StoreUnavailable):
+                pass
             try:
                 store.move_index_prefix(old, new)
             except (StoreReadOnly, StoreUnavailable):
@@ -166,7 +221,8 @@ class LibraryOps:
         """A fresh look at everything in a folder (never through a symlink or
         junction): counts, and the cached fingerprints of its recordings."""
         info = {"recordings": 0, "with_evps": 0, "unindexed": 0, "other_files": 0, "subfolders": 0,
-                "bytes": 0, "fps": set()}
+                "bytes": 0, "fps": set(), "dest_fps": set()}
+        dest = self._dest
         stack = [path]
         while stack:
             where = stack.pop()
@@ -200,16 +256,35 @@ class LibraryOps:
                     info["unindexed"] += 1
                 if fp:
                     info["fps"].add(fp)
+                    if dest and folders.under(e.path, dest):
+                        info["dest_fps"].add(fp)
                     r = self._store.recording(fp)
                     if r is not None and r["marks"]:
                         info["with_evps"] += 1
         return info
 
-    def _saved_backups(self, fps):
-        """The fingerprints among fps whose recorder backup is recorded as saved."""
+    def _backups_in(self, path, walked):
+        """{fp: (its backup record, its backup files found in path)} for every
+        recorder backup recorded as saved that deleting path would take: one of
+        the files it saved (recorded with the backup) is in path. A backup saved
+        before OpenEVP recorded those files falls back to its fingerprint: a
+        recording in path, inside the Save-to folder, with no copy left elsewhere
+        in the library. Files outside the Save-to folder never count then (they
+        are the user's own copies). walked: _walk(path)."""
         if self._store is None:
-            return set()
-        return {fp for fp in fps if self._store.backup(fp)["status"] == "saved"}
+            return {}
+        found, legacy = {}, set()
+        for fp, paths in self._store.saved_backups().items():
+            if not paths:
+                legacy.add(fp)
+                continue
+            there = [p for p in paths if folders.under(p, path) and os.path.lexists(p)]
+            if there:
+                found[fp] = there
+        legacy &= walked["dest_fps"]
+        legacy -= self._fps_outside(path, legacy)
+        found.update((fp, []) for fp in legacy)
+        return {fp: (self._store.backup_record(fp), there) for fp, there in found.items()}
 
     def _fps_outside(self, folder, wanted):
         """Which of the fingerprints `wanted` have a copy in the library (latest
@@ -254,8 +329,9 @@ class LibraryOps:
         if refused:
             return refused
         try:
-            if not os.path.isdir(parent) or not folders.inside(root, parent, allow_root=True):
-                return _fail(LIB_CHANGED)
+            refused = self._usable(root, parent, allow_root=True)
+            if refused:
+                return refused
             target = os.path.join(parent, name)
             if folders.too_long(target):
                 return _fail(PATH_TOO_LONG)
@@ -293,8 +369,9 @@ class LibraryOps:
         if refused:
             return refused
         try:
-            if not os.path.isdir(old) or not folders.inside(root, old):
-                return _fail(LIB_CHANGED)
+            refused = self._usable(root, old)
+            if refused:
+                return refused
             parent, old_name = os.path.split(os.path.abspath(old))
             if name == old_name:
                 return {"ok": True, "id": folder_id}
@@ -305,7 +382,7 @@ class LibraryOps:
             if folders.name_taken(parent, name, ignore=old_name):
                 return _fail(f'There is already something named "{name}" here.')
             try:
-                os.rename(old, target)
+                self._rename(old, target)
             except FileExistsError:
                 return _fail(f'There is already something named "{name}" here.')
             except OSError as e:
@@ -357,7 +434,7 @@ class LibraryOps:
         """What deleting a folder would put in the Recycle Bin, counted fresh from
         disk: {"ok", "name", "recordings", "with_evps", "evps_at_least" (some
         recordings are not checked yet, so there may be more), "backups" (marked
-        recorder recordings whose only backup copy is in it), "other_files",
+        recorder recordings whose backup files are in it), "other_files",
         "subfolders", "bytes", "save_folder" (it is, or holds, the Save-to folder:
         the next export or backup creates that folder again)}."""
         try:
@@ -365,11 +442,11 @@ class LibraryOps:
             if found is None:
                 return _fail(LIB_CHANGED)
             root, path = found
-            if not os.path.isdir(path) or not folders.inside(root, path, allow_root=folder_id == "root"):
-                return _fail(LIB_CHANGED)
+            refused = self._usable(root, path, allow_root=folder_id == "root")
+            if refused:
+                return refused
             info = self._walk(path)
-            saved = self._saved_backups(info["fps"])
-            backups = len(saved - self._fps_outside(path, saved))
+            backups = len(self._backups_in(path, info))
             return {"ok": True, "name": os.path.basename(os.path.normpath(path)),
                     "recordings": info["recordings"], "with_evps": info["with_evps"],
                     "evps_at_least": info["unindexed"] > 0, "backups": backups,
@@ -398,33 +475,54 @@ class LibraryOps:
         if refused:
             return refused
         try:
-            if not os.path.isdir(path) or not folders.inside(root, path):
-                return _fail(LIB_CHANGED)
-            candidates = self._saved_backups(self._walk(path)["fps"])
+            refused = self._usable(root, path)
+            if refused:
+                return refused
+            name = os.path.basename(os.path.normpath(path))
+            candidates = self._backups_in(path, self._walk(path))
+            # The backups going with the folder show as not backed up (Retry
+            # backup) -- recorded before anything is deleted: if that cannot be
+            # saved, nothing is deleted.
+            if candidates:
+                try:
+                    self._store.set_backups({fp: {"status": "failed", "detail": BACKUP_RECYCLED}
+                                             for fp in candidates})
+                except (StoreReadOnly, StoreUnavailable, ValueError) as e:
+                    return _fail(f"{name} was not deleted: the recorder backups in it could not be "
+                                 f"marked as not backed up ({e}).")
             error = None
             try:
                 self._recycle(os.path.abspath(path))
             except folders.RecycleError as e:
                 error = str(e)
             except Exception as e:
-                error = f"{os.path.basename(path)} was not moved to the Recycle Bin: {_plain(e)}"
-            # Every backup with no copy left (in what remains of the folder, or
-            # elsewhere in the library) now shows as not backed up.
-            lost = set()
+                error = f"{name} was not moved to the Recycle Bin: {_plain(e)}"
+            lost = set(candidates)
             try:
-                left = self._walk(path)["fps"] if os.path.lexists(path) else set()
-                lost = candidates - left
-                lost -= self._fps_outside(path, lost)
-                for fp in sorted(lost):
-                    if self._store.backup(fp)["status"] == "saved":
-                        self._record_backup(fp, "failed", BACKUP_RECYCLED)
+                lost -= self._backups_left(path, candidates)
             except Exception:
-                pass                                # the folder's fate is what the result reports
+                pass                                # kept as not backed up: Retry backup is harmless
             if error:
                 return {**_fail(error), "backups": len(lost)}
             return {"ok": True, "backups": len(lost)}
         finally:
             self._fs_end()
+
+    def _backups_left(self, path, candidates):
+        """After a delete: the candidates (see _backups_in) whose backup is still
+        all there (a file in use, a cancelled delete), recorded as saved again."""
+        left_fps = self._walk(path)["fps"] if os.path.lexists(path) else set()
+        kept = {}
+        for fp, (record, there) in candidates.items():
+            if there:
+                still = all(os.path.lexists(p) for p in there)
+            else:
+                still = fp in left_fps or bool(self._fps_outside(path, {fp}))
+            if still:
+                kept[fp] = record
+        if kept:
+            self._store.set_backups(kept)
+        return set(kept)
 
     def move_files(self, file_ids, folder_id):
         """Move library files (by id) into a library folder. A name already taken
@@ -456,8 +554,9 @@ class LibraryOps:
         if refused:
             return refused
         try:
-            if not os.path.isdir(target) or not folders.inside(root, target, allow_root=True):
-                return _fail(LIB_CHANGED)
+            refused = self._usable(root, target, allow_root=True)
+            if refused:
+                return refused
             result = {"ok": True, "moved": 0, "skipped": 0, "renamed": [], "failed": [], "ids": {}}
             groups = OrderedDict()                  # stem -> [(file id, path)]
             here = os.path.normcase(os.path.abspath(target))
@@ -522,7 +621,7 @@ class LibraryOps:
                 try:
                     if os.path.lexists(dest):       # os.rename replaces a file outside Windows
                         raise FileExistsError(dest)
-                    os.rename(path, dest)
+                    self._rename(path, dest)
                 except FileExistsError:
                     taken.add(new_name.casefold())
                     continue

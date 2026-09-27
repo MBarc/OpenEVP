@@ -15,7 +15,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from test_library import WAIT, Events, FakeDecoder, FakeServer, dvf_bytes, wav_bytes  # noqa: E402
-from app import backend, folders  # noqa: E402
+from app import backend, folders, library_ops  # noqa: E402
+from app.store import StoreUnavailable  # noqa: E402
 from app.audio_server import AudioServer  # noqa: E402
 from app.store import AppData  # noqa: E402
 from st25 import wavinfo  # noqa: E402
@@ -338,15 +339,70 @@ class CreateRenameTests(FolderApiBase):
         self.assertEqual(api.default_destination(), moved)
         self.assertEqual(self.store.get_setting("save_folder"), moved)
 
-    def test_the_save_to_folder_follows_on_a_read_only_store(self):
-        os.makedirs(os.path.join(self.lib, "Old Mill"))
+    def test_a_second_window_organises_nothing(self):
+        self.write("Old Mill/y.wav", wav_bytes(b"y"))
         second = AppData(os.path.join(self.tmp, "appdata"))
         self.addCleanup(second.close)
+        self.assertTrue(second.read_only)
         api = self.new_api(store=second)
-        api._dest = os.path.join(self.lib, "Old Mill")
         r = api.list_library()
-        self.assertTrue(api.rename_folder(self.folder(r, "Old Mill"), "Mill 2")["ok"])
-        self.assertEqual(api.default_destination(), os.path.abspath(os.path.join(self.lib, "Mill 2")))
+        mill = self.folder(r, "Old Mill")
+        for res in (api.create_folder("root", "New"), api.rename_folder(mill, "Mill 2"),
+                    api.delete_folder(mill), api.move_files([self.file(r, "y.wav")], "root")):
+            self.assertEqual(res["error"], backend.SECOND_WINDOW)
+        self.assertEqual(self.names(), ["Old Mill"])
+        self.assertEqual(self.names("Old Mill"), ["y.wav"])
+        self.assertEqual(self.recycled, [])
+        self.assertFalse(api._busy.locked())
+        self.assertTrue(api.folder_info(mill)["ok"])                       # looking is fine
+
+    def test_a_briefly_locked_folder_is_renamed_after_a_retry(self):
+        os.makedirs(os.path.join(self.lib, "Old Mill"))
+        api = self.new_api()
+        r = api.list_library()
+        real, calls = os.rename, []
+
+        def rename(src, dst):
+            calls.append(src)
+            if len(calls) < 3:                                  # an antivirus scan holds it twice
+                e = PermissionError(13, "The process cannot access the file")
+                e.winerror = 32
+                raise e
+            return real(src, dst)
+        with mock.patch.object(backend.os, "rename", rename),                 mock.patch.object(library_ops, "RENAME_PAUSE", 0.01):
+            res = api.rename_folder(self.folder(r, "Old Mill"), "Mill 2")
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((len(calls), self.names()), (3, ["Mill 2"]))
+
+        def always(src, dst):
+            calls.append(src)
+            e = PermissionError(13, "The process cannot access the file", src)
+            e.winerror = 32
+            raise e
+        calls.clear()
+        r = api.list_library()
+        with mock.patch.object(backend.os, "rename", always),                 mock.patch.object(library_ops, "RENAME_PAUSE", 0.01):
+            res = api.rename_folder(self.folder(r, "Mill 2"), "Mill 3")
+        self.assertEqual(len(calls), library_ops.RENAME_TRIES)
+        self.assertIn("open in another program", res["error"])
+
+    def test_a_folder_operation_is_not_an_export(self):
+        api = self.new_api()
+        api.list_library()
+        seen = []
+        real = os.mkdir
+
+        def mkdir(path, *a, **kw):
+            seen.append(api.exporting())
+            return real(path, *a, **kw)
+        with mock.patch.object(backend.os, "mkdir", mkdir):
+            self.assertTrue(api.create_folder("root", "A")["ok"])
+        self.assertEqual(seen, [False])
+        api._busy.acquire()                                               # an export
+        try:
+            self.assertTrue(api.exporting())
+        finally:
+            api._busy.release()
 
     def test_rename_of_a_folder_that_escaped_is_refused(self):
         self.write("Old Mill/y.wav", wav_bytes(b"y"))
@@ -724,24 +780,23 @@ class MoveTests(FolderApiBase):
         self.assertEqual(flushed, [1])
         self.assertFalse(api._busy.locked())
 
-    def test_a_read_only_store_keeps_fingerprints_for_the_session(self):
-        self.write("x.dvf", dvf_bytes())
+    def test_a_briefly_locked_file_is_moved_after_a_retry(self):
+        self.write("a.wav", wav_bytes(b"a"))
         os.makedirs(os.path.join(self.lib, "T"))
-        fake = FakeDecoder()
-        with fake.installed():
-            self.index(self.new_api())                                     # the writing window indexed it
-            self.store.flush_index()
-            second = AppData(os.path.join(self.tmp, "appdata"))
-            self.addCleanup(second.close)
-            self.assertTrue(second.read_only)
-            api = self.new_api(store=second)
-            r = api.list_library()
-            self.assertEqual(r["pending"], 0)
-            res = api.move_files([self.file(r, "x.dvf")], self.folder(r, "T"))
-            self.assertEqual(res["moved"], 1, res)
-            r = api.list_library()
-        self.assertEqual((r["pending"], fake.calls), (0, 1))
-        self.assertTrue(r["files"][0]["fp"])
+        api = self.new_api()
+        r = api.list_library()
+        real, calls = os.rename, []
+
+        def rename(src, dst):
+            calls.append(src)
+            if len(calls) == 1:
+                e = PermissionError(13, "The process cannot access the file")
+                e.winerror = 33
+                raise e
+            return real(src, dst)
+        with mock.patch.object(backend.os, "rename", rename),                 mock.patch.object(library_ops, "RENAME_PAUSE", 0.01):
+            res = api.move_files([self.file(r, "a.wav")], self.folder(r, "T"))
+        self.assertEqual((res["ok"], res["moved"], res["failed"], len(calls)), (True, 1, [], 2))
 
     def test_a_loaded_recording_keeps_playing_after_its_folder_moves(self):
         cache = tempfile.TemporaryDirectory()
@@ -878,6 +933,164 @@ class RecycleBinSettingsTests(unittest.TestCase):
                          "Old Mill was not (completely) moved to the Recycle Bin: a file is in use, "
                          "or deleting was cancelled.")
         self.assertEqual(folders.RECYCLE_FLAGS & folders.FOF_WANTNUKEWARNING, folders.FOF_WANTNUKEWARNING)
+
+
+class RootAndWindowTests(FolderApiBase):
+    def test_a_redirected_library_folder_is_refused(self):
+        self.write("Old Mill/y.wav", wav_bytes(b"y"))
+        os.makedirs(os.path.join(self.tmp, "Outside", "Old Mill"))
+        api = self.new_api()
+        r = api.list_library()
+        mill, y = self.folder(r, "Old Mill"), self.file(r, "y.wav")
+        real = os.path.realpath
+        lib_key = os.path.normcase(os.path.abspath(self.lib))
+
+        def redirected(p, *a, **kw):                    # the library folder now resolves elsewhere
+            p = os.path.abspath(p)
+            key = os.path.normcase(p)
+            if key == lib_key or key.startswith(lib_key + os.sep):
+                return os.path.join(self.tmp, "Outside") + p[len(lib_key):]
+            return real(p, *a, **kw)
+
+        def calls():
+            return (api.create_folder("root", "New"), api.rename_folder(mill, "X"), api.delete_folder(mill),
+                    api.move_files([y], mill), api.folder_info(mill))
+        with mock.patch.object(os.path, "realpath", redirected):
+            for res in calls():
+                self.assertEqual(res["error"], backend.ROOT_CHANGED)
+        real_link = folders.is_link
+        with mock.patch.object(folders, "is_link",              # the library folder became a junction
+                               lambda p: os.path.normcase(os.path.abspath(p)) == lib_key or real_link(p)):
+            for res in calls():
+                self.assertEqual(res["error"], backend.ROOT_CHANGED)
+        self.assertEqual(self.recycled, [])
+        self.assertEqual(self.names(), ["Old Mill"])
+        self.assertEqual(os.listdir(os.path.join(self.tmp, "Outside", "Old Mill")), [])
+        api.list_library()                                      # listed again: fine again
+        self.assertTrue(api.create_folder("root", "New")["ok"])
+
+    def test_a_library_folder_that_was_a_link_already_is_accepted(self):
+        os.makedirs(os.path.join(self.lib, "A"))
+        lib_key = os.path.normcase(os.path.abspath(self.lib))
+        real_link = folders.is_link
+        with mock.patch.object(folders, "is_link",
+                               lambda p: os.path.normcase(os.path.abspath(p)) == lib_key or real_link(p)):
+            api = self.new_api()
+            r = api.list_library()
+            self.assertTrue(api.rename_folder(self.folder(r, "A"), "B")["ok"])
+
+    def test_delete_is_refused_when_backup_states_cannot_be_saved(self):
+        path = self.write("A/x.dvf", dvf_bytes())
+        api = self.new_api()
+        r = api.list_library()
+        self.store.set_backup("fp1", "saved", "Saved as x.dvf", [path])
+        with mock.patch.object(self.store, "set_backups", side_effect=StoreUnavailable("disk full")):
+            res = api.delete_folder(self.folder(r, "A"))
+        self.assertFalse(res["ok"])
+        self.assertIn("not deleted", res["error"])
+        self.assertIn("disk full", res["error"])
+        self.assertEqual((self.recycled, self.names("A")), ([], ["x.dvf"]))
+        self.assertEqual(self.store.backup("fp1")["status"], "saved")
+        self.assertFalse(api._busy.locked())
+
+    def test_backup_states_are_saved_before_the_folder_goes(self):
+        path = self.write("A/x.dvf", dvf_bytes())
+        api = self.new_api()
+        r = api.list_library()
+        self.store.set_backup("fp1", "saved", "Saved as x.dvf", [path])
+        seen = []
+        api._recycle = lambda p: (seen.append(self.store.backup("fp1")["status"]), self.fake_recycle(p))
+        self.assertEqual(api.delete_folder(self.folder(r, "A")), {"ok": True, "backups": 1})
+        self.assertEqual(seen, ["failed"])
+
+
+class BackupIdentityTests(FolderApiBase):
+    """Backups are known by the files they saved (recorded with the backup)."""
+
+    def backup(self, fp, *rels):
+        paths = [os.path.join(self.lib, *rel.split("/")) for rel in rels]
+        self.store.set_backup(fp, "saved", "Saved", paths)
+
+    def test_an_unindexed_backup_is_counted_and_invalidated(self):
+        self.write("Save/A/x.dvf", dvf_bytes())
+        self.write("Save/A/x.wav", wav_bytes(b"x"))
+        api = self.new_api()
+        r = api.list_library()                                   # nothing fingerprinted yet
+        self.backup("fpX", "Save/A/x.dvf", "Save/A/x.wav")
+        self.store.add_mark("fpX", 0.1, 0.5, "A", "")
+        self.assertEqual(api.folder_info(self.folder(r, "Save"))["backups"], 1)
+        self.assertEqual(api.folder_info(self.folder(r, "Save", "A"))["backups"], 1)
+        self.assertEqual(api.delete_folder(self.folder(r, "Save")), {"ok": True, "backups": 1})
+        self.assertEqual(self.store.backup_record("fpX"),
+                         {"status": "failed", "detail": backend.BACKUP_RECYCLED, "paths": []})
+
+    def test_a_copy_elsewhere_does_not_save_the_backup_and_other_files_are_not_backups(self):
+        self.write("Save/A/x.wav", wav_bytes(b"x"))
+        self.write("Mine/x.wav", wav_bytes(b"x"))                 # the user's own copy, same recording
+        self.write("Mine/y.wav", wav_bytes(b"y"))
+        api = self.new_api()
+        r = self.index(api)
+        fps = {f["name"]: f["fp"] for f in r["files"]}
+        self.backup(fps["x.wav"], "Save/A/x.wav")
+        self.backup(fps["y.wav"], "Save/A/y.wav")               # its backup file is not there any more
+        self.assertEqual(api.folder_info(self.folder(r, "Mine"))["backups"], 0)
+        self.assertEqual(api.delete_folder(self.folder(r, "Mine")), {"ok": True, "backups": 0})
+        self.assertEqual(self.store.backup(fps["x.wav"])["status"], "saved")
+        r = api.list_library()
+        self.assertEqual(api.delete_folder(self.folder(r, "Save")), {"ok": True, "backups": 1})
+        self.assertEqual(self.store.backup(fps["x.wav"])["status"], "failed")
+        self.assertEqual(self.store.backup(fps["y.wav"])["status"], "saved")
+
+    def test_old_backups_without_paths_count_only_inside_the_save_to_folder(self):
+        self.write("Save/A/x.wav", wav_bytes(b"x"))
+        self.write("Mine/y.wav", wav_bytes(b"y"))
+        api = self.new_api()
+        api._dest = os.path.join(self.lib, "Save")
+        r = self.index(api)
+        fps = {f["name"]: f["fp"] for f in r["files"]}
+        for fp in fps.values():
+            self.store.set_backup(fp, "saved", "Saved")          # saved by an older OpenEVP: no paths
+        self.assertEqual(api.folder_info(self.folder(r, "Mine"))["backups"], 0)
+        self.assertEqual(api.delete_folder(self.folder(r, "Mine")), {"ok": True, "backups": 0})
+        self.assertEqual(self.store.backup(fps["y.wav"])["status"], "saved")
+        r = api.list_library()
+        self.assertEqual(api.delete_folder(self.folder(r, "Save")), {"ok": True, "backups": 1})
+        self.assertEqual(self.store.backup(fps["x.wav"])["status"], "failed")
+
+    def test_moved_and_renamed_backups_are_followed(self):
+        self.write("Save/A/x.dvf", dvf_bytes())
+        os.makedirs(os.path.join(self.lib, "T"))
+        api = self.new_api()
+        r = api.list_library()
+        self.backup("fpX", "Save/A/x.dvf")
+        self.assertTrue(api.rename_folder(self.folder(r, "Save"), "Save 2")["ok"])
+        self.assertEqual(self.store.backup_record("fpX")["paths"],
+                         [os.path.join(os.path.abspath(self.lib), "Save 2", "A", "x.dvf")])
+        r = api.list_library()
+        self.assertEqual(api.move_files([self.file(r, "x.dvf")], self.folder(r, "T"))["moved"], 1)
+        self.assertEqual(self.store.backup_record("fpX")["paths"],
+                         [os.path.join(os.path.abspath(self.lib), "T", "x.dvf")])
+        r = api.list_library()
+        self.assertEqual(api.folder_info(self.folder(r, "Save 2"))["backups"], 0)
+        self.assertEqual(api.folder_info(self.folder(r, "T"))["backups"], 1)
+
+    def test_a_backup_left_behind_is_saved_again(self):
+        self.write("Save/A/gone.dvf", dvf_bytes(1))
+        locked = self.write("Save/B/locked.dvf", dvf_bytes(2))
+        api = self.new_api()
+        r = api.list_library()
+        self.backup("fpGone", "Save/A/gone.dvf")
+        self.backup("fpLocked", "Save/B/locked.dvf")
+
+        def shell(path):                                        # a file in use stays behind
+            shutil.rmtree(os.path.join(path, "A"))
+            raise folders.RecycleError(folders.IN_USE.format("Save"))
+        api._recycle = shell
+        res = api.delete_folder(self.folder(r, "Save"))
+        self.assertEqual((res["ok"], res["backups"]), (False, 1))
+        self.assertEqual(self.store.backup_record("fpGone")["status"], "failed")
+        self.assertEqual(self.store.backup_record("fpLocked"),
+                         {"status": "saved", "detail": "Saved", "paths": [os.path.abspath(locked)]})
 
 
 @unittest.skipUnless(WINDOWS, "hidden and system attributes are Windows-only")

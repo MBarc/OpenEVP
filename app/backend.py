@@ -52,7 +52,7 @@ from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
                           _file_id, _folder_id, _plain)
 from .library_ops import (BACKUP_RECYCLED, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
-                          PATH_TOO_LONG)
+                          PATH_TOO_LONG, ROOT_CHANGED, SECOND_WINDOW, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
 REPLUG = "Unplug the recorder's USB cable, wait a few seconds and plug it back in."
@@ -284,6 +284,8 @@ class Api(LibraryOps):
         self._recycle = recycle or folders.recycle   # (path) -> None or raises folders.RecycleError
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
+        self._fs_busy = False                 # a folder operation holds _busy (not an export)
+        self._library_root = None             # _root_identity() of the library folder at the last listing
         if store is not None:
             saved = store.get_setting("save_folder")
             if isinstance(saved, str) and saved and os.path.isdir(saved):
@@ -577,29 +579,32 @@ class Api(LibraryOps):
             return
         name = os.path.basename(path)
         detail = f"{name} was already saved" if already else f"Saved as {name}"
+        paths = [path]                                # remembered: deleting them undoes the backup
         if audio.available():
             wav_name = os.path.splitext(dvf_name)[0] + ".wav"
             try:
                 if wav is None:
                     wav = audio.dvf_to_wav(data, should_stop=self._stop.is_set)
                 wav_path, _ = save_wav(wavinfo.with_markers(wav, self._store.marks(fp)), outdir, wav_name)
+                paths.append(wav_path)
                 detail += f", with a WAV copy ({os.path.basename(wav_path)})"
             except audio.Cancelled:
                 detail += ", but the WAV copy was not made because the app is closing"
             except Exception as e:
                 detail += f", but the WAV copy failed: {_plain(e)}"
-        self._backup_result(fp, rec, entry, "saved", detail + ".")
+        self._backup_result(fp, rec, entry, "saved", detail + ".", paths)
 
-    def _record_backup(self, fp, status, detail):
-        """Record a backup status; returns detail, extended if it could not be recorded."""
+    def _record_backup(self, fp, status, detail, paths=()):
+        """Record a backup status (with the files a saved backup wrote); returns
+        detail, extended if it could not be recorded."""
         try:
-            self._store.set_backup(fp, status, detail)
+            self._store.set_backup(fp, status, detail, paths)
         except (StoreReadOnly, StoreUnavailable, ValueError) as e:
             detail += f" (This could not be recorded: {e})"
         return detail
 
-    def _backup_result(self, fp, rec, entry, status, detail):
-        detail = self._record_backup(fp, status, detail)
+    def _backup_result(self, fp, rec, entry, status, detail, paths=()):
+        detail = self._record_backup(fp, status, detail, paths)
         self._emit("backup-done" if status == "saved" else "backup-failed",
                    {"rec": rec, "label": entry["source"]["label"], "detail": detail})
 
@@ -865,8 +870,10 @@ class Api(LibraryOps):
                 if scan_id == self._scan_id:
                     self._library = {}
                     self._library_folders = {}
+                    self._library_root = None
                     self._lib_job = None
             return result
+        root_identity = _root_identity(folder)  # before the walk: what the folder ids point into
         found, subfolders, truncated, complete = _scan_library(folder)
         store = self._store
         summary = store.summary() if store is not None else {}
@@ -920,6 +927,7 @@ class Api(LibraryOps):
                 return result
             self._library = table
             self._library_folders = folder_table
+            self._library_root = root_identity
             self._lib_job = None
             if not pending or self._stop.is_set():
                 return result
@@ -1252,7 +1260,7 @@ class Api(LibraryOps):
 
     def exporting(self):
         """True while an export of recorder recordings runs (export_marked(): saving_marked())."""
-        return self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_op
+        return self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
 
     def stopping(self):
         """True once the app is closing: long decodes poll this to stop early."""
