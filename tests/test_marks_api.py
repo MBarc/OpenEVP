@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
-from app.store import AppData  # noqa: E402
+from app.store import AppData, _acquire_lock  # noqa: E402
 from openevp import wavinfo  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
 from st25.session import RecorderSession  # noqa: E402
@@ -185,8 +185,98 @@ class MarksApiTests(unittest.TestCase):
         rec = api.audio(ID, "A", 1)["rec"]
         r = api.add_mark(rec, 0.1, 0.4, "A", "")
         self.assertFalse(r["ok"])
-        self.assertIn("Another OpenEVP window is open", r["error"])
+        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", r["error"])
         self.assertTrue(api.get_marks(rec)["ok"])                  # reading still works
+
+    def test_read_only_reason_and_store_writable_event(self):
+        second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=0.05)   # the first holds the lock
+        self.addCleanup(second.close)
+        api = self.new_api(store=second)
+        caps = api.capabilities()
+        self.assertTrue(caps["marks_read_only"])
+        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", caps["marks_read_only_reason"])
+        self.assertIn(caps["marks_read_only_reason"], caps["store_problems"])
+        self.assertIsNone(self.api.capabilities()["marks_read_only_reason"])
+        got = threading.Event()
+        emit = self.emit
+
+        def watching(event, payload):
+            emit(event, payload)
+            if event == "store-writable":
+                got.set()
+        api._emit = watching
+        api.watch_store()
+        self.store.close()                                         # the other window closes
+        self.assertTrue(got.wait(5), "no store-writable event")
+        caps = api.capabilities()
+        self.assertEqual((caps["marks_read_only"], caps["marks_read_only_reason"], caps["store_problems"]),
+                         (False, None, []))
+        rec = api.audio(ID, "A", 1)["rec"]
+        self.assertTrue(api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
+        thread = second._retry_thread
+        api.shutdown()
+        self.assertFalse(thread.is_alive())
+
+    def test_store_writable_applies_the_remembered_save_folder(self):
+        remembered = os.path.join(self.tmp, "remembered")
+        picked = os.path.join(self.tmp, "picked")
+        os.makedirs(remembered)
+        os.makedirs(picked)
+        results = {}
+        for choose in (False, True):
+            first = AppData(os.path.join(self.tmp, f"appdata-{choose}"))
+            second = AppData(os.path.join(self.tmp, f"appdata-{choose}"), retry_interval=0.05)
+            self.addCleanup(second.close)
+            self.addCleanup(first.close)
+            got = threading.Event()
+            api = self.new_api(store=second, pick_folder=lambda start: picked)
+            real = api._emit
+            api._emit = lambda e, p: (real(e, p), got.set() if e == "store-writable" else None)
+            if choose:
+                self.assertEqual(api.choose_destination(), picked)   # not remembered: read-only
+            api.watch_store()
+            first.set_setting("save_folder", remembered)             # the other window's choice
+            first.close()
+            self.assertTrue(got.wait(5), "no store-writable event")
+            results[choose] = api.default_destination()
+        self.assertEqual(results, {False: remembered, True: picked})
+
+    def test_a_pick_made_while_recovery_checks_the_folder_stays(self):
+        remembered = os.path.join(self.tmp, "remembered")
+        picked = os.path.join(self.tmp, "picked")
+        os.makedirs(remembered)
+        os.makedirs(picked)
+        first = AppData(os.path.join(self.tmp, "appdata-race"))
+        first.set_setting("save_folder", remembered)
+        second = AppData(os.path.join(self.tmp, "appdata-race"), retry_interval=60)
+        self.addCleanup(second.close)
+        first.close()
+        api = self.new_api(store=second, pick_folder=lambda start: picked)
+        real_isdir, raced, busy = os.path.isdir, [], []
+
+        def isdir(path):
+            # The user picks a folder just as recovery has looked at the remembered one.
+            if path == remembered and not busy:
+                busy.append(1)
+                raced.append(api.choose_destination())
+            return real_isdir(path)
+        second._lock_file, second.read_only = _acquire_lock(second._lock_path)[0], False   # recovered
+        with mock.patch.object(backend.os.path, "isdir", side_effect=isdir):
+            api._store_writable()
+        self.assertEqual(raced, [picked])
+        self.assertEqual(api.default_destination(), picked)
+        self.assertEqual(second.get_setting("save_folder"), picked)   # and it is remembered now
+
+    def test_shutdown_joins_the_store_retry(self):
+        second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=60)
+        self.addCleanup(second.close)
+        api = self.new_api(store=second)
+        api.watch_store()
+        thread = second._retry_thread
+        self.assertTrue(thread.is_alive())
+        api.shutdown()
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("store-writable", [e for e, _p in self.events])
 
     def test_capabilities_report_store_problems(self):
         caps = self.api.capabilities()

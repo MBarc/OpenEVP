@@ -58,7 +58,7 @@ from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
                           _decoder_problem, _decoder_problems, _file_id, _folder_id, _kind_format, _plain)
 from .library_ops import (BACKUP_RECYCLED, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
-                          PATH_TOO_LONG, ROOT_CHANGED, SECOND_WINDOW, _root_identity)
+                          PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
 REPLUG = "Unplug the recorder's USB cable, wait a few seconds and plug it back in."
@@ -73,7 +73,6 @@ NO_AUDIO = "This recording has no audio to mark."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
-EXPORT_SECOND_WINDOW = "Another OpenEVP window is open; export there."
 
 
 class _BackupRunning(Exception):
@@ -324,6 +323,8 @@ class Api(LibraryOps):
         self._emit = emit
         self._pick = pick_folder             # (start_dir) -> path or None (a folder dialog)
         self._dest = default_dest             # the current save folder (changed with choose_destination)
+        self._dest_chosen = False             # the user picked a Save-to folder in this session
+        self._dest_lock = threading.Lock()    # _dest_chosen and the _dest it decides, together
         self._server = audio_server
         self._driver_setup = driver_setup     # () -> (exit_code, log); see app/driver_setup.py
         self._pick_wav = pick_wav             # (start_dir) -> path or None (a file dialog)
@@ -393,7 +394,29 @@ class Api(LibraryOps):
         return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
                 "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
+                "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else [])}
+
+    def watch_store(self):
+        """While the store is read-only (another OpenEVP holds it, or its lock file
+        could not be opened), keep trying for it in the background; once this
+        instance can write, the page hears "store-writable" and asks capabilities()
+        again. The store's close() (at the end of shutdown()) stops and joins it."""
+        if self._store is not None:
+            self._store.watch_lock(self._store_writable)
+
+    def _store_writable(self):
+        """The store just became writable and reloaded its settings: the remembered
+        Save-to folder applies now, unless one was picked in this session (that
+        choice could not be saved while read-only, and it stays)."""
+        if self._stop.is_set():
+            return
+        saved = self._store.get_setting("save_folder")
+        if isinstance(saved, str) and saved and os.path.isdir(saved):   # no lock held over disk access
+            with self._dest_lock:
+                if not self._dest_chosen:         # checked here: a pick made meanwhile stays
+                    self._dest = saved
+        self._emit("store-writable", {})
 
     def devices(self):
         """{"ok", "devices": [{"id", "model_id", "model", "port", "state", "message",
@@ -822,8 +845,9 @@ class Api(LibraryOps):
         sees it and waits for it before closing the store."""
         if self._store is None:
             return _fail(NO_MARKS)
-        if self._second_window():
-            return _fail(EXPORT_SECOND_WINDOW)
+        read_only = self._second_window()
+        if read_only:
+            return _fail(read_only)
         entry = self._entry(rec)
         if entry is None:
             return _fail(RELOAD)
@@ -1419,7 +1443,9 @@ class Api(LibraryOps):
         except Exception:                       # the dialog failed; keep the current folder
             return None
         if picked:
-            self._dest = picked
+            with self._dest_lock:
+                self._dest = picked
+                self._dest_chosen = True
             if self._store is not None:
                 try:
                     self._store.set_setting("save_folder", picked)
@@ -1428,15 +1454,17 @@ class Api(LibraryOps):
         return picked
 
     def _second_window(self):
-        """Another OpenEVP window holds the store: it may be renaming or deleting
-        the folders this one would write into, so this one does not export."""
-        return self._store is not None and self._store.read_only
+        """Why this window does not export (the store's read-only reason), or None.
+        Another OpenEVP holding the store may be renaming or deleting the folders
+        this one would write into."""
+        return self._store_read_only()
 
     def export(self, device_id, items, fmt, dest, job):
         if self._stop.is_set():
             return _fail(CLOSING)
-        if self._second_window():
-            return _fail(EXPORT_SECOND_WINDOW)
+        read_only = self._second_window()
+        if read_only:
+            return _fail(read_only)
         try:
             model = self._listing(device_id)["model"]
         except Exception as e:

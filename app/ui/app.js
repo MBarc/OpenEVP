@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
+            capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
@@ -58,9 +59,34 @@ function showError(r) { banner([r.error, r.advice].filter(Boolean).join(" ")); }
 // capabilities().wav_status (why WAV conversion is off, or a slow-mode warning) as a sentence.
 function wavStatus() { return sentence(S.caps.wav_status); }
 
+// capabilities() again. Answers can arrive out of order (the startup call and a
+// "store-writable" one): an older answer never replaces a newer one already applied.
+async function loadCaps() {
+  const gen = ++S.capsAsked;
+  const caps = await api().capabilities();
+  if (gen > S.capsApplied) { S.caps = caps; S.capsApplied = gen; }
+  return S.caps;
+}
+
+// default_destination() again, numbered the same way: startup's answer never replaces
+// the one a "store-writable" (or a folder rename) asked for after it.
+async function loadDest() {
+  const gen = ++S.destAsked;
+  const d = await api().default_destination();
+  if (gen > S.destApplied && d) {
+    S.dest = d; S.destApplied = gen;
+    if (S.started) $("dest").textContent = d;
+  }
+  return S.dest;
+}
+
+// The user picked a Save-to folder: it outranks every answer still on its way.
+function setDest(d) { S.dest = d; S.destApplied = ++S.destAsked; $("dest").textContent = d; }
+
 window.addEventListener("pywebviewready", async () => {
-  S.caps = await api().capabilities();
-  S.dest = await api().default_destination();
+  await loadCaps();
+  await loadDest();
+  S.started = true;                          // from here on, storeWritable() redraws what this draws
   $("dest").textContent = S.dest;
   $("version").textContent = `v${S.caps.version}`;
   $("about-version").textContent = `v${S.caps.version}`;
@@ -828,7 +854,7 @@ function renderLibraryBar() {
   $("library-rename").disabled = $("library-delete").disabled = !canChangeFolder(L.selFolder);
   $("library-move").disabled = !canMove([...L.selected]);
   const n = pickedRecordings();
-  $("library-tools").title = S.caps.marks_read_only ? "Another OpenEVP window is open; organise folders there." : "";
+  $("library-tools").title = S.caps.marks_read_only ? readOnlyTip() : "";
   $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
 }
@@ -1077,6 +1103,12 @@ function syncLibraryMarks(fp, marks, reviewed) {
 // unmarked .dvf was loaded), the player fetches the marks again: the backend is the truth.
 function checkPlayerMarks(sum) {
   if (!S.current || sameSummary(sum, marksSummary(S.marks, $("reviewed").checked))) return;
+  reloadCurrentMarks();
+}
+
+// Ask the backend for the loaded recording's marks again (see reloadPlayerMarks).
+function reloadCurrentMarks() {
+  if (!S.current) return;
   const rec = S.current.rec, st = S.reloads.get(rec) || { wanted: 0, running: false };
   S.reloads.set(rec, st);
   st.wanted++;
@@ -1284,8 +1316,7 @@ function relistAfterFailure() { finishFolderOp(loadLibrary); }
 
 // The Save-to folder follows a rename of the folder holding it (the backend already uses the new one).
 async function refreshDest() {
-  const d = await api().default_destination();
-  if (d && d !== S.dest) { S.dest = d; $("dest").textContent = d; }
+  await loadDest();
 }
 
 // ---- the recording in the player, around an operation ----
@@ -1810,7 +1841,7 @@ function updateExport() {
 
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
-  if (d) { S.dest = d; $("dest").textContent = d; loadLibrary(); }   // the library may be the save folder
+  if (d) { setDest(d); loadLibrary(); }   // the library may be the save folder
 };
 
 $("export").onclick = async () => {
@@ -1829,6 +1860,7 @@ window.onBackendEvent = (event, p) => {
     return;
   }
   if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
+  if (event === "store-writable") { storeWritable(); return; }                                     // nor this
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (p.job !== S.job) return;
   if (event === "export-progress") {
@@ -1972,12 +2004,14 @@ async function play(device, folder, number, label) {
 // ---- EVP marks: a selection saved as an EVP (class A/B/C + note), kept per recording ----
 const MARK_COLORS = { A: "rgba(220, 60, 60, .30)", B: "rgba(230, 150, 30, .30)", C: "rgba(70, 130, 220, .30)" };
 const MIN_MARK = 0.05;                        // seconds; the backend refuses shorter marks
-const READ_ONLY_TIP = "Another OpenEVP window is open; marks can only be changed there.";
+const READ_ONLY_TIP = "Marks can't be changed right now.";   // only if the backend gave no reason
 const NO_MARKS_TIP = "Marks are not available here.";
 
 function isMark(r) { return r.id.startsWith("mark-"); }
 function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
-function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? READ_ONLY_TIP : ""; }
+// Why the store is read-only, in the backend's words (another OpenEVP, or its lock file could not be opened).
+function readOnlyTip() { return S.caps.marks_read_only_reason || READ_ONLY_TIP; }
+function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? readOnlyTip() : ""; }
 function showing(rec) { return !!S.current && S.current.rec === rec; }   // is this handle's recording still in the player?
 function backupEventsSeen(rec) { return S.backupEvents.get(rec) || 0; }
 function isPoint(m) { return m.end <= m.start; }        // imported point markers: no length to drag
@@ -1986,11 +2020,39 @@ function typingIn(el) {
          (el.tagName === "INPUT" && !/^(checkbox|radio|range|button)$/.test(el.type));
 }
 
-function setupMarks() {
+// The player's mark tools: enabled, or disabled with why (their own tooltip otherwise).
+function renderMarkTools() {
   $("reviewed-label").hidden = !S.caps.marks;
   $("reviewed").disabled = $("mark-evp").disabled = !marksWritable();
-  $("reviewed-label").title = marksTip() || $("reviewed-label").title;
-  $("mark-evp").title = marksTip() || $("mark-evp").title;
+  for (const id of ["reviewed-label", "mark-evp"]) {
+    const el = $(id);
+    if (el.dataset.tip === undefined) el.dataset.tip = el.title;
+    el.title = marksTip() || el.dataset.tip;
+  }
+}
+
+// The store became writable (the other OpenEVP closed, or its lock file opens now): the
+// backend reloaded marks from disk, so the tools come back and the marks are read again.
+async function storeWritable() {
+  await loadCaps();                           // before startup is done, startup draws with these
+  await loadDest();                           // the remembered Save-to folder applies now
+  if (!S.started || S.caps.marks_read_only) return;
+  renderMarkTools();
+  renderLibraryBar();
+  if (S.current) {
+    closeMarkForm();
+    for (const region of S.markRegions.values()) region.remove();   // redrawn draggable
+    S.markRegions.clear();
+    if (S.ws.getDuration()) for (const m of S.marks) addMarkRegion(m);
+    renderMarks();
+    reloadCurrentMarks();
+  }
+  loadLibrary();
+  banner("OpenEVP's data can be changed again: marks and folders are back.", "ok");
+}
+
+function setupMarks() {
+  renderMarkTools();
   $("mark-evp").onclick = () => openMarkForm(null);
   $("mark-save").onclick = saveMarkForm;
   $("mark-cancel").onclick = closeMarkForm;

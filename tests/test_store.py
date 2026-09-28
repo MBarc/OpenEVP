@@ -1,14 +1,18 @@
 import json
 import multiprocessing
 import os
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from app.store import AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _release_lock  # noqa: E402
+from app import store as store_module  # noqa: E402
+from app.store import (AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _process_created,  # noqa: E402
+                       _release_lock)
 
 
 def _mp_probe_read_only(folder, queue):
@@ -17,6 +21,21 @@ def _mp_probe_read_only(folder, queue):
     store = AppData(folder)
     queue.put(store.read_only)
     store.close()
+
+
+def _mp_hold_lock(folder, ready, release):
+    """Run in a child process: hold the folder's store until told to let go."""
+    store = AppData(folder)
+    ready.put((os.getpid(), store.read_only))
+    release.wait(30)
+    store.close()
+
+
+def _dead_pid():
+    """The process id of a process that has already exited."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
 
 
 class StoreTests(unittest.TestCase):
@@ -513,7 +532,7 @@ class StoreTests(unittest.TestCase):
 
             self.assertEqual(store.marks("fp1"), before)     # memory unchanged
             leftovers = [n for n in os.listdir(d)
-                         if n not in ("marks.json", "settings.json", "index.json", ".lock")]
+                         if n not in ("marks.json", "settings.json", "index.json", ".lock", ".lock.owner")]
             self.assertEqual(leftovers, [])                  # no leftover temp file
             store.close()
 
@@ -555,7 +574,260 @@ class StoreTests(unittest.TestCase):
                 store.close()
 
 
+class StoreLockTests(unittest.TestCase):
+    """Why a store is read-only, waiting for the lock, and getting it later."""
+
+    def test_lock_file_that_cannot_be_opened_says_so(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, ".lock"))                  # can't be opened as a file
+            store = AppData(d)
+            try:
+                self.assertTrue(store.read_only)
+                reason = store.read_only_reason
+                self.assertTrue(reason.startswith("OpenEVP couldn't open its data lock file (.lock, "), reason)
+                self.assertTrue(reason.endswith("marks can't be saved right now."), reason)
+                self.assertNotIn(d, reason)                     # the file's name, never its path
+                self.assertNotIn("Another OpenEVP", reason)
+                self.assertEqual(store.problems()[0], reason)
+                with self.assertRaises(StoreReadOnly) as cm:
+                    store.add_mark("fp1", 1.0, 2.0, "A", "")
+                self.assertEqual(str(cm.exception), reason)
+            finally:
+                store.close()
+
+    def test_held_by_a_live_openevp_names_its_process(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            second = AppData(d)
+            try:
+                with open(os.path.join(d, ".lock.owner"), encoding="utf-8") as f:
+                    pid, exe, created = f.read().split()
+                self.assertEqual((pid, exe), (str(os.getpid()), os.path.basename(sys.executable)))
+                self.assertEqual(int(created), _process_created(os.getpid()))
+                self.assertTrue(second.read_only)
+                self.assertEqual(second.read_only_reason,
+                                 f"Another OpenEVP (process {os.getpid()}) is open; marks can only be changed "
+                                 "there. If you don't see its window, it may still be closing.")
+                self.assertIsNone(first.read_only_reason)
+                self.assertEqual(first.problems(), [])
+            finally:
+                second.close()
+                first.close()
+            self.assertFalse(os.path.exists(os.path.join(d, ".lock.owner")))   # the holder removes it
+
+    def test_held_by_a_dead_or_foreign_owner_says_another_program(self):
+        other = "OpenEVP couldn't lock its data (held by another program), so marks can't be saved right now."
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            owner = os.path.join(d, ".lock.owner")
+            try:
+                exe = os.path.basename(sys.executable)
+                created = _process_created(os.getpid())
+                for text in (f"{_dead_pid()}\n{exe}\n",                                    # its process is gone
+                             f"{os.getpid()}\nnotepad.exe\n",                           # not the program recorded
+                             f"{os.getpid()}\n{exe}\n{created + 1}\n",                 # a reused process id
+                             "garbage", None):                                           # unreadable, missing
+                    if text is None:
+                        os.remove(owner)
+                    else:
+                        with open(owner, "w", encoding="utf-8") as f:
+                            f.write(text)
+                    second = AppData(d)
+                    try:
+                        self.assertTrue(second.read_only)
+                        self.assertEqual(second.read_only_reason, other, text)
+                    finally:
+                        second.close()
+            finally:
+                first.close()
+
+    def test_owner_file_without_a_creation_time_is_still_believed(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            try:
+                with open(os.path.join(d, ".lock.owner"), "w", encoding="utf-8") as f:
+                    f.write(f"{os.getpid()}\n{os.path.basename(sys.executable)}\n")   # the older format
+                second = AppData(d)
+                try:
+                    self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", second.read_only_reason)
+                finally:
+                    second.close()
+            finally:
+                first.close()
+
+    def test_a_creation_time_that_cannot_be_read_is_not_trusted(self):
+        other = "OpenEVP couldn't lock its data (held by another program), so marks can't be saved right now."
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            try:
+                real = store_module._process_info
+                with mock.patch.object(store_module, "_process_info",
+                                       side_effect=lambda pid: (real(pid)[0], None)):
+                    second = AppData(d)                         # the owner file records a creation time
+                    try:
+                        self.assertEqual(second.read_only_reason, other)
+                    finally:
+                        second.close()
+                    with open(os.path.join(d, ".lock.owner"), "w", encoding="utf-8") as f:
+                        f.write(f"{os.getpid()}\n{os.path.basename(sys.executable)}\n")   # the older format
+                    second = AppData(d)
+                    try:
+                        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", second.read_only_reason)
+                    finally:
+                        second.close()
+            finally:
+                first.close()
+
+    def test_a_blocking_callback_never_holds_up_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            second = AppData(d, retry_interval=0.05)
+            entered, forever = threading.Event(), threading.Event()
+            self.addCleanup(forever.set)                        # lets the stuck callback end after the test
+
+            def stuck():
+                entered.set()
+                forever.wait()                                  # like evaluate_js on a closing window
+            second.watch_lock(stuck)
+            first.close()
+            self.assertTrue(entered.wait(5), "callback never ran")
+            self.assertFalse(second.read_only)
+            t0 = time.monotonic()
+            second.close()
+            self.assertLess(time.monotonic() - t0, 2)
+            self.assertFalse(second._retry_thread.is_alive())
+            third = AppData(d)                                  # the lock was let go
+            try:
+                self.assertFalse(third.read_only)
+            finally:
+                third.close()
+
+    def test_startup_waits_for_a_closing_holder(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            timer = threading.Timer(0.4, first.close)
+            timer.start()
+            t0 = time.monotonic()
+            try:
+                second = AppData(d, lock_wait=5.0, lock_poll=0.05)
+            finally:
+                timer.join()
+            try:
+                self.assertFalse(second.read_only)
+                self.assertLess(time.monotonic() - t0, 4.0)
+                second.add_mark("fp1", 1.0, 2.0, "A", "")
+            finally:
+                second.close()
+
+    def test_startup_gives_up_after_the_wait(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            t0 = time.monotonic()
+            second = AppData(d, lock_wait=0.3, lock_poll=0.05)
+            try:
+                self.assertTrue(second.read_only)
+                self.assertGreaterEqual(time.monotonic() - t0, 0.2)
+            finally:
+                second.close()
+                first.close()
+
+    def test_background_retry_becomes_writable_and_reloads(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            second = AppData(d, retry_interval=0.05)
+            got = threading.Event()
+            try:
+                self.assertTrue(second.read_only)
+                second.watch_lock(got.set)
+                time.sleep(0.2)
+                self.assertTrue(second.read_only)               # still held: still read-only
+                self.assertFalse(got.is_set())
+                mark = first.add_mark("fp1", 1.0, 2.0, "B", "written by the other one")
+                first.set_setting("save_folder", "X:\\evp")
+                first.remember_fp(os.path.join(d, "a.wav"), 1, 2, "fpa", 3.0)
+                first.close()                                   # flushes the index, lets go
+                self.assertTrue(got.wait(5), "never became writable")
+                self.assertFalse(second.read_only)
+                self.assertIsNone(second.read_only_reason)
+                self.assertEqual(second.problems(), [])
+                self.assertEqual([m["id"] for m in second.marks("fp1")], [mark["id"]])
+                self.assertEqual(second.get_setting("save_folder"), "X:\\evp")
+                self.assertEqual(second.cached_fp(os.path.join(d, "a.wav"), 1, 2)["fp"], "fpa")
+                second.add_mark("fp1", 3.0, 4.0, "A", "")        # writable now
+                with open(os.path.join(d, ".lock.owner"), encoding="utf-8") as f:
+                    self.assertEqual(f.read().split()[0], str(os.getpid()))
+            finally:
+                second.close()
+            self.assertFalse(second._retry_thread.is_alive())
+            reopened = AppData(d)
+            self.assertEqual(len(reopened.marks("fp1")), 2)     # nothing the other one wrote was lost
+            reopened.close()
+
+    def test_background_retry_after_the_lock_file_opens_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, ".lock"))
+            store = AppData(d, retry_interval=0.05)
+            got = threading.Event()
+            try:
+                store.watch_lock(got.set)
+                time.sleep(0.15)
+                self.assertTrue(store.read_only)
+                os.rmdir(os.path.join(d, ".lock"))
+                self.assertTrue(got.wait(5))
+                self.assertFalse(store.read_only)
+                store.add_mark("fp1", 1.0, 2.0, "A", "")
+            finally:
+                store.close()
+
+    def test_close_stops_and_joins_the_retry(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            second = AppData(d, retry_interval=60)
+            calls = []
+            second.watch_lock(lambda: calls.append(1))
+            thread = second._retry_thread
+            self.assertTrue(thread.is_alive())
+            t0 = time.monotonic()
+            second.close()
+            self.assertLess(time.monotonic() - t0, 5)
+            self.assertFalse(thread.is_alive())
+            first.close()
+            self.assertEqual(calls, [])
+            self.assertTrue(second.read_only)                   # a closed store never takes the lock
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)                                  # writable: nothing to watch
+            store.watch_lock()
+            self.assertIsNone(store._retry_thread)
+            store.close()
+
+
 class StoreMultiprocessTests(unittest.TestCase):
+    def test_held_by_another_process_names_it_until_it_closes(self):
+        with tempfile.TemporaryDirectory() as d:
+            ctx = multiprocessing.get_context("spawn")
+            ready, release = ctx.Queue(), ctx.Event()
+            p = ctx.Process(target=_mp_hold_lock, args=(d, ready, release))
+            p.start()
+            try:
+                pid, child_read_only = ready.get(timeout=30)
+                self.assertFalse(child_read_only)
+                store = AppData(d, retry_interval=0.05)
+                got = threading.Event()
+                try:
+                    self.assertTrue(store.read_only)
+                    self.assertIn(f"Another OpenEVP (process {pid}) is open", store.read_only_reason)
+                    store.watch_lock(got.set)
+                    release.set()
+                    self.assertTrue(got.wait(15), "never became writable")
+                    self.assertFalse(store.read_only)
+                finally:
+                    store.close()
+            finally:
+                release.set()
+                p.join(timeout=15)
+                ready.close()
+                ready.join_thread()
+
     def test_second_process_on_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)
