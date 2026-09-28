@@ -217,6 +217,30 @@ class MarksApiTests(unittest.TestCase):
         api.shutdown()
         self.assertFalse(thread.is_alive())
 
+    def test_store_writable_applies_the_remembered_save_folder(self):
+        remembered = os.path.join(self.tmp, "remembered")
+        picked = os.path.join(self.tmp, "picked")
+        os.makedirs(remembered)
+        os.makedirs(picked)
+        results = {}
+        for choose in (False, True):
+            first = AppData(os.path.join(self.tmp, f"appdata-{choose}"))
+            second = AppData(os.path.join(self.tmp, f"appdata-{choose}"), retry_interval=0.05)
+            self.addCleanup(second.close)
+            self.addCleanup(first.close)
+            got = threading.Event()
+            api = self.new_api(store=second, pick_folder=lambda start: picked)
+            real = api._emit
+            api._emit = lambda e, p: (real(e, p), got.set() if e == "store-writable" else None)
+            if choose:
+                self.assertEqual(api.choose_destination(), picked)   # not remembered: read-only
+            api.watch_store()
+            first.set_setting("save_folder", remembered)             # the other window's choice
+            first.close()
+            self.assertTrue(got.wait(5), "no store-writable event")
+            results[choose] = api.default_destination()
+        self.assertEqual(results, {False: remembered, True: picked})
+
     def test_shutdown_joins_the_store_retry(self):
         second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=60)
         self.addCleanup(second.close)

@@ -35,7 +35,6 @@ BACKUP_RECYCLED = "The backup was moved to the Recycle Bin."
 BACKUP_UNCHECKED = ("The backup could not be checked before a library folder was deleted "
                     "(it may have been in it); back it up again.")
 ROOT_CHANGED = "The library folder changed. Refresh and try again."
-SECOND_WINDOW = "Another OpenEVP window is open; organise folders there."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
@@ -177,16 +176,22 @@ class LibraryOps:
                     raise
             self._stop.wait(RENAME_PAUSE)
 
+    def _store_read_only(self):
+        """Why the store is read-only, in its own words (another OpenEVP holds it, or
+        its lock file could not be opened), or None: writable, or no store at all."""
+        return self._store.read_only_reason if self._store is not None else None
+
     def _fs_begin(self, pause=True):
         """Start a folder operation: None, or the _fail() saying why not. Holds
         _busy until _fs_end(). With pause, the indexer is stopped between files
         first (and no new indexer job or backup starts until _fs_end())."""
         if self._stop.is_set():
             return _fail(CLOSING)
-        if self._store is not None and self._store.read_only:
+        read_only = self._store_read_only()
+        if read_only:
             # Another window holds the store: it could be exporting or backing up
             # into these folders, and backup states could not be recorded here.
-            return _fail(SECOND_WINDOW)
+            return _fail(read_only)
         if not self._busy.acquire(blocking=False):
             return _fail(FS_BUSY)
         self._fs_busy = True                # exporting() is not this

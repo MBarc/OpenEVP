@@ -2022,6 +2022,7 @@ async function storeWritable() {
     renderMarks();
     reloadCurrentMarks();
   }
+  await refreshDest();                        // the remembered Save-to folder applies now
   loadLibrary();
   banner("OpenEVP's data can be changed again: marks and folders are back.", "ok");
 }

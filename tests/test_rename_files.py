@@ -385,7 +385,7 @@ class RenameFilesTests(FolderApiBase):
         self.assertTrue(second.read_only)
         api = self.new_api(store=second)
         r = api.list_library()
-        self.assertEqual(api.rename_files([self.file(r, "y.wav")], "z")["error"], backend.SECOND_WINDOW)
+        self.assertEqual(api.rename_files([self.file(r, "y.wav")], "z")["error"], second.read_only_reason)
         self.assertEqual(self.names(), ["y.wav"])
         self.assertFalse(api._busy.locked())
 

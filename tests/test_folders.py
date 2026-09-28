@@ -380,7 +380,8 @@ class CreateRenameTests(FolderApiBase):
         mill = self.folder(r, "Old Mill")
         for res in (api.create_folder("root", "New"), api.rename_folder(mill, "Mill 2"),
                     api.delete_folder(mill), api.move_files([self.file(r, "y.wav")], "root")):
-            self.assertEqual(res["error"], backend.SECOND_WINDOW)
+            self.assertEqual(res["error"], second.read_only_reason)
+            self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", res["error"])
         self.assertEqual(self.names(), ["Old Mill"])
         self.assertEqual(self.names("Old Mill"), ["y.wav"])
         self.assertEqual(self.recycled, [])
@@ -1143,10 +1144,25 @@ class SecondWindowExportTests(FolderApiBase):
         api = self.new_api(store=second)
         with mock.patch.object(backend.threading, "Thread", side_effect=AssertionError("never")):
             res = api.export("dev", [{"folder": "A", "number": 1}], "dvf", self.lib, "job")
-        self.assertEqual(res["error"], backend.EXPORT_SECOND_WINDOW)
-        self.assertEqual(api.export_marked("rec")["error"], backend.EXPORT_SECOND_WINDOW)
+        self.assertEqual(res["error"], second.read_only_reason)
+        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", res["error"])
+        self.assertEqual(api.export_marked("rec")["error"], second.read_only_reason)
         self.assertFalse(api._busy.locked())
-        self.assertEqual(backend.EXPORT_SECOND_WINDOW, "Another OpenEVP window is open; export there.")
+
+    def test_an_unopenable_lock_file_is_said_as_it_is(self):
+        folder = os.path.join(self.tmp, "appdata2")
+        os.makedirs(os.path.join(folder, ".lock"))               # can't be opened as a file
+        store = AppData(folder)
+        self.addCleanup(store.close)
+        api = self.new_api(store=store)
+        reason = store.read_only_reason
+        self.assertTrue(reason.startswith("OpenEVP couldn't open its data lock file"), reason)
+        with mock.patch.object(backend.threading, "Thread", side_effect=AssertionError("never")):
+            self.assertEqual(api.export("dev", [{"folder": "A", "number": 1}], "dvf", self.lib, "job")["error"], reason)
+        self.assertEqual(api.export_marked("rec")["error"], reason)
+        api.list_library()
+        self.assertEqual(api.create_folder("root", "New")["error"], reason)
+        self.assertNotIn("Another OpenEVP", reason)
 
 
 class BackupIdentityTests(FolderApiBase):
