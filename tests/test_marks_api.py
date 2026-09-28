@@ -185,8 +185,48 @@ class MarksApiTests(unittest.TestCase):
         rec = api.audio(ID, "A", 1)["rec"]
         r = api.add_mark(rec, 0.1, 0.4, "A", "")
         self.assertFalse(r["ok"])
-        self.assertIn("Another OpenEVP window is open", r["error"])
+        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", r["error"])
         self.assertTrue(api.get_marks(rec)["ok"])                  # reading still works
+
+    def test_read_only_reason_and_store_writable_event(self):
+        second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=0.05)   # the first holds the lock
+        self.addCleanup(second.close)
+        api = self.new_api(store=second)
+        caps = api.capabilities()
+        self.assertTrue(caps["marks_read_only"])
+        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", caps["marks_read_only_reason"])
+        self.assertIn(caps["marks_read_only_reason"], caps["store_problems"])
+        self.assertIsNone(self.api.capabilities()["marks_read_only_reason"])
+        got = threading.Event()
+        emit = self.emit
+
+        def watching(event, payload):
+            emit(event, payload)
+            if event == "store-writable":
+                got.set()
+        api._emit = watching
+        api.watch_store()
+        self.store.close()                                         # the other window closes
+        self.assertTrue(got.wait(5), "no store-writable event")
+        caps = api.capabilities()
+        self.assertEqual((caps["marks_read_only"], caps["marks_read_only_reason"], caps["store_problems"]),
+                         (False, None, []))
+        rec = api.audio(ID, "A", 1)["rec"]
+        self.assertTrue(api.add_mark(rec, 0.1, 0.4, "A", "")["ok"])
+        thread = second._retry_thread
+        api.shutdown()
+        self.assertFalse(thread.is_alive())
+
+    def test_shutdown_joins_the_store_retry(self):
+        second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=60)
+        self.addCleanup(second.close)
+        api = self.new_api(store=second)
+        api.watch_store()
+        thread = second._retry_thread
+        self.assertTrue(thread.is_alive())
+        api.shutdown()
+        self.assertFalse(thread.is_alive())
+        self.assertNotIn("store-writable", [e for e, _p in self.events])
 
     def test_capabilities_report_store_problems(self):
         caps = self.api.capabilities()

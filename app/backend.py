@@ -393,7 +393,20 @@ class Api(LibraryOps):
         return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
                 "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
+                "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else [])}
+
+    def watch_store(self):
+        """While the store is read-only (another OpenEVP holds it, or its lock file
+        could not be opened), keep trying for it in the background; once this
+        instance can write, the page hears "store-writable" and asks capabilities()
+        again. The store's close() (at the end of shutdown()) stops and joins it."""
+        if self._store is not None:
+            self._store.watch_lock(self._store_writable)
+
+    def _store_writable(self):
+        if not self._stop.is_set():
+            self._emit("store-writable", {})
 
     def devices(self):
         """{"ok", "devices": [{"id", "model_id", "model", "port", "state", "message",

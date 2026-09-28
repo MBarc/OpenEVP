@@ -291,7 +291,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
 
   // A second OpenEVP window (read-only store) can look but not change folders.
   vm.runInContext(`S.caps.marks_read_only = true; renderLibraryBar();`, context);
-  assert.ok($("library-new").disabled && /Another OpenEVP window/.test($("library-tools").title));
+  assert.ok($("library-new").disabled && /can't be changed right now/.test($("library-tools").title));
   rightClick(folderRow("f1").cells[1]);
   assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
   press("Escape");
@@ -504,5 +504,30 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.view = "device";`, context);
   e = rightClick($("empty"));
   assert.ok(!e.defaultPrevented && menu.hidden);
+
+  // A read-only store: the mark and folder tools say the backend's own reason, and
+  // "store-writable" (the store could be locked after all) brings them back without a restart.
+  const caps = api.capabilities;
+  const reason = "Another OpenEVP (process 42) is open; marks can only be changed there. If you don't see its window, it may still be closing.";
+  const markTip = $("mark-evp").title;
+  api.capabilities = async () => ({ ...(await caps()), marks_read_only: true, marks_read_only_reason: reason });
+  vm.runInContext(`S.caps = { ...S.caps, marks_read_only: true, marks_read_only_reason: ${JSON.stringify(reason)} };
+                   renderMarkTools(); renderLibraryBar();`, context);
+  assert.ok($("mark-evp").disabled && $("reviewed").disabled);
+  assert.strictEqual($("mark-evp").title, reason);
+  assert.strictEqual($("reviewed-label").title, reason);
+  assert.strictEqual($("library-tools").title, reason);
+  assert.ok(!/Another OpenEVP window is open/.test(vm.runInContext("marksTip()", context)));
+  window.onBackendEvent("store-writable", {});                     // still read-only when asked: nothing changes
+  await settle();
+  assert.ok($("mark-evp").disabled && $("mark-evp").title === reason);
+  api.capabilities = caps;
+  window.onBackendEvent("store-writable", {});
+  await settle();
+  assert.ok(!$("mark-evp").disabled && !$("reviewed").disabled);
+  assert.strictEqual($("mark-evp").title, markTip);
+  assert.strictEqual($("library-tools").title, "");
+  assert.ok(vm.runInContext("marksWritable() && marksTip() === ''", context));
+  assert.match($("banner-text").textContent, /can be changed again/);
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

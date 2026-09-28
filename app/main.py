@@ -98,13 +98,18 @@ def _hand_over(running):
         raise updater.UpdateError("another OpenEVP window is open; close it, then update")
 
 
+STORE_LOCK_WAIT = 5.0      # seconds _open_store() keeps trying for the store's lock
+
+
 def _open_store():
     """(AppData or None, [problem]): the app's own data folder (%APPDATA%\\OpenEVP).
     If it cannot be created or opened the app still runs, without EVP marks, and
     says why: no store failure may stop the app from starting."""
     base = os.environ.get("APPDATA") or os.path.expanduser("~")
     try:
-        return AppData(os.path.join(base, "OpenEVP")), []
+        # A previous OpenEVP may still be closing (window gone, workers finishing):
+        # wait a few seconds for its lock rather than opening read-only.
+        return AppData(os.path.join(base, "OpenEVP"), lock_wait=STORE_LOCK_WAIT), []
     except OSError as e:
         return None, [f"EVP marks are off: OpenEVP could not create its data folder ({e.strerror or e})."]
     except Exception as e:
@@ -332,6 +337,7 @@ def _run_app(smoke=None):
                   can_install=frozen and sys.platform == "win32",
                   before_install=lambda: _hand_over(running), store=store, store_problems=store_problems,
                   recycle=lambda path: folders.recycle(path, owner=_window_handle(window)))
+        api.watch_store()                               # read-only: keep trying for the store's lock
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
         window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,

@@ -7,11 +7,16 @@ aside rather than overwritten, so a bad write or an interrupted process never
 loses the rest of the store.
 
 Only one ``AppData`` may write to a folder at a time: the constructor takes an
-exclusive lock on ``<folder>/.lock`` for the life of the object. A second
-instance on the same folder (another window, or another process) opens
-read-only: reads still work, writes raise ``StoreReadOnly``.
+exclusive lock on ``<folder>/.lock`` for the life of the object (trying for up
+to ``lock_wait`` seconds, so a previous OpenEVP that is still closing does not
+make this one read-only) and records who holds it in ``.lock.owner`` (process
+id and program name, plain text). An instance that cannot get the lock opens
+read-only -- reads still work, writes raise ``StoreReadOnly`` with the reason
+(``read_only_reason``) -- and ``watch_lock()`` keeps trying in the background:
+once it gets the lock it reloads everything from disk and becomes writable.
 """
 import copy
+import ctypes
 import datetime
 import json
 import math
@@ -20,6 +25,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import uuid
 
 _WINDOWS = sys.platform.startswith("win")
@@ -38,7 +44,8 @@ _LABEL_RE = re.compile(r"^EVP ([ABC])(?::\s?(.*))?$")   # "EVP A: note" or bare 
 
 
 class StoreReadOnly(Exception):
-    """A write was attempted on a read-only store (another window holds the lock)."""
+    """A write was attempted on a read-only store (another instance holds the lock,
+    or the lock file could not be opened)."""
 
 
 class StoreUnavailable(Exception):
@@ -252,16 +259,102 @@ def _clean_recording(rec):
 
 # ---- the per-folder lock ----------------------------------------------------------
 
-def _acquire_lock(path):
-    """Try to take the exclusive lock. Returns (file_or_None, locked: bool)."""
+def _owner_path(lock_path):
+    return lock_path + ".owner"
+
+
+def _exe_name():
+    """This program's file name (OpenEVP.exe when installed, python.exe from source)."""
+    return os.path.basename(sys.executable or "") or "python"
+
+
+def _write_owner(lock_path):
+    """Record who holds the lock, for a second instance to say who it is."""
+    try:
+        with open(_owner_path(lock_path), "w", encoding="utf-8") as f:
+            f.write(f"{os.getpid()}\n{_exe_name()}\n")
+    except OSError:
+        pass                            # only words the second instance's message
+
+
+def _read_owner(lock_path):
+    """(pid, program name) from .lock.owner, or None if it is missing or unreadable."""
+    try:
+        with open(_owner_path(lock_path), encoding="utf-8") as f:
+            lines = f.read(4096).splitlines()
+        pid = int(lines[0].strip())
+    except (OSError, ValueError, IndexError):
+        return None
+    exe = lines[1].strip() if len(lines) > 1 else ""
+    return (pid, exe) if pid > 0 else None
+
+
+def _process_image(pid):
+    """The file name of the program running as `pid`, or None if no such process
+    is running (or it cannot be looked at)."""
+    if _WINDOWS:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+        k32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
+                                                   ctypes.POINTER(ctypes.c_uint32)]
+        h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+        if not h:
+            return None
+        try:
+            code = ctypes.c_uint32()
+            if not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value != 259:   # STILL_ACTIVE
+                return None
+            buf = ctypes.create_unicode_buffer(32768)
+            size = ctypes.c_uint32(len(buf))
+            if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                return None
+            return os.path.basename(buf.value)
+        finally:
+            k32.CloseHandle(h)
+    try:
+        os.kill(pid, 0)
+        return os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        return None
+
+
+def _open_problem(error):
+    reason = getattr(error, "strerror", None) or type(error).__name__
+    return (f"OpenEVP couldn't open its data lock file (.lock, {reason}) \u2014 "
+            "marks can't be saved right now.")
+
+
+def _held_problem(lock_path):
+    """Why the lock is held: by another OpenEVP (its recorded process is still
+    running, under the program name it recorded), or by something else."""
+    owner = _read_owner(lock_path)
+    if owner is not None:
+        pid, exe = owner
+        image = _process_image(pid)
+        if image and exe and image.casefold() == exe.casefold():
+            return (f"Another OpenEVP (process {pid}) is open; marks can only be changed there. "
+                    "If you don't see its window, it may still be closing.")
+    return "OpenEVP couldn't lock its data (held by another program), so marks can't be saved right now."
+
+
+def _take_lock(path):
+    """Try once to take the exclusive lock. Returns (file, None) when taken (and
+    .lock.owner written), else (None, why: a plain sentence for the user)."""
     try:
         f = open(path, "a+b")
+    except OSError as e:
+        return None, _open_problem(e)
+    try:
         f.seek(0, os.SEEK_END)
         if f.tell() == 0:               # msvcrt.locking wants at least one byte to lock
             f.write(b"0")
             f.flush()
-    except OSError:
-        return None, False
+    except OSError as e:
+        f.close()
+        return None, _open_problem(e)
     try:
         f.seek(0)
         if _WINDOWS:
@@ -270,11 +363,22 @@ def _acquire_lock(path):
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         f.close()
-        return None, False
-    return f, True
+        return None, _held_problem(path)
+    _write_owner(path)
+    return f, None
+
+
+def _acquire_lock(path):
+    """Try once to take the exclusive lock. Returns (file_or_None, locked: bool)."""
+    f, _problem = _take_lock(path)
+    return f, f is not None
 
 
 def _release_lock(f):
+    try:
+        os.remove(_owner_path(f.name))      # ours: we hold the lock
+    except OSError:
+        pass
     try:
         f.seek(0)
         if _WINDOWS:
@@ -292,12 +396,18 @@ def _release_lock(f):
 class AppData:
     """Thread-safe (one process-wide RLock) access to one app-data folder."""
 
-    def __init__(self, folder):
+    def __init__(self, folder, lock_wait=0.0, lock_poll=0.25, retry_interval=3.0):
+        """lock_wait: how long to keep trying for the lock (every lock_poll seconds)
+        before opening read-only; retry_interval: how often watch_lock() tries again."""
         os.makedirs(folder, exist_ok=True)
         self._folder = folder
         self._lock = threading.RLock()
         self._closed = False
         self._problems = []
+        self._lock_path = os.path.join(folder, ".lock")
+        self._retry_interval = retry_interval
+        self._retry_stop = threading.Event()
+        self._retry_thread = None
         self._settings_path = os.path.join(folder, "settings.json")
         self._marks_path = os.path.join(folder, "marks.json")
         self._index_path = os.path.join(folder, "index.json")
@@ -305,8 +415,21 @@ class AppData:
         # (the single writer) may set a bad file aside. A read-only instance
         # that loaded first and renamed the writer's files out from under it
         # would be destructive, so loading must know its role first.
-        self._lock_file, locked = _acquire_lock(os.path.join(folder, ".lock"))
-        self.read_only = not locked
+        self._lock_file, self._lock_problem = self._wait_for_lock(lock_wait, lock_poll)
+        self.read_only = self._lock_file is None
+        self._load_all()
+
+    def _wait_for_lock(self, wait, poll):
+        """Keep trying for the lock for `wait` seconds: a previous OpenEVP that is
+        still closing (its window gone, its workers finishing) lets go soon."""
+        deadline = time.monotonic() + max(0.0, wait)
+        while True:
+            f, problem = _take_lock(self._lock_path)
+            if f is not None or time.monotonic() + poll > deadline:
+                return f, problem
+            time.sleep(poll)
+
+    def _load_all(self):
         self._settings_blocked = False
         self._marks_blocked = False
         self._index_blocked = False
@@ -315,10 +438,56 @@ class AppData:
         self._index = self._load_index()
         self._index_dirty = False
 
+    @property
+    def read_only_reason(self):
+        """Why this store is read-only (a sentence for the user), or None if it is writable."""
+        with self._lock:
+            if not self.read_only:
+                return None
+            return self._lock_problem or "OpenEVP couldn't lock its data, so marks can't be saved right now."
+
     def problems(self):
-        return list(self._problems)
+        with self._lock:
+            return ([self.read_only_reason] if self.read_only else []) + list(self._problems)
+
+    def watch_lock(self, on_writable=None):
+        """While read-only, keep trying for the lock in the background (every
+        retry_interval seconds). Once it is taken, everything is reloaded from
+        disk (the other holder may have changed it; nothing changed here, since
+        a read-only store refuses every write), the store becomes writable and
+        on_writable() is called on that thread. close() stops and joins it."""
+        with self._lock:
+            if not self.read_only or self._closed or self._retry_thread is not None:
+                return
+            self._retry_thread = threading.Thread(target=self._retry_lock, args=(on_writable,),
+                                                  name="store-lock-retry", daemon=True)
+            self._retry_thread.start()
+
+    def _retry_lock(self, on_writable):
+        while not self._retry_stop.wait(self._retry_interval):
+            with self._lock:
+                if self._closed or not self.read_only:
+                    return
+                f, problem = _take_lock(self._lock_path)
+                if f is None:
+                    self._lock_problem = problem        # the holder may have changed
+                    continue
+                self._lock_file, self._lock_problem = f, None
+                self.read_only = False                  # before loading: the writer repairs bad files
+                self._problems = []
+                self._load_all()
+            if on_writable is not None:
+                try:
+                    on_writable()
+                except Exception:
+                    pass
+            return
 
     def close(self):
+        self._retry_stop.set()
+        t = self._retry_thread
+        if t is not None and t is not threading.current_thread():
+            t.join()
         with self._lock:
             if self._closed:
                 return
@@ -335,7 +504,7 @@ class AppData:
         if self._closed:
             raise StoreUnavailable("OpenEVP is closing; the change was not saved.")
         if self.read_only:
-            raise StoreReadOnly("Another OpenEVP window is open; marks can only be changed there.")
+            raise StoreReadOnly(self.read_only_reason)
 
     # ---- loading --------------------------------------------------------------
 
