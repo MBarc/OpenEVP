@@ -7,6 +7,7 @@ const $ = (id) => document.getElementById(id);
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
+            capsAsked: 0, capsApplied: 0, started: false,
             playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
@@ -58,9 +59,19 @@ function showError(r) { banner([r.error, r.advice].filter(Boolean).join(" ")); }
 // capabilities().wav_status (why WAV conversion is off, or a slow-mode warning) as a sentence.
 function wavStatus() { return sentence(S.caps.wav_status); }
 
+// capabilities() again. Answers can arrive out of order (the startup call and a
+// "store-writable" one): an older answer never replaces a newer one already applied.
+async function loadCaps() {
+  const gen = ++S.capsAsked;
+  const caps = await api().capabilities();
+  if (gen > S.capsApplied) { S.caps = caps; S.capsApplied = gen; }
+  return S.caps;
+}
+
 window.addEventListener("pywebviewready", async () => {
-  S.caps = await api().capabilities();
+  await loadCaps();
   S.dest = await api().default_destination();
+  S.started = true;                          // from here on, storeWritable() redraws what this draws
   $("dest").textContent = S.dest;
   $("version").textContent = `v${S.caps.version}`;
   $("about-version").textContent = `v${S.caps.version}`;
@@ -2009,9 +2020,8 @@ function renderMarkTools() {
 // The store became writable (the other OpenEVP closed, or its lock file opens now): the
 // backend reloaded marks from disk, so the tools come back and the marks are read again.
 async function storeWritable() {
-  if (!S.caps) return;                        // not started yet: it reads capabilities() itself
-  S.caps = await api().capabilities();
-  if (S.caps.marks_read_only) return;
+  await loadCaps();                           // before startup is done, startup draws with these
+  if (!S.started || S.caps.marks_read_only) return;
   renderMarkTools();
   renderLibraryBar();
   if (S.current) {

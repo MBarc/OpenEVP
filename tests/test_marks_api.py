@@ -14,7 +14,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
-from app.store import AppData  # noqa: E402
+from app.store import AppData, _acquire_lock  # noqa: E402
 from openevp import wavinfo  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
 from st25.session import RecorderSession  # noqa: E402
@@ -240,6 +240,32 @@ class MarksApiTests(unittest.TestCase):
             self.assertTrue(got.wait(5), "no store-writable event")
             results[choose] = api.default_destination()
         self.assertEqual(results, {False: remembered, True: picked})
+
+    def test_a_pick_made_while_recovery_checks_the_folder_stays(self):
+        remembered = os.path.join(self.tmp, "remembered")
+        picked = os.path.join(self.tmp, "picked")
+        os.makedirs(remembered)
+        os.makedirs(picked)
+        first = AppData(os.path.join(self.tmp, "appdata-race"))
+        first.set_setting("save_folder", remembered)
+        second = AppData(os.path.join(self.tmp, "appdata-race"), retry_interval=60)
+        self.addCleanup(second.close)
+        first.close()
+        api = self.new_api(store=second, pick_folder=lambda start: picked)
+        real_isdir, raced, busy = os.path.isdir, [], []
+
+        def isdir(path):
+            # The user picks a folder just as recovery has looked at the remembered one.
+            if path == remembered and not busy:
+                busy.append(1)
+                raced.append(api.choose_destination())
+            return real_isdir(path)
+        second._lock_file, second.read_only = _acquire_lock(second._lock_path)[0], False   # recovered
+        with mock.patch.object(backend.os.path, "isdir", side_effect=isdir):
+            api._store_writable()
+        self.assertEqual(raced, [picked])
+        self.assertEqual(api.default_destination(), picked)
+        self.assertEqual(second.get_setting("save_folder"), picked)   # and it is remembered now
 
     def test_shutdown_joins_the_store_retry(self):
         second = AppData(os.path.join(self.tmp, "appdata"), retry_interval=60)

@@ -529,5 +529,25 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("library-tools").title, "");
   assert.ok(vm.runInContext("marksWritable() && marksTip() === ''", context));
   assert.match($("banner-text").textContent, /can be changed again/);
+
+  // Startup's capabilities() answer and a "store-writable" one arrive out of order: the older
+  // (read-only) answer never wins, whichever order they come in.
+  const readOnlyCaps = async () => ({ ...(await caps()), marks_read_only: true, marks_read_only_reason: reason });
+  for (const staleFirst of [false, true]) {
+    let answerStartup;
+    api.capabilities = () => new Promise((res) => { answerStartup = async () => res(await readOnlyCaps()); });
+    vm.runInContext("S.started = false;", context);
+    const started = ready();                                       // startup asks; its answer is held back
+    api.capabilities = caps;                                       // the store is writable by the time the event asks
+    if (staleFirst) await answerStartup();                         // the stale answer lands first...
+    window.onBackendEvent("store-writable", {});                   // ...or only after the event's answer
+    await settle();
+    if (!staleFirst) await answerStartup();
+    await started;
+    await settle();
+    assert.ok(vm.runInContext("S.started && !S.caps.marks_read_only", context), `staleFirst=${staleFirst}`);
+    assert.ok(!$("mark-evp").disabled && $("mark-evp").title === markTip, `staleFirst=${staleFirst}`);
+    assert.strictEqual($("library-tools").title, "");
+  }
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

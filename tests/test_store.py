@@ -10,7 +10,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from app.store import AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _release_lock  # noqa: E402
+from app.store import (AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _process_created,  # noqa: E402
+                       _release_lock)
 
 
 def _mp_probe_read_only(folder, queue):
@@ -599,7 +600,9 @@ class StoreLockTests(unittest.TestCase):
             second = AppData(d)
             try:
                 with open(os.path.join(d, ".lock.owner"), encoding="utf-8") as f:
-                    self.assertEqual(f.read().split(), [str(os.getpid()), os.path.basename(sys.executable)])
+                    pid, exe, created = f.read().split()
+                self.assertEqual((pid, exe), (str(os.getpid()), os.path.basename(sys.executable)))
+                self.assertEqual(int(created), _process_created(os.getpid()))
                 self.assertTrue(second.read_only)
                 self.assertEqual(second.read_only_reason,
                                  f"Another OpenEVP (process {os.getpid()}) is open; marks can only be changed "
@@ -617,8 +620,11 @@ class StoreLockTests(unittest.TestCase):
             first = AppData(d)
             owner = os.path.join(d, ".lock.owner")
             try:
-                for text in (f"{_dead_pid()}\n{os.path.basename(sys.executable)}\n",   # its process is gone
+                exe = os.path.basename(sys.executable)
+                created = _process_created(os.getpid())
+                for text in (f"{_dead_pid()}\n{exe}\n",                                    # its process is gone
                              f"{os.getpid()}\nnotepad.exe\n",                           # not the program recorded
+                             f"{os.getpid()}\n{exe}\n{created + 1}\n",                 # a reused process id
                              "garbage", None):                                           # unreadable, missing
                     if text is None:
                         os.remove(owner)
@@ -633,6 +639,44 @@ class StoreLockTests(unittest.TestCase):
                         second.close()
             finally:
                 first.close()
+
+    def test_owner_file_without_a_creation_time_is_still_believed(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            try:
+                with open(os.path.join(d, ".lock.owner"), "w", encoding="utf-8") as f:
+                    f.write(f"{os.getpid()}\n{os.path.basename(sys.executable)}\n")   # the older format
+                second = AppData(d)
+                try:
+                    self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", second.read_only_reason)
+                finally:
+                    second.close()
+            finally:
+                first.close()
+
+    def test_a_blocking_callback_never_holds_up_close(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            second = AppData(d, retry_interval=0.05)
+            entered, forever = threading.Event(), threading.Event()
+            self.addCleanup(forever.set)                        # lets the stuck callback end after the test
+
+            def stuck():
+                entered.set()
+                forever.wait()                                  # like evaluate_js on a closing window
+            second.watch_lock(stuck)
+            first.close()
+            self.assertTrue(entered.wait(5), "callback never ran")
+            self.assertFalse(second.read_only)
+            t0 = time.monotonic()
+            second.close()
+            self.assertLess(time.monotonic() - t0, 2)
+            self.assertFalse(second._retry_thread.is_alive())
+            third = AppData(d)                                  # the lock was let go
+            try:
+                self.assertFalse(third.read_only)
+            finally:
+                third.close()
 
     def test_startup_waits_for_a_closing_holder(self):
         with tempfile.TemporaryDirectory() as d:

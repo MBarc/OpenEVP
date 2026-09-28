@@ -324,6 +324,7 @@ class Api(LibraryOps):
         self._pick = pick_folder             # (start_dir) -> path or None (a folder dialog)
         self._dest = default_dest             # the current save folder (changed with choose_destination)
         self._dest_chosen = False             # the user picked a Save-to folder in this session
+        self._dest_lock = threading.Lock()    # _dest_chosen and the _dest it decides, together
         self._server = audio_server
         self._driver_setup = driver_setup     # () -> (exit_code, log); see app/driver_setup.py
         self._pick_wav = pick_wav             # (start_dir) -> path or None (a file dialog)
@@ -411,8 +412,10 @@ class Api(LibraryOps):
         if self._stop.is_set():
             return
         saved = self._store.get_setting("save_folder")
-        if not self._dest_chosen and isinstance(saved, str) and saved and os.path.isdir(saved):
-            self._dest = saved
+        if isinstance(saved, str) and saved and os.path.isdir(saved):   # no lock held over disk access
+            with self._dest_lock:
+                if not self._dest_chosen:         # checked here: a pick made meanwhile stays
+                    self._dest = saved
         self._emit("store-writable", {})
 
     def devices(self):
@@ -1440,8 +1443,9 @@ class Api(LibraryOps):
         except Exception:                       # the dialog failed; keep the current folder
             return None
         if picked:
-            self._dest = picked
-            self._dest_chosen = True
+            with self._dest_lock:
+                self._dest = picked
+                self._dest_chosen = True
             if self._store is not None:
                 try:
                     self._store.set_setting("save_folder", picked)

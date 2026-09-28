@@ -269,16 +269,21 @@ def _exe_name():
 
 
 def _write_owner(lock_path):
-    """Record who holds the lock, for a second instance to say who it is."""
+    """Record who holds the lock -- process id, program name and the process's
+    creation time (so a reused process id is not taken for it) -- for a second
+    instance to say who it is."""
+    created = _process_created(os.getpid())
     try:
         with open(_owner_path(lock_path), "w", encoding="utf-8") as f:
-            f.write(f"{os.getpid()}\n{_exe_name()}\n")
+            f.write(f"{os.getpid()}\n{_exe_name()}\n{'' if created is None else created}\n")
     except OSError:
         pass                            # only words the second instance's message
 
 
 def _read_owner(lock_path):
-    """(pid, program name) from .lock.owner, or None if it is missing or unreadable."""
+    """(pid, program name, creation time or None) from .lock.owner, or None if it
+    is missing or unreadable. A file without the creation time (written before it
+    was recorded) gives None for it."""
     try:
         with open(_owner_path(lock_path), encoding="utf-8") as f:
             lines = f.read(4096).splitlines()
@@ -286,20 +291,30 @@ def _read_owner(lock_path):
     except (OSError, ValueError, IndexError):
         return None
     exe = lines[1].strip() if len(lines) > 1 else ""
-    return (pid, exe) if pid > 0 else None
+    try:
+        created = int(lines[2].strip()) if len(lines) > 2 and lines[2].strip() else None
+    except ValueError:
+        created = None
+    return (pid, exe, created) if pid > 0 else None
 
 
-def _process_image(pid):
-    """The file name of the program running as `pid`, or None if no such process
-    is running (or it cannot be looked at)."""
+def _kernel32():
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
+    k32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
+                                               ctypes.POINTER(ctypes.c_uint32)]
+    k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(ctypes.c_uint64)] * 4
+    return k32
+
+
+def _process_info(pid):
+    """(program file name, creation time or None) of the process running as `pid`,
+    or None if no such process is running (or it cannot be looked at)."""
     if _WINDOWS:
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.OpenProcess.restype = ctypes.c_void_p
-        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
-        k32.CloseHandle.argtypes = [ctypes.c_void_p]
-        k32.GetExitCodeProcess.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32)]
-        k32.QueryFullProcessImageNameW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
-                                                   ctypes.POINTER(ctypes.c_uint32)]
+        k32 = _kernel32()
         h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
         if not h:
             return None
@@ -311,14 +326,27 @@ def _process_image(pid):
             size = ctypes.c_uint32(len(buf))
             if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
                 return None
-            return os.path.basename(buf.value)
+            times = [ctypes.c_uint64() for _ in range(4)]
+            ok = k32.GetProcessTimes(h, *(ctypes.byref(t) for t in times))
+            return os.path.basename(buf.value), (times[0].value if ok else None)
         finally:
             k32.CloseHandle(h)
     try:
         os.kill(pid, 0)
-        return os.path.basename(os.readlink(f"/proc/{pid}/exe"))
+        image = os.path.basename(os.readlink(f"/proc/{pid}/exe"))
     except OSError:
         return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            created = int(f.read().rsplit(")", 1)[1].split()[19])   # starttime, in clock ticks
+    except (OSError, ValueError, IndexError):
+        created = None
+    return image, created
+
+
+def _process_created(pid):
+    info = _process_info(pid)
+    return info[1] if info else None
 
 
 def _open_problem(error):
@@ -329,12 +357,16 @@ def _open_problem(error):
 
 def _held_problem(lock_path):
     """Why the lock is held: by another OpenEVP (its recorded process is still
-    running, under the program name it recorded), or by something else."""
+    running, under the program name and creation time it recorded), or by
+    something else."""
     owner = _read_owner(lock_path)
-    if owner is not None:
-        pid, exe = owner
-        image = _process_image(pid)
-        if image and exe and image.casefold() == exe.casefold():
+    info = _process_info(owner[0]) if owner is not None else None
+    if info is not None:
+        pid, exe, created = owner
+        image, actual = info
+        # The creation time, when recorded, must match too: a process id can be reused.
+        same = created is None or actual is None or created == actual
+        if image and exe and image.casefold() == exe.casefold() and same:
             return (f"Another OpenEVP (process {pid}) is open; marks can only be changed there. "
                     "If you don't see its window, it may still be closing.")
     return "OpenEVP couldn't lock its data (held by another program), so marks can't be saved right now."
@@ -389,6 +421,16 @@ def _release_lock(f):
         pass
     finally:
         f.close()
+
+
+def _notify(callback):
+    try:
+        callback()
+    except Exception:
+        pass
+
+
+RETRY_JOIN_TIMEOUT = 5.0    # seconds close() waits for the lock-retry thread
 
 
 # ---- AppData ------------------------------------------------------------------
@@ -477,17 +519,17 @@ class AppData:
                 self._problems = []
                 self._load_all()
             if on_writable is not None:
-                try:
-                    on_writable()
-                except Exception:
-                    pass
+                # Told on a thread of its own that close() never waits for: the
+                # callback may block (it reaches the window), and shutdown must not.
+                threading.Thread(target=_notify, args=(on_writable,), name="store-writable",
+                                 daemon=True).start()
             return
 
     def close(self):
         self._retry_stop.set()
         t = self._retry_thread
         if t is not None and t is not threading.current_thread():
-            t.join()
+            t.join(RETRY_JOIN_TIMEOUT)          # it only does file work under the lock
         with self._lock:
             if self._closed:
                 return
