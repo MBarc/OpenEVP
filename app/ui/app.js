@@ -7,7 +7,7 @@ const $ = (id) => document.getElementById(id);
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
-            capsAsked: 0, capsApplied: 0, started: false,
+            capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
@@ -68,9 +68,24 @@ async function loadCaps() {
   return S.caps;
 }
 
+// default_destination() again, numbered the same way: startup's answer never replaces
+// the one a "store-writable" (or a folder rename) asked for after it.
+async function loadDest() {
+  const gen = ++S.destAsked;
+  const d = await api().default_destination();
+  if (gen > S.destApplied && d) {
+    S.dest = d; S.destApplied = gen;
+    if (S.started) $("dest").textContent = d;
+  }
+  return S.dest;
+}
+
+// The user picked a Save-to folder: it outranks every answer still on its way.
+function setDest(d) { S.dest = d; S.destApplied = ++S.destAsked; $("dest").textContent = d; }
+
 window.addEventListener("pywebviewready", async () => {
   await loadCaps();
-  S.dest = await api().default_destination();
+  await loadDest();
   S.started = true;                          // from here on, storeWritable() redraws what this draws
   $("dest").textContent = S.dest;
   $("version").textContent = `v${S.caps.version}`;
@@ -1301,8 +1316,7 @@ function relistAfterFailure() { finishFolderOp(loadLibrary); }
 
 // The Save-to folder follows a rename of the folder holding it (the backend already uses the new one).
 async function refreshDest() {
-  const d = await api().default_destination();
-  if (d && d !== S.dest) { S.dest = d; $("dest").textContent = d; }
+  await loadDest();
 }
 
 // ---- the recording in the player, around an operation ----
@@ -1827,7 +1841,7 @@ function updateExport() {
 
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
-  if (d) { S.dest = d; $("dest").textContent = d; loadLibrary(); }   // the library may be the save folder
+  if (d) { setDest(d); loadLibrary(); }   // the library may be the save folder
 };
 
 $("export").onclick = async () => {
@@ -2021,6 +2035,7 @@ function renderMarkTools() {
 // backend reloaded marks from disk, so the tools come back and the marks are read again.
 async function storeWritable() {
   await loadCaps();                           // before startup is done, startup draws with these
+  await loadDest();                           // the remembered Save-to folder applies now
   if (!S.started || S.caps.marks_read_only) return;
   renderMarkTools();
   renderLibraryBar();
@@ -2032,7 +2047,6 @@ async function storeWritable() {
     renderMarks();
     reloadCurrentMarks();
   }
-  await refreshDest();                        // the remembered Save-to folder applies now
   loadLibrary();
   banner("OpenEVP's data can be changed again: marks and folders are back.", "ok");
 }

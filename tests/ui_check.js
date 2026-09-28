@@ -549,5 +549,26 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.ok(!$("mark-evp").disabled && $("mark-evp").title === markTip, `staleFirst=${staleFirst}`);
     assert.strictEqual($("library-tools").title, "");
   }
+
+  // Startup's default_destination() answer (the Save-to folder from before recovery) is held
+  // back while "store-writable" asks again: the recovered folder wins, whichever lands first.
+  const dests = api.default_destination;
+  for (const staleFirst of [false, true]) {
+    let answerStartup;
+    api.default_destination = () => new Promise((res) => { answerStartup = () => res("C:\\old"); });
+    vm.runInContext("S.started = false;", context);
+    const started = ready();
+    await settle();                                                // startup is waiting for its folder
+    api.default_destination = async () => "C:\\remembered";      // recovery applied the remembered one
+    if (staleFirst) answerStartup();
+    window.onBackendEvent("store-writable", {});
+    await settle();
+    if (!staleFirst) answerStartup();
+    await started;
+    await settle();
+    assert.strictEqual(vm.runInContext("S.dest", context), "C:\\remembered", `staleFirst=${staleFirst}`);
+    assert.strictEqual($("dest").textContent, "C:\\remembered", `staleFirst=${staleFirst}`);
+  }
+  api.default_destination = dests;
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

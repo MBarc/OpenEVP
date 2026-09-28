@@ -365,7 +365,9 @@ def _held_problem(lock_path):
         pid, exe, created = owner
         image, actual = info
         # The creation time, when recorded, must match too: a process id can be reused.
-        same = created is None or actual is None or created == actual
+        # One recorded but unreadable now is not trusted; only an owner file from before
+        # creation times were recorded (none in it) falls back to the name alone.
+        same = created is None or (actual is not None and created == actual)
         if image and exe and image.casefold() == exe.casefold() and same:
             return (f"Another OpenEVP (process {pid}) is open; marks can only be changed there. "
                     "If you don't see its window, it may still be closing.")

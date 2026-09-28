@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from app import store as store_module  # noqa: E402
 from app.store import (AppData, StoreReadOnly, StoreUnavailable, _acquire_lock, _process_created,  # noqa: E402
                        _release_lock)
 
@@ -651,6 +652,29 @@ class StoreLockTests(unittest.TestCase):
                     self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", second.read_only_reason)
                 finally:
                     second.close()
+            finally:
+                first.close()
+
+    def test_a_creation_time_that_cannot_be_read_is_not_trusted(self):
+        other = "OpenEVP couldn't lock its data (held by another program), so marks can't be saved right now."
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            try:
+                real = store_module._process_info
+                with mock.patch.object(store_module, "_process_info",
+                                       side_effect=lambda pid: (real(pid)[0], None)):
+                    second = AppData(d)                         # the owner file records a creation time
+                    try:
+                        self.assertEqual(second.read_only_reason, other)
+                    finally:
+                        second.close()
+                    with open(os.path.join(d, ".lock.owner"), "w", encoding="utf-8") as f:
+                        f.write(f"{os.getpid()}\n{os.path.basename(sys.executable)}\n")   # the older format
+                    second = AppData(d)
+                    try:
+                        self.assertIn(f"Another OpenEVP (process {os.getpid()}) is open", second.read_only_reason)
+                    finally:
+                        second.close()
             finally:
                 first.close()
 
