@@ -276,7 +276,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const load = async (r) => {
     const seq = vm.runInContext("++S.playSeq", context);
     await context.loadIntoPlayer(seq, "x", { url: "http://x/a.wav", peaks: [0.5], ...r }, false);
-    return Number($("zoom").max);
+    return vm.runInContext("S.zoomMax", context);
   };
   assert.strictEqual(await load({ duration: 30 * 60, rate: 8000, channels: 1 }), 8000);     // ICD-ST25: as before
   assert.strictEqual(await load({ duration: 30 * 60 + 1, rate: 8000, channels: 1 }), 400);
@@ -287,6 +287,21 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(await load({ duration: 92 * 60, rate: 44100, channels: 2 }), 400);     // the longest ST10 file
   assert.ok(context.fullDetail({ duration: 160, rate: 44100, channels: 2 }));
   assert.ok(!context.fullDetail({ duration: 160, rate: 44100, channels: 3 }));
+  // The slider is logarithmic: its ends are "fit" and one pixel per sample, every step the same factor,
+  // at 8000 px/s as at 44100; slider and zoom convert back and forth exactly.
+  const near = (a, b) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(b));
+  for (const max of [400, 8000, 44100]) {
+    assert.strictEqual(context.zoomPx(0, max), 0);
+    assert.ok(near(context.zoomPx(1000, max), max));
+    assert.ok(near(context.zoomPx(500, max) / context.zoomPx(250, max), context.zoomPx(750, max) / context.zoomPx(500, max)));
+    for (const px of [11, 57, 400, max]) assert.ok(near(context.zoomPx(context.zoomSlider(px, max), max), px), `${px} at ${max}`);
+  }
+  // A deeper zoom than the next file allows becomes that file's deepest; the slider follows.
+  vm.runInContext("S.zoomPx = 20000;", context);
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000, channels: 1 }), 8000);
+  assert.strictEqual(vm.runInContext("S.zoomPx", context), 8000);
+  assert.strictEqual(Number($("zoom").value), 1000);
+  vm.runInContext("S.zoomPx = 0;", context);
   context.unloadPlayer();                                          // the checks below start with an empty player
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });

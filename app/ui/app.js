@@ -6,7 +6,7 @@ const $ = (id) => document.getElementById(id);
 // A recorder's folders and recordings come from its model (backend recordings()): folder
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
-const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
+const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -216,14 +216,43 @@ function maxZoom(r) {                             // px per second: one pixel pe
   return fullDetail(r) ? r.rate : 400;
 }
 
+// The zoom slider is logarithmic: its 0..ZOOM_STEPS run from ZOOM_MIN_PX to the file's deepest zoom
+// (S.zoomMax px per second), so every step zooms by the same factor whether that is 400, 8000 (an
+// ICD-ST25 file) or 44100 (an ICD-ST10 one); 0 fits the whole file. S.zoomPx is the zoom itself
+// (px per second, 0 = fit), kept so that moving between files does not drift.
+const ZOOM_STEPS = 1000, ZOOM_MIN_PX = 10;
+
+function zoomPx(v, max) {                          // slider position -> px per second
+  v = Number(v);
+  if (!(v > 0)) return 0;
+  const lo = Math.min(ZOOM_MIN_PX, max);
+  return Math.min(max, lo * Math.pow(max / lo, v / ZOOM_STEPS));
+}
+
+function zoomSlider(px, max) {                     // px per second -> slider position
+  if (!(px > 0)) return 0;
+  const lo = Math.min(ZOOM_MIN_PX, max);
+  if (max <= lo) return ZOOM_STEPS;
+  return Math.max(0.001, Math.min(ZOOM_STEPS, ZOOM_STEPS * Math.log(px / lo) / Math.log(max / lo)));
+}
+
+function setZoom(px) {                             // zoom the waveform and move the slider to match
+  S.zoomPx = px;
+  $("zoom").value = zoomSlider(px, S.zoomMax);
+  S.ws.zoom(px);
+}
+
 async function loadIntoPlayer(seq, label, r, autoplay) {
   showPlayerLoaded(label);
   clearSelection();
   setCurrent(label, r);
   const full = fullDetail(r);
-  const zoom = $("zoom");
-  zoom.max = maxZoom(r);
-  if (Number(zoom.value) > Number(zoom.max)) zoom.value = zoom.max;
+  S.zoomMax = maxZoom(r);
+  if (S.zoomPx > S.zoomMax) {                     // deeper than this file allows: its deepest zoom
+    S.zoomPx = S.zoomMax;
+    S.ws.setOptions({ minPxPerSec: S.zoomPx });
+  }
+  $("zoom").value = zoomSlider(S.zoomPx, S.zoomMax);
   try {
     if (full) {
       S.ws.setOptions({ sampleRate: r.rate });
@@ -1929,7 +1958,7 @@ function setupPlayer() {
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
-  $("zoom").oninput = () => S.ws.zoom(Number($("zoom").value));
+  $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSelection();                         // once: the plugin stays registered across loads
@@ -1961,16 +1990,14 @@ function wheelZoom(e) {
     S.ws.setOptions({ barHeight: Number(h.value) });
     return;
   }
-  const slider = $("zoom");
   const fit = $("waveform").clientWidth / duration;          // px per second when the whole file fits
-  const now = Number(slider.value) || fit;
-  let next = Math.min(Number(slider.max), now * (delta < 0 ? 1.25 : 0.8));
+  const now = S.zoomPx || fit;
+  let next = Math.min(S.zoomMax, now * (delta < 0 ? 1.25 : 0.8));
   if (next <= fit) next = 0;                                  // zoomed all the way out: fit to width
-  if (next === Number(slider.value)) return;
+  if (next === S.zoomPx) return;
   const x = e.clientX - $("waveform").getBoundingClientRect().left;
   const t = (S.ws.getScroll() + x) / now;                    // the second under the pointer
-  slider.value = next;
-  S.ws.zoom(next);
+  setZoom(next);
   if (next) S.ws.setScroll(t * next - x);
 }
 
