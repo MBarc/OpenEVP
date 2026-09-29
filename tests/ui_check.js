@@ -129,11 +129,12 @@ const listing = {
                        { value: "wav", label: "WAV", available: true, reason: null }],
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                { number: 1, label: "A-001", recorded: "2029-05-23 19:54:04", seconds: 1.3, owner: "Casey", problem: null }] : [] })) },
-  // An ICD-ST10 (discovered as an ST25, relabelled once opened): its recordings download but can't be played yet.
+  // An ICD-ST10 (discovered as an ST25, relabelled once opened), in a build without the LPEC ST decoder:
+  // its recordings download but can't be played. (With the decoder it is playable: see below.)
   "2-1@3": { ok: true, model: "Sony ICD-ST10", model_id: "sony-icd-st10", playable: false,
-             play_reason: "LPEC ST (ICD-ST10) audio can't be played yet",
+             play_reason: "LPEC ST (ICD-ST10) playback is not included in this build",
              formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
-                       { value: "wav", label: "WAV", available: false, reason: "LPEC ST (ICD-ST10) audio can't be played yet" }],
+                       { value: "wav", label: "WAV", available: false, reason: "LPEC ST (ICD-ST10) playback is not included in this build" }],
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null }] : [] })) },
 };
@@ -231,26 +232,62 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                      { folder: "7", number: "7" }]));
   assert.ok(!calls.some((c) => c[0] === "audio"));
 
-  // An ICD-ST10: its recordings can be selected and exported as .dvf, not played; the reason is said
-  // plainly (status line, row tooltips, the greyed-out WAV entry), never as an error.
+  // An ICD-ST10 in a build without its decoder: its recordings can be selected and exported as .dvf,
+  // not played; the reason is said plainly (status line, row tooltips, the greyed-out WAV entry), never
+  // as an error.
   vm.runInContext("S.exporting = false;", context);              // the stubbed export above never reports back
   await context.openDevice("2-1@3");
   assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV (unavailable)"]);
-  assert.strictEqual(format.children[1].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(format.children[1].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.strictEqual(format.value, "dvf");
   assert.ok(!$("device-table").classList.contains("playable"));
-  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) audio can't be played yet. Its recordings can still be saved.");
+  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) playback is not included in this build. Its recordings can still be saved.");
   assert.strictEqual($("banner-text").textContent, "", "not an error");
   assert.strictEqual($("devices").children[3].children[0].textContent, "Sony ICD-ST10 #4 (port 2-1)");  // relabelled at once
   const st10row = $("rows").children[0];
   assert.deepStrictEqual(texts(st10row).slice(1), ["001", "undated", "0:20", ""]);
   assert.ok(!st10row.onclick, "not playable: no click handler");
-  assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
   assert.ok(!calls.some((c) => c[0] === "audio"));
   $("status").textContent = "";
   await context.openDevice("2-1@3");                               // already read: shown again, reason again
-  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) audio can't be played yet. Its recordings can still be saved.");
+  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) playback is not included in this build. Its recordings can still be saved.");
+
+  // The same ICD-ST10 with the LPEC ST decoder: playable, WAV available, a click plays it.
+  listing["2-1@3"] = { ...listing["2-1@3"], playable: true, play_reason: null,
+                       formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
+                                 { value: "wav", label: "WAV", available: true, reason: null }] };
+  vm.runInContext("S.device = null; S.folders = [];", context);
+  $("status").textContent = "";
+  await context.openDevice("2-1@3");
+  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV"]);
+  assert.ok($("device-table").classList.contains("playable"));
+  assert.strictEqual($("status").textContent, "");
+  const st10playable = $("rows").children[0];
+  assert.ok(st10playable.onclick, "playable: a click plays it");
+  await st10playable.onclick();
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "audio").map((c) => c.slice(1)), [["2-1@3", "A", 1]]);
+
+  // The waveform: drawn from the audio itself up to FULL_DETAIL_SAMPLES samples over all channels
+  // (30 minutes of 8 kHz mono, about 2.7 minutes of 44.1 kHz stereo), with a zoom down to one
+  // pixel per sample at the file's own rate; longer files are drawn from the server's peaks.
+  const load = async (r) => {
+    const seq = vm.runInContext("++S.playSeq", context);
+    await context.loadIntoPlayer(seq, "x", { url: "http://x/a.wav", peaks: [0.5], ...r }, false);
+    return Number($("zoom").max);
+  };
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000, channels: 1 }), 8000);     // ICD-ST25: as before
+  assert.strictEqual(await load({ duration: 30 * 60 + 1, rate: 8000, channels: 1 }), 400);
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000 }), 8000);                  // channels unknown: mono
+  assert.strictEqual(await load({ duration: 160, rate: 44100, channels: 2 }), 44100);       // ICD-ST10, short
+  assert.strictEqual(await load({ duration: 170, rate: 44100, channels: 2 }), 400);         // 3 minutes: peaks
+  assert.strictEqual(await load({ duration: 320, rate: 44100, channels: 1 }), 44100);       // the same samples in mono
+  assert.strictEqual(await load({ duration: 92 * 60, rate: 44100, channels: 2 }), 400);     // the longest ST10 file
+  assert.ok(context.fullDetail({ duration: 160, rate: 44100, channels: 2 }));
+  assert.ok(!context.fullDetail({ duration: 160, rate: 44100, channels: 3 }));
+  context.unloadPlayer();                                          // the checks below start with an empty player
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });
   await context.poll();
@@ -599,10 +636,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   }
   api.default_destination = dests;
 
-  // An ICD-ST10 .dvf in the library: greyed out with its reason (not the ⚠ of a damaged file),
-  // and a click says why instead of asking the backend to play it.
+  // An ICD-ST10 .dvf in the library, in a build without the LPEC ST decoder: greyed out with its
+  // reason (not the ⚠ of a damaged file), and a click says why instead of asking the backend to play it.
   const st10File = { ...libFile("r7", "001_A_001_Unknown.dvf", "root", null), type: "dvf", seconds: 20.1,
-                     error: "001_A_001_Unknown.dvf can't be played or marked: LPEC ST (ICD-ST10) audio can't be played yet.", unplayable: "LPEC ST (ICD-ST10) audio can't be played yet" };
+                     error: "001_A_001_Unknown.dvf can't be played or marked: LPEC ST (ICD-ST10) playback is not included in this build.", unplayable: "LPEC ST (ICD-ST10) playback is not included in this build" };
   api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 50, exists: true, truncated: false, indexing: false,
                                     pending: 0, folders: libFolders, files: [st10File, libFile("r8", "b.wav", "root", "fp8")] });
   context.showLibrary();
@@ -610,19 +647,19 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   const st10lib = recRow("r7");
   assert.ok(st10lib.classList.contains("unplayable"));
-  assert.strictEqual(st10lib.title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(st10lib.title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.strictEqual(st10lib.cells[5].textContent, "—");
-  assert.strictEqual(st10lib.cells[5].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(st10lib.cells[5].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.ok(!recRow("r8").classList.contains("unplayable"));
   ops.length = 0;
   st10lib.onclick();
   await settle();
-  assert.strictEqual($("banner-text").textContent, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual($("banner-text").textContent, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.deepStrictEqual(ops, [], "never sent to the backend to play");
   rightClick(st10lib.cells[1]);
   assert.deepStrictEqual(menu.children[0].textContent, "Play");
   assert.ok(menu.children[0].disabled);
-  assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   press("Escape");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

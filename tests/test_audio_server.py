@@ -116,6 +116,7 @@ class AudioServerTests(unittest.TestCase):
         self.assertEqual(os.path.dirname(seen[0]), self.dir.name)
         self.assertEqual(info["fp"], wavinfo.wav_fingerprint(io.BytesIO(WAV)))
         self.assertAlmostEqual(info["duration"], 1.0)
+        self.assertEqual((info["rate"], info["channels"]), (8000, 1))    # the page sizes its detail by them
         self.assertEqual(self.get(info["url"]).read(), WAV)
         self.assertEqual(self.calls, [])                          # the provider is not asked
         self.assertEqual(self.s.prepare(("1-4@7", "A", 5), write=write)["url"], info["url"])

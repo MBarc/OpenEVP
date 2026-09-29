@@ -150,7 +150,7 @@ class St10AppTests(St10Base):
             with mock.patch.object(type(formats.DVF.decoder), "to_wav", side_effect=AssertionError("to_wav")):
                 r = self.api.audio(ID, "A", 1)
             self.assertTrue(r["ok"], r)
-            self.assertEqual((r["fp"], r["rate"]), (fp_of(WAV_1), 44100))
+            self.assertEqual((r["fp"], r["rate"], r["channels"]), (fp_of(WAV_1), 44100, 2))
             [name] = os.listdir(cache)
             with open(os.path.join(cache, name), "rb") as f:
                 self.assertEqual(f.read(), WAV_1)

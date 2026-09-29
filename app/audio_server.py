@@ -91,6 +91,13 @@ def _analyze(f):
         return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
 
 
+def _channels(f):
+    """The channel count of an analyzed (so readable) PCM WAV file, from its header."""
+    f.seek(0)
+    with wave.open(f) as w:
+        return w.getnchannels()
+
+
 def _open_shared(path):
     """Open a file for reading (binary) without stopping anyone from reading,
     writing, renaming or deleting it meanwhile. Python's own open() on Windows
@@ -139,7 +146,7 @@ class AudioServer:
         self._dir = cache_dir
         self._max = max_bytes
         self._token = secrets.token_urlsafe(16)
-        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration", "rate", "fp"}; LRU order
+        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration", "rate", "channels", "fp"}; LRU order
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
@@ -197,6 +204,7 @@ class AudioServer:
                         del wav
                     with open(path, "rb") as f:
                         peaks, duration, rate, fp = _analyze(f)
+                        channels = _channels(f)
                         size = os.fstat(f.fileno()).st_size
                 except BaseException:
                     try:
@@ -206,7 +214,7 @@ class AudioServer:
                     raise
                 with self._lock:
                     self._entries[key] = {"file": file_id, "size": size, "peaks": peaks, "duration": duration,
-                                          "rate": rate, "fp": fp}
+                                          "rate": rate, "channels": channels, "fp": fp}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
                 return self._info(self._entries[key])
@@ -230,23 +238,25 @@ class AudioServer:
                     self._entries.move_to_end(key)
                     return {**self._info(e), "stat": e["stat"]}
             peaks, duration, rate, fp = _analyze(f)
+            channels = _channels(f)
             if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
                 raise ValueError("the file changed while it was being read; try again")
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "fp": fp, "path": path, "stat": stat}
+                                  "channels": channels, "fp": fp, "path": path, "stat": stat}
             self._by_file[file_id] = key
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
-        duration, the sample rate (short files are then drawn from the audio itself),
-        and the audio fingerprint (openevp.wavinfo) of the decoded samples."""
+        duration, the sample rate and channel count (short files are then drawn
+        from the audio itself), and the audio fingerprint (openevp.wavinfo) of
+        the decoded samples."""
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
-                "fp": e["fp"]}
+                "channels": e["channels"], "fp": e["fp"]}
 
     def retarget_prefix(self, old, new):
         """A file or folder moved from `old` to `new` (same volume, so the same

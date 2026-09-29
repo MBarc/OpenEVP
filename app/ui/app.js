@@ -198,20 +198,31 @@ function showPlayerLoaded(label) {
   $("now-playing").textContent = label; $("play").disabled = true; $("play").textContent = "▶";
 }
 
-// Load a prepared audio {url, peaks, duration} into the player. Precomputed peaks and the
-// duration let wavesurfer draw at once and stream the audio instead of decoding it all.
-// Recordings up to this many samples are drawn from the audio itself (every
-// sample, both halves of the wave), so zooming in shows real detail; longer
-// ones use the server's peaks (400 per second), which keeps memory in check.
-const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;          // 30 minutes of ST25 audio
+// Load a prepared audio {url, peaks, duration, rate, channels} into the player. Precomputed
+// peaks and the duration let wavesurfer draw at once and stream the audio instead of decoding it all.
+// Recordings up to this many samples, counted over all channels, are drawn from the
+// audio itself (every sample; a stereo one shows its left channel above the line and
+// its right below), so zooming in shows real detail. The page then holds the whole
+// WAV and its decoded samples (6 bytes per sample), so the budget is in samples, not
+// seconds: 30 minutes of ICD-ST25 audio (8 kHz mono), about 2.7 minutes of ICD-ST10
+// audio (44.1 kHz stereo). Longer ones use the server's peaks (400 per second).
+const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;
+
+function fullDetail(r) {                          // drawn from the audio itself?
+  return !!r.rate && r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES;
+}
+
+function maxZoom(r) {                             // px per second: one pixel per sample at the deepest zoom
+  return fullDetail(r) ? r.rate : 400;
+}
 
 async function loadIntoPlayer(seq, label, r, autoplay) {
   showPlayerLoaded(label);
   clearSelection();
   setCurrent(label, r);
-  const full = r.rate && r.duration * r.rate <= FULL_DETAIL_SAMPLES;
+  const full = fullDetail(r);
   const zoom = $("zoom");
-  zoom.max = full ? Math.min(r.rate, 8000) : 400;   // px per second; at 8000 one pixel is one ST25 sample
+  zoom.max = maxZoom(r);
   if (Number(zoom.value) > Number(zoom.max)) zoom.value = zoom.max;
   try {
     if (full) {
@@ -327,7 +338,8 @@ async function openDevice(id) {
   if (listed) Object.assign(listed, { model: r.model, model_id: r.model_id });
   $("device-table").classList.toggle("playable", S.playable);
   setFormats(S.formats);
-  // A recorder whose recordings can't be played here (e.g. an ICD-ST10, not yet): said once, plainly.
+  // A recorder whose recordings can't be played here (e.g. an ICD-ST10 in a build without its
+  // decoder): said once, plainly.
   if (!S.playable && S.playReason) status(`${sentence(S.playReason)} Its recordings can still be saved.`);
   renderDevices(); renderMain();
 }
@@ -889,7 +901,7 @@ function typeReason(type) {                    // why not, as a sentence
 }
 
 // A file that can't be played although its type can (its own header says so: an ICD-ST10
-// recording, not yet) has "unplayable", the reason.
+// recording in a build without the LPEC ST decoder) has "unplayable", the reason.
 function filePlayable(f) { return typePlayable(f.type) && !f.unplayable; }
 
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
