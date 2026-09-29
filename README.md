@@ -216,6 +216,10 @@ can't add, edit or delete marks (it says so) until the first is closed.
   folder A (owner set, dated and undated), folders B–E empty. On Windows 11 the
   installer set up the driver on its own and the app listed all 20 recordings
   from the same recorder (2026-09-25).
+- **Folders B–E**: up to v0.8.2 the download command always named folder A,
+  so recordings in B–E were reported and not saved (never saved wrong). It now
+  names the folder, as Digital Voice Editor does; checked on an ICD-ST10
+  (folders B and C), not yet on an ICD-ST25.
 - **LP mode only.** Only LP recordings have been checked. A recording whose data
   does not carry the LP marker is reported and not saved. Whether SP recordings
   carry a different marker is unknown until an SP sample has been analysed, so
@@ -231,6 +235,7 @@ can't add, edit or delete marks (it says so) until the first is closed.
 | Transport | vendor control requests on interface 0, `wValue 0xABAB`: status `0x01` (4 bytes), command `0x80` (24/32-byte frame), reply `0x81`; audio on bulk IN endpoint `0x81` |
 | Status | `00 00` idle, `0f 81 LLLL` reply of `LLLL` bytes ready, `0f 01` busy |
 | Folder table | 137 NAND pages of 528 bytes (512 data + 16 spare): page 0 message list, page 2 start counters, page 5+ flash address ranges, pages 9+ entries (owner, date) |
+| Download | `GET_VOICE` opcode `0x11FF000N` for folder N = 1–5 (A–E), then the message number, block count and size; reading a folder's table does not select the folder |
 | Audio | per message, `blocks × 1056` bytes on the wire = 2 × (512 data + 16 spare) per block |
 | `.dvf` | 512-byte header + 512 × `0xFF` + one 1024-byte block per wire block (spare dropped, tail of the last block filled with `0xFF`) |
 
