@@ -34,6 +34,8 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
             backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
             moves: new Map(),                                // mark id -> {busy, next}: one update_mark move in flight per mark
             markGen: 0, markBusy: 0,                         // player mark calls: started (generation) and in flight
+            // EVP clips: the player's call in flight, and the library's background job (its number, running).
+            savingClips: false, clips: { job: 0, running: false },
             reloads: new Map() };                            // rec -> {wanted, running}: marks reloads, per loaded recording
 
 function api() { return window.pywebview.api; }
@@ -1688,6 +1690,8 @@ function libraryMenuItems(target) {
       { label: "Open", run: () => openLibraryFolder(id) },
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
+      { label: "Export clips", disabled: !canExportClips(), title: clipsTip("Save every EVP in this folder (and its folders) as its own WAV clip"),
+        run: () => exportLibraryClips({ folder: id }, L.folderById.get(id).name || "the library") },
     ];
   }
   const recRow = target.closest && target.closest("tr.lib-row");
@@ -1704,6 +1708,10 @@ function libraryMenuItems(target) {
         title: L.op ? "Wait for the operation to finish" : n > 1 ? "Renames this recording only" : "",
         run: () => renameRecordingDialog(g) },
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
+      // Export clips is for the row clicked (its files: the copies of one recording), ticked or not.
+      { label: "Export clips", disabled: !canExportClips() || !groupMarked(g),
+        title: clipsTip(groupMarked(g) ? "Save each EVP of this recording as its own WAV clip" : "No EVPs marked in this recording"),
+        run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
     ];
   }
   if (L.flat) return [];                       // no folders in the All recordings view
@@ -1834,7 +1842,7 @@ function selectedItems() {
 
 function updateExport() {
   const n = S.device && S.view === "device" ? selectedItems().length : 0;
-  $("export").disabled = S.exporting || n === 0;
+  $("export").disabled = S.exporting || S.clips.running || n === 0;
   if (S.exporting) return;                 // the button shows progress while exporting
   $("export").textContent = n ? `Export ${n} selected` : "Export selected";
 }
@@ -1862,6 +1870,7 @@ window.onBackendEvent = (event, p) => {
   if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
   if (event === "store-writable") { storeWritable(); return; }                                     // nor this
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
+  if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;
@@ -2072,6 +2081,7 @@ function setupMarks() {
   $("reviewed").onchange = setReviewed;
   $("retry-backup").onclick = () => retryBackup(S.current && S.current.rec);
   $("export-marked").onclick = exportMarked;
+  $("export-clips").onclick = () => exportClips(null);
 }
 
 // The recording now in the player (its label and the backend's audio result), or none (null).
@@ -2230,7 +2240,8 @@ function renderMarks() {
   list.hidden = !S.marks.length;
   for (const m of S.marks) list.appendChild(markRow(m));
   $("marks-empty").hidden = S.marks.length > 0;
-  $("export-marked").disabled = !S.marks.length || S.exportingMarked;
+  $("export-marked").disabled = !S.marks.length || S.exportingMarked || S.savingClips;
+  $("export-clips").disabled = !S.marks.length || S.exportingMarked || S.savingClips || S.clips.running;
   renderBackup();
   // Every change of the loaded marks ends here: the library shows the same counts and notes.
   if (S.current) syncLibraryMarks(S.current.fp, S.marks, $("reviewed").checked);
@@ -2260,6 +2271,8 @@ function markRow(m) {
   if (writable) note.onclick = () => editNoteInline(note, m);
   row.append(chip, time, note,
     markButton("▶", "Play this EVP", () => playMark(m)),
+    markButton("Save clip", "Save this EVP as its own WAV clip (in a Clips folder)", () => exportClips(m),
+               !S.exportingMarked && !S.savingClips && !S.clips.running),
     markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
     markButton("✕", tip || "Delete this mark", () => deleteMark(m), writable));
   return row;
@@ -2391,5 +2404,82 @@ async function exportMarked() {
   const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
   banner(r.already ? `✓ ${r.name} with these marks was already saved in ${where}.`
                    : `✓ Saved ${r.name} with its EVP marks in ${where}.`, "ok");
+  loadLibrary();
+}
+
+// ---- EVP clips: each mark as its own short WAV, in a Clips folder beside the WAV with marks ----
+// "3 clips saved (1 already there)", what was skipped and why, and Open folder when there is one.
+function clipsSummary(p) {
+  const parts = [];
+  if (p.cancelled) parts.push(p.closing ? "Stopped because the app is closing." : "Stopped.");
+  parts.push(`${p.cancelled ? "" : "✓ "}${plural(p.saved, "clip")} saved` + (p.already ? ` (${p.already} already there).` : "."));
+  if (p.skipped && p.skipped.length) parts.push(`Skipped ${plural(p.skipped.length, "recording")}: ${p.skipped.join(" · ")}.`);
+  if (p.notes && p.notes.length) parts.push(`Not saved: ${p.notes.join(" · ")}.`);
+  if (!p.cancelled && p.recordings === 0 && !(p.skipped && p.skipped.length)) parts.push("No EVPs were marked there.");
+  const kind = p.cancelled || (p.skipped && p.skipped.length) || (p.notes && p.notes.length) ? "warn" : "ok";
+  const open = p.folder ? { label: "Open folder", run: () => api().open_folder(p.folder) } : null;
+  banner(parts.join(" "), kind, open);
+}
+
+// The player: every mark of the loaded recording (mark = null), or one mark (its Save clip).
+async function exportClips(mark) {
+  if (!S.current || S.savingClips) return;
+  const rec = S.current.rec;
+  S.savingClips = true; renderMarks(); status(mark ? "Saving the clip…" : "Saving the clips…");
+  let r;
+  try { r = await api().export_clips(rec, mark ? mark.id : null); } finally { S.savingClips = false; status(""); renderMarks(); }
+  if (!r.ok) { showError(r); return; }
+  clipsSummary({ ...r, skipped: [], cancelled: false, recordings: 1 });
+  loadLibrary();                               // the clips may be in the library
+}
+
+// The library's Export clips: off while an operation, an export or another clips job runs, and
+// in a second window (it would say why).
+function canExportClips() {
+  return !!S.caps.marks && !S.caps.marks_read_only && !S.lib.op && !S.clips.running && !S.exporting;
+}
+function clipsTip(tip) {
+  if (S.caps.marks_read_only) return readOnlyTip();
+  if (S.clips.running) return "Wait for the clips being exported";
+  if (S.lib.op || S.exporting) return "Wait for the operation to finish";
+  return tip;
+}
+function groupMarked(g) { return g.marks.A + g.marks.B + g.marks.C > 0; }
+
+// A folder (and its folders) or one recording's files, as a background job: progress, Cancel.
+async function exportLibraryClips(what, name) {
+  if (!canExportClips()) return;
+  const job = ++S.clips.job;
+  S.clips.running = true; S.clips.name = name; S.clips.cancelling = false;
+  renderMarks(); updateExport();
+  clipsRunning(0, null);
+  const r = what.folder ? await api().export_clips_folder(what.folder, job) : await api().export_clips_files(what.files, job);
+  if (!r.ok && job === S.clips.job && S.clips.running) {
+    S.clips.running = false; progress(0, null); renderMarks(); updateExport(); scheduleLibraryRender();
+    showError(r);
+  }
+}
+
+function clipsRunning(done, total) {
+  progress(done, total === null ? 1 : total);
+  const count = total ? ` ${done} of ${total}` : "";
+  banner(`Exporting the clips of ${S.clips.name || "the recordings"}…${count}`, "ok",
+         { label: "Cancel", run: () => { S.clips.cancelling = true; $("banner-action").disabled = true; api().cancel_clips(S.clips.job); } });
+  $("banner-action").disabled = !!S.clips.cancelling;             // asked once: it stops after the recording it is on
+}
+
+function clipsEvent(event, p) {
+  if (p.job !== S.clips.job || !S.clips.running) return;      // an older job
+  if (event === "clips-progress") { clipsRunning(p.done, p.total); return; }
+  S.clips.running = false;
+  progress(0, null);
+  $("banner-action").disabled = false;
+  renderMarks(); updateExport(); scheduleLibraryRender();
+  if (event === "clips-done") clipsSummary(p);
+  else {
+    const done = p.saved || p.already ? ` (${p.saved} saved, ${p.already} already there before it stopped)` : "";
+    banner([`The clips export stopped${done}: ${p.error}`, p.advice].filter(Boolean).join(" "), "warn",
+           p.folder ? { label: "Open folder", run: () => api().open_folder(p.folder) } : null);
+  }
   loadLibrary();
 }

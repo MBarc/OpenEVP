@@ -4,7 +4,9 @@
 // selections hand the backend back the exact folder ids and recording numbers, even with
 // ":" or "|" in them. The EVP Library's right-click menu runs the same code as the folder tools
 // (New folder, Rename, Delete, Move to…), with the same enabled state; a recording row adds
-// Rename… (and F2), which sends the ids of that recording's files in the folder shown. Prints "ok" or throws.
+// Rename… (and F2), which sends the ids of that recording's files in the folder shown. EVP clips: the
+// player's Export clips and each mark's Save clip, and the library's Export clips on a recording or a
+// folder (a background job with progress, Cancel and a summary with Open folder). Prints "ok" or throws.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -223,6 +225,9 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                      JSON.stringify([{ folder: "a:b|c", number: "rec:1" }, { folder: "a:b|c", number: 7 },
                                      { folder: "7", number: "7" }]));
   assert.ok(!calls.some((c) => c[0] === "audio"));
+  // The export finishes (the stub never says so): nothing is running any more.
+  window.onBackendEvent("export-done", { job: vm.runInContext("S.job", context), saved: 3, skipped: 0, notes: [], dest: "D:/save" });
+  assert.ok(!vm.runInContext("S.exporting", context));
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });
   await context.poll();
@@ -293,19 +298,22 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.caps.marks_read_only = true; renderLibraryBar();`, context);
   assert.ok($("library-new").disabled && /can't be changed right now/.test($("library-tools").title));
   rightClick(folderRow("f1").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true], ["Export clips", true]]);
+  assert.strictEqual(menu.children[3].title, vm.runInContext("readOnlyTip()", context));   // says why
   press("Escape");
   vm.runInContext(`S.caps.marks_read_only = false; renderLibraryBar();`, context);
   assert.ok(!$("library-new").disabled && $("library-tools").title === "");
 
   // A folder row: Open / Rename / Delete; it becomes the selected folder; keys move and choose.
   rightClick(folderRow("f1").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false], ["Export clips", false]]);
   assert.strictEqual(L.selFolder, "f1");
   assert.strictEqual(document.activeElement.textContent, "Open");
   press("ArrowUp");
-  assert.strictEqual(document.activeElement.textContent, "Delete…");  // wraps round
-  press("ArrowDown"); press("ArrowDown");
+  assert.strictEqual(document.activeElement.textContent, "Export clips");  // wraps round
+  press("ArrowUp");
+  assert.strictEqual(document.activeElement.textContent, "Delete…");
+  press("ArrowDown"); press("ArrowDown"); press("ArrowDown");
   assert.strictEqual(document.activeElement.textContent, "Rename…");
   press("Enter");
   assert.ok(menu.hidden);
@@ -319,7 +327,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   // Off exactly when the toolbar's buttons are: during an operation, and for the library's root.
   L.selFolder = "f1"; L.op = true; context.renderLibrary();
   rightClick(folderRow("f1").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true], ["Export clips", true]]);
   assert.ok($("library-rename").disabled && $("library-delete").disabled);
   press("Escape");
   assert.ok(menu.hidden, "Escape closes it");
@@ -327,7 +335,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!$("library-rename").disabled);
   const rootRow = document.createElement("tr"); rootRow.className = "lib-folder"; rootRow.folderId = "root";
   rightClick(rootRow);
-  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true]]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", true], ["Delete…", true], ["Export clips", false]]);
   L.selFolder = "root"; context.renderLibraryBar();
   assert.ok($("library-rename").disabled && $("library-delete").disabled);
   fire([window], "pointerdown", { target: document.body });
@@ -338,7 +346,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const realTimeout = context.setTimeout;
   context.setTimeout = (fn, ms) => { if (!ms) setImmediate(fn); return 0; };   // finishFolderOp runs
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
   choose("Play");
   await settle();
   assert.deepStrictEqual(ops.pop(), ["play", "r3"]);
@@ -353,7 +361,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);                                  // ticked: both ticked recordings
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move 2 recordings to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move 2 recordings to…", false], ["Export clips", true]]);
   choose("Move 2 recordings to…");
   assert.strictEqual($("folder-dialog-title").textContent, "Move 2 recordings to…");
   pick("f2").onclick();
@@ -363,10 +371,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r3").cells[1]);                                  // not ticked: just itself
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
   L.op = true;
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", true], ["Move to…", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", true], ["Move to…", true], ["Export clips", true]]);
   L.op = false;
   press("Escape");
 
@@ -496,7 +504,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   e = rightClick($("empty"));
   assert.ok(e.defaultPrevented && menu.hidden);
   rightClick(recRow("r1").cells[1]);
-  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Rename…", "Move 2 recordings to…"]);
+  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Rename…", "Move 2 recordings to…", "Export clips"]);
   fire([window], "scroll", {});
   assert.ok(menu.hidden, "scrolling closes it");
   L.flat = false;
@@ -570,5 +578,97 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual($("dest").textContent, "C:\\remembered", `staleFirst=${staleFirst}`);
   }
   api.default_destination = dests;
+
+  // ---- EVP clips: the player's Export clips and Save clip, and the library's two menu entries ----
+  assert.ok(/id="export-marked"[^\n]*\n\s*<button id="export-clips"[^>]*>Export clips<\/button>/.test(html),
+            "Export clips sits next to the WAV with marks");
+  const clipCalls = [];
+  api.open_folder = async (folder) => { clipCalls.push(["open", folder]); return { ok: true }; };
+  api.export_clips = async (rec, id) => { clipCalls.push(["clips", rec, id]);
+    return { ok: true, saved: id ? 1 : 2, already: id ? 0 : 1, names: [], notes: [], folder: "D:/save/A/Clips" }; };
+  const marks = [{ id: "m1", start: 1, end: 1.5, cls: "A", note: "hi" }, { id: "m2", start: 2, end: 2.2, cls: "C", note: "" }];
+  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks,
+                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
+  assert.ok(!$("export-clips").disabled);
+  await $("export-clips").onclick();
+  assert.deepStrictEqual(clipCalls.pop(), ["clips", "h1", null]);                 // every mark
+  assert.strictEqual($("banner-text").textContent, "✓ 2 clips saved (1 already there).");
+  assert.ok($("banner").className === "ok" && $("banner-action").textContent === "Open folder");
+  await $("banner-action").onclick();
+  assert.deepStrictEqual(clipCalls.pop(), ["open", "D:/save/A/Clips"]);
+  const saveClip = (i) => $("marks-list").children[i].children.find((b) => b.textContent === "Save clip");
+  assert.strictEqual($("marks-list").children.length, 2);
+  assert.ok(!saveClip(1).disabled);
+  saveClip(1).onclick({ stopPropagation() {} });
+  await settle();
+  assert.deepStrictEqual(clipCalls.pop(), ["clips", "h1", "m2"]);                 // that mark only
+  assert.strictEqual($("banner-text").textContent, "✓ 1 clip saved.");
+  api.export_clips = async () => ({ ok: false, error: reason });                   // a second window: its reason
+  await $("export-clips").onclick();
+  assert.strictEqual($("banner-text").textContent, reason);
+  vm.runInContext(`setCurrent(null);`, context);
+
+  // The library: Export clips on a recording (its files) and on a folder, as a background job.
+  api.export_clips_files = async (ids, job) => { clipCalls.push(["files", ids, job]); return { ok: true, job }; };
+  api.export_clips_folder = async (id, job) => { clipCalls.push(["folder", id, job]); return { ok: true, job }; };
+  api.cancel_clips = async (job) => { clipCalls.push(["cancel", job]); return { ok: true }; };
+  context.showLibrary();
+  await settle();
+  vm.runInContext(`setSummary("fpX", { marks: { A: 1, B: 0, C: 2 }, reviewed: false, notes: "" }); renderLibrary();`, context);
+  rightClick(recRow("r1").cells[1]);
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", true]);                  // nothing marked in it
+  assert.strictEqual(menu.children[3].title, "No EVPs marked in this recording");
+  press("Escape");
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", false]);
+  choose("Export clips");
+  await settle();
+  let [what, ids, job] = JSON.parse(JSON.stringify(clipCalls.pop()));
+  assert.deepStrictEqual([what, ids], ["files", ["r4", "r5"]]);                  // the .dvf and its WAV
+  assert.ok(vm.runInContext("S.clips.running", context));
+  assert.match($("banner-text").textContent, /^Exporting the clips of x\.dvf…/);
+  window.onBackendEvent("clips-progress", { job, done: 1, total: 2, name: "x.dvf" });
+  assert.strictEqual($("banner-text").textContent, "Exporting the clips of x.dvf… 1 of 2");
+  assert.strictEqual($("banner-action").textContent, "Cancel");
+  rightClick(folderRow("f1").cells[1]);                                            // one job at a time
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", true]);
+  assert.strictEqual(menu.children[3].title, "Wait for the clips being exported");
+  press("Escape");
+  $("banner-action").onclick();
+  assert.deepStrictEqual(clipCalls.pop(), ["cancel", job]);
+  window.onBackendEvent("clips-progress", { job, done: 2, total: 2, name: "x.wav" });
+  assert.ok($("banner-action").disabled, "Cancel is asked once");
+  window.onBackendEvent("clips-done", { job: job - 1, saved: 9, already: 0, skipped: [], notes: [], folder: null,
+                                        cancelled: false, recordings: 1 });            // an older job: ignored
+  assert.ok(vm.runInContext("S.clips.running", context));
+  window.onBackendEvent("clips-done", { job, saved: 0, already: 0, skipped: [], notes: [], folder: null,
+                                        cancelled: true, closing: false, recordings: 0 });
+  assert.ok(!vm.runInContext("S.clips.running", context));
+  assert.strictEqual($("banner-text").textContent, "Stopped. 0 clips saved.");
+  assert.ok($("banner-action").hidden);                                            // nothing to open
+  await settle();
+  // A folder: its id; the summary counts what was already there and what was skipped, and why.
+  rightClick(folderRow("f1").cells[1]);
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", false]);
+  choose("Export clips");
+  await settle();
+  [what, ids, job] = clipCalls.pop();
+  assert.deepStrictEqual([what, ids], ["folder", "f1"]);
+  assert.match($("banner-text").textContent, /^Exporting the clips of Old Mill…/);
+  window.onBackendEvent("clips-done", { job, saved: 5, already: 2, recordings: 3, notes: [], folder: "D:/save/Old Mill/Clips",
+                                        skipped: ["bad.dvf (its audio could not be decoded: damaged)"], cancelled: false });
+  assert.strictEqual($("banner-text").textContent,
+                     "✓ 5 clips saved (2 already there). Skipped 1 recording: bad.dvf (its audio could not be decoded: damaged).");
+  assert.strictEqual($("banner").className, "");                                  // a warning: something was skipped
+  await $("banner-action").onclick();
+  assert.deepStrictEqual(clipCalls.pop(), ["open", "D:/save/Old Mill/Clips"]);
+  // Refused at once (a second window, say): said, and nothing stays running.
+  api.export_clips_folder = async () => ({ ok: false, error: "The library changed. Refresh and try again." });
+  await settle();
+  rightClick(folderRow("f1").cells[1]);
+  choose("Export clips");
+  await settle();
+  assert.ok(!vm.runInContext("S.clips.running", context));
+  assert.strictEqual($("banner-text").textContent, "The library changed. Refresh and try again.");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

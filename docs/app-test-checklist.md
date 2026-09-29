@@ -32,3 +32,16 @@ from the frozen build is caught):
     finishes with no "stuck" errors. Repeat three times.
 14. Two recorders at once (when available): both listed; exporting from one while
     browsing the other works.
+15. EVP clips: mark two EVPs on A-001 (one with a note containing `?` and `:`),
+    click **Export clips**: "2 clips saved"; **Open folder** shows
+    `Save to\A\Clips` with two WAVs named `…_EVP-<class>_<MMmSS.s>s[_note].wav`.
+    Each opens in an audio editor (Audacity, say) as 8 kHz mono, with the EVP
+    0.5 s in and its label ("EVP A: …") shown as a marker. Export again: "0 clips
+    saved (2 already there)". **Save clip** on one row saves only that one.
+16. In the EVP Library, right-click a folder holding marked recordings in
+    subfolders, plus a damaged `.dvf` → **Export clips**: progress shows, the
+    summary counts the clips and names the damaged file as skipped with its
+    reason. Start it again on a big folder and click **Cancel**: it stops after
+    the current recording. Close the window during one: the app asks first.
+17. A second OpenEVP window: Export clips (player and library) is refused with
+    the "another OpenEVP is open" reason.

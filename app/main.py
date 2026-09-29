@@ -124,8 +124,8 @@ def _close_question(exporting, backing_up, saving_marked=False):
         text = "An export is still running. Stop it after the current recording and close?"
         return "Export in progress", f"{text} {backup}" if backing_up else text
     if saving_marked:
-        text = ("A WAV with its EVP marks is still being saved. Closing now may stop it before it "
-                "is saved (the marks themselves are kept). Close?")
+        text = ("A WAV with its EVP marks (or its EVP clips) is still being saved. Closing now may stop "
+                "it before it is saved (the marks themselves are kept). Close?")
         return "Export in progress", f"{backup} {text}" if backing_up else text
     if backing_up:
         return "Backup in progress", f"{backup} Close?"
