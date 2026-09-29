@@ -63,6 +63,7 @@ _CODECS = {MODE_LP: CODEC_LP, MODE_ST: CODEC_ST}
 
 LP_BYTES_PER_SECOND = 750
 ST_FRAME, ST_SAMPLES, ST_RATE = 283, 2048, 44100
+ST_NOT_PLAYABLE = "LPEC ST (ICD-ST10) audio can't be played yet"   # no LPEC ST decoder yet
 
 # DVE 2.31 header for ST-series LPEC (LP) recordings with the per-message fields zeroed.
 _TEMPLATE = bytes.fromhex(

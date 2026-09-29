@@ -1,22 +1,25 @@
-"""st25-download: copy every recording off a Sony ICD-ST25 as .dvf files.
+"""st25-download: copy every recording off a Sony ICD-ST25 or ICD-ST10 as .dvf files.
 
     st25-download [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav]
     st25-download --check-wav DVF_FILE
 
 --wav also writes a WAV file (8000 Hz, 16-bit mono) beside each .dvf, decoded
 by the built-in LPEC decoder; a .wav missing beside an already-saved .dvf is
-filled in. --check-wav decodes one .dvf file to verify that WAV conversion
-works in this build, and saves nothing.
+filled in. ICD-ST10 recordings (LPEC ST) get no WAV yet: they are saved as
+.dvf only, with a note. --check-wav decodes one .dvf file to verify that WAV
+conversion works in this build, and saves nothing.
 
 Nothing on the recorder is changed or deleted. Every recording is downloaded
 (it takes seconds); existing files are never overwritten, and a recording is
 skipped only if a file with identical audio is already there.
 """
 import argparse
+import io
 import os
 import sys
 import time
 import traceback
+import wave
 
 from openevp.paths import default_output, documents_dir, open_folder  # noqa: F401
 
@@ -28,6 +31,7 @@ from .session import build_dvf
 from .usb import UsbError
 
 LETTERS = "ABCDE"
+MODELS = ("ICD-ST25", "ICD-ST10")      # the identify strings verified; any other is read as an ST25
 REPLUG = ("The recorder may now be stuck. Unplug its USB cable, wait a few seconds, "
           "plug it back in, and run this program again. Recordings already saved are skipped.")
 
@@ -83,8 +87,8 @@ def run(args, progress=None):
         info = rec.device_info()
         model = info[36:52].split(b"\0")[0].decode("latin-1", "replace")
         print(f"Connected: {model or 'unknown model'}")
-        if model != "ICD-ST25":
-            print(f"Warning: only the ICD-ST25 has been verified; this is '{model}'.")
+        if model not in MODELS:
+            print(f"Warning: only the ICD-ST25 and ICD-ST10 have been verified; this is '{model}'.")
         # Digital Voice Editor reads these on connect; keep the same sequence.
         rec.read_block(0x1E0, 0)
         rec.read_block(0x1E0, 0x1E0)
@@ -99,7 +103,10 @@ def run(args, progress=None):
             print(f"\nFolder {letter}: {len(msgs)} recording(s)")
             for m in msgs:
                 note = f"  ** {m.problem}" if m.problem else ""
-                print(f"  {m.number:3d}  {m.when():19s}  {m.seconds():7.1f} s  {m.owner}{note}")
+                mode = f"  {dvf.MODES[m.mode]}" if m.mode != dvf.MODE_LP and m.mode in dvf.MODES else ""
+                seconds = m.seconds()
+                length = "      ?" if seconds is None else f"{seconds:7.1f}"
+                print(f"  {m.number:3d}  {m.when():19s}  {length} s  {m.owner}{mode}{note}")
             if args.list or not msgs:
                 continue
             outdir = os.path.join(out_root, letter)
@@ -129,7 +136,10 @@ def run(args, progress=None):
                 path, done = save_dvf(data, outdir, name)
                 wav_note = ""
                 wav_written = False
-                if wav_ok:
+                if wav_ok and dvf.codec(data) == dvf.CODEC_ST:
+                    if not done:
+                        wav_note = f"; no WAV: {dvf.ST_NOT_PLAYABLE}"
+                elif wav_ok:
                     try:
                         wav_path, wav_done = save_wav(audio.dvf_to_wav(data), outdir, name[:-4] + ".wav")
                         if not wav_done:
@@ -187,14 +197,26 @@ def check_wav(path):
         return 1
     if audio.status():
         print(f"Note: {audio.status()}.")            # slow mode
+    if dvf.codec(data) == dvf.CODEC_ST:
+        print(f"Could not decode {path}: {dvf.ST_NOT_PLAYABLE}.")
+        return 1
     try:
         wav = audio.dvf_to_wav(data)
     except Exception as e:
         print(f"Could not decode {path}: {e}")
         return 1
-    seconds = max(0, len(wav) - 44) / 2 / 8000
+    seconds = _wav_seconds(wav)
     print(f"OK: decoded {path} to {len(wav)} bytes of WAV ({seconds:.1f} s of audio).")
     return 0
+
+
+def _wav_seconds(wav):
+    """The length of a WAV from its header (the LP decoder's: 8000 Hz 16-bit mono)."""
+    try:
+        with wave.open(io.BytesIO(wav)) as w:
+            return w.getnframes() / w.getframerate()
+    except (wave.Error, EOFError, ZeroDivisionError):
+        return max(0, len(wav) - 44) / 2 / 8000
 
 
 def main(argv=None):

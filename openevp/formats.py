@@ -155,7 +155,7 @@ WAV = Format(ext=".wav", label="WAV", decoder=_PcmPassthrough(),
 
 # ---- Sony ICD-ST .dvf ---------------------------------------------------------
 LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # ST25 LP audio
-ST10_NOT_YET = "LPEC ST (ICD-ST10) audio can't be played yet"
+ST10_NOT_YET = _dvf.ST_NOT_PLAYABLE
 
 
 def _dvf_problem(header):

@@ -193,5 +193,89 @@ class CheckWavTests(unittest.TestCase):
         self.assertIn("Could not decode", buf.getvalue())
 
 
+class St10Tests(unittest.TestCase):
+    """An ICD-ST10: listed with LPEC ST durations, saved as LPEC ST .dvf files;
+    --wav skips them with a note (they can't be converted yet), and
+    --check-wav says so for an ST10 file."""
+
+    def setUp(self):
+        from fixtures import make_st_frames, make_st_raw
+        self.frames = make_st_frames(list(range(2, 40)) + list(range(0, 20)))
+        raw = make_st_raw(self.frames)
+        length = len(self.frames) + 10 * (len(raw) // 1056)
+        self.folders = {1: [(0, 0xFFFFFFFF, 0x180000, length, b"\xff" * 8, "", 0x6C),
+                            (1, 0x3AB79EC2, 0x190000, 2958, DATE, "Casey")]}     # an LP one too
+        self.voice = {(1, 1): raw}
+        fake = types.ModuleType("openevp.decoders.sony_lpec")
+        fake.calls = []
+
+        def to_wav(data, should_stop=None):
+            fake.calls.append(data)
+            return b"RIFF" + data[:8]
+        fake.dvf_to_wav = to_wav
+        self.decoder = fake
+
+    def run_cli(self, *argv):
+        dev = FakeRecorderDevice(self.folders, voice=self.voice, identify="ICD-ST10")
+        buf = io.StringIO()
+        with mock.patch.object(cli, "Recorder", return_value=_fake_recorder(dev)), \
+                mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": self.decoder}), \
+                contextlib.redirect_stdout(buf):
+            code = cli.main(list(argv))
+        return code, buf.getvalue()
+
+    def test_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self.run_cli(d, "--list", "--folder", "A")
+            self.assertEqual(os.listdir(d), [])
+        self.assertEqual(code, 0)
+        self.assertIn("Connected: ICD-ST10", out)
+        self.assertNotIn("Warning", out)
+        seconds = len(self.frames) / 283 * 2048 / 44100
+        self.assertIn(f"    1  no date              {seconds:7.1f} s    LPEC ST", out)
+        self.assertIn(f"    2  2029-05-23 19:54:04  {2928 / 750:7.1f} s  Casey", out)
+
+    def test_download_with_wav_skips_the_st10_recording(self):
+        from st25 import dvf
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self.run_cli(d, "--folder", "A", "--wav")
+            outdir = os.path.join(d, "A")
+            self.assertEqual(sorted(os.listdir(outdir)), ["001_A_001_Unknown.dvf", "001_A_002_Casey_2029_05_23.dvf",
+                                                          "001_A_002_Casey_2029_05_23.wav"])
+            with open(os.path.join(outdir, "001_A_001_Unknown.dvf"), "rb") as f:
+                data = f.read()
+        self.assertEqual(code, 0)
+        self.assertIsNone(dvf.validate(data))
+        self.assertEqual(dvf.payload(data), self.frames)
+        self.assertEqual(len(self.decoder.calls), 1)                         # the LP one only
+        self.assertIn("no WAV: LPEC ST (ICD-ST10) audio can't be played yet", out)
+
+    def test_check_wav_on_an_st10_file(self):
+        from fixtures import make_st_raw
+        from st25 import dvf
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "st10.dvf")
+            with open(path, "wb") as f:
+                f.write(dvf.build(make_st_raw(self.frames), b"\xff" * 8, "", mode=dvf.MODE_ST))
+            buf = io.StringIO()
+            with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": self.decoder}), \
+                    contextlib.redirect_stdout(buf):
+                code = cli.main(["--check-wav", path])
+        self.assertEqual(code, 1)
+        self.assertIn("LPEC ST (ICD-ST10) audio can't be played yet", buf.getvalue())
+        self.assertEqual(self.decoder.calls, [])
+
+    def test_an_unknown_model_is_read_as_an_st25_with_a_warning(self):
+        self.folders = {1: [(0, 0x3AB79EC2, 0x190000, 2958, DATE, "Casey")]}
+        dev = FakeRecorderDevice(self.folders, identify="ICD-ST99")
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(cli, "Recorder", return_value=_fake_recorder(dev)), \
+                contextlib.redirect_stdout(buf):
+            code = cli.main([d, "--list"])
+        self.assertEqual(code, 0)
+        self.assertIn("Warning: only the ICD-ST25 and ICD-ST10 have been verified; this is 'ICD-ST99'.", buf.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
