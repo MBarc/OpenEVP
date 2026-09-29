@@ -76,6 +76,19 @@ class St25GoldenTests(unittest.TestCase):
     def test_folder_table_parses_as_before(self):
         self.assertEqual(sha(repr(parsed(make_table(TABLE))).encode()), TABLE_SHA)
 
+    def test_lp_file_claiming_lpec_st_is_rejected(self):
+        # Byte 61 alone says LPEC ST: the rest of the header is LP's, so it is neither layout.
+        f = bytearray(dvf.build(make_raw(2958, 100), DATE, "X", expected_length=2958))
+        f[61] = 0x24
+        self.assertIsNotNone(dvf.validate(bytes(f)))
+        self.assertIsNone(dvf.audio_fingerprint(bytes(f)))
+
+    def test_block_without_the_header_length_field_is_rejected(self):
+        f = bytearray(dvf.build(make_raw(2958, 100), DATE, "X", expected_length=2958))
+        f[1024 + 1024 + 2:1024 + 1024 + 4] = b"\x00\x0b"      # the second block's bytes 2..3
+        self.assertIsNotNone(dvf.validate(bytes(f)))
+        self.assertIsNone(dvf.audio_fingerprint(bytes(f)))
+
     def test_decoder_vectors_validate_and_fingerprint_as_before(self):
         got = {}
         for p in sorted(glob.glob(os.path.join(VECTORS, "*.dvf"))):
