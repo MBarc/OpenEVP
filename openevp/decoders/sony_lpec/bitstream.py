@@ -65,23 +65,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
+from .config import LP, Config
+
+# Every function takes the configuration (``cfg``, openevp.decoders.
+# sony_lpec.config: LP, 8000 Hz, by default; SP, 16000 Hz). The constants
+# below are LP's, as docs/lpec.md lists them.
+
 # Frame length in bytes by mode (docs/lpec.md, "Bitstream").
-MODE_BYTES = {0: 48, 1: 36, 2: 60, 3: 48}
+MODE_BYTES = dict(enumerate(LP.mode_bytes))          # {0: 48, 1: 36, 2: 60, 3: 48}
 
 # Frame bit budget by mode (docs/lpec.md, "Bitstream" and "Configuration
 # constants": "budget by mode | 384, 288, 480, 384 bits").
-MODE_BITS = {0: 384, 1: 288, 2: 480, 3: 384}
+MODE_BITS = dict(enumerate(LP.mode_bits))            # {0: 384, 1: 288, 2: 480, 3: 384}
 
-BANDS = 8  # docs/lpec.md, "Configuration constants": bands = 8.
+BANDS = LP.bands  # docs/lpec.md, "Configuration constants": bands = 8.
 
 # type t -> (band width W[t], allocation reference ref[t], allocation
-# scale sc[t]); docs/lpec.md, "Configuration constants".
-_ALLOC_CONSTS = {
-    0: (28, 128, 18725),
-    1: (42, 192, 12483),
-    2: (42, 192, 12483),
-    3: (56, 256, 9362),
-}
+# scale sc[t]); docs/lpec.md, "Configuration constants" (LP's).
+_ALLOC_CONSTS = {t: (LP.band_width[t], LP.alloc_ref[t], LP.alloc_scale[t]) for t in range(4)}
 
 
 # --------------------------------------------------------------------------
@@ -185,7 +186,7 @@ def frame_mode(first_byte: int) -> int:
     return (first_byte >> 6) & 0b11
 
 
-def split_frames(payload: bytes) -> List[bytes]:
+def split_frames(payload: bytes, cfg: Config = LP) -> List[bytes]:
     """Split a frame stream into per-frame byte chunks.
 
     Each frame's length follows from its first 2 bits (the mode), per
@@ -199,7 +200,7 @@ def split_frames(payload: bytes) -> List[bytes]:
     n = len(payload)
     while pos < n:
         mode = frame_mode(payload[pos])
-        length = MODE_BYTES[mode]
+        length = cfg.mode_bytes[mode]
         take = min(length, n - pos)
         frames.append(payload[pos:pos + take])
         pos += take
@@ -220,14 +221,15 @@ def _s16(x: int) -> int:
 # Small raw fields (docs/lpec.md, "Field order")
 # --------------------------------------------------------------------------
 
-def _read_lsp_set(reader: BitReader) -> List[int]:
-    """Three 6-bit stage indices [i1, i2, i3] ("LSP set")."""
-    return [reader.read_bits(6) for _ in range(3)]
+def _read_lsp_set(reader: BitReader, cfg: Config) -> List[int]:
+    """The 6-bit stage indices [i1, i2, i3(, i4)] ("LSP set")."""
+    return [reader.read_bits(6) for _ in range(cfg.lsp_stages)]
 
 
-def _read_pitch(reader: BitReader) -> List[Optional[int]]:
-    """[lag, pgidx]; a 7-bit lag, then a 6-bit pgidx only when lag != 0."""
-    lag = reader.read_bits(7)
+def _read_pitch(reader: BitReader, cfg: Config) -> List[Optional[int]]:
+    """[lag, pgidx]; a 7-bit (SP: 8-bit) lag, then a 6-bit pgidx only when
+    lag != 0."""
+    lag = reader.read_bits(cfg.lag_bits)
     pgidx = reader.read_bits(6) if lag != 0 else None
     return [lag, pgidx]
 
@@ -257,7 +259,7 @@ def _band_split(ab_value: int, adj: int, W: int):
     return n4, n2, n1
 
 
-def bit_allocation(ab_row: Sequence[int], t: int, beta: int) -> Allocation:
+def bit_allocation(ab_row: Sequence[int], t: int, beta: int, cfg: Config = LP) -> Allocation:
     """The per-band bit allocation for one coefficient block.
 
     ``ab_row`` is AB[i1] (the allocation-base row for the block's
@@ -265,7 +267,8 @@ def bit_allocation(ab_row: Sequence[int], t: int, beta: int) -> Allocation:
     applied by the caller). ``beta`` is the block's total bit budget
     (``B = beta - 19`` is the input to the allocation itself).
     """
-    W, ref, sc = _ALLOC_CONSTS[t]
+    W, ref, sc = cfg.band_width[t], cfg.alloc_ref[t], cfg.alloc_scale[t]
+    BANDS = cfg.bands
     B = beta - 19
     adj = _s16(((B - ref) * sc) >> 9)
 
@@ -362,14 +365,15 @@ def bit_allocation(ab_row: Sequence[int], t: int, beta: int) -> Allocation:
 
 
 def _read_coefficient_block(
-    reader: BitReader, slot: int, t: int, beta: int, i1: int, ab_table: Sequence[Sequence[int]]
+    reader: BitReader, slot: int, t: int, beta: int, i1: int, ab_table: Sequence[Sequence[int]],
+    cfg: Config = LP,
 ) -> CoefficientBlock:
     """Steps 1-5 of "Coefficient block (budget beta)"."""
     start = reader.pos
     global_gain = reader.read_bits(7)
     band_gain1 = reader.read_bits(6)
     band_gain2 = reader.read_bits(6)
-    alloc = bit_allocation(ab_table[i1], t, beta)
+    alloc = bit_allocation(ab_table[i1], t, beta, cfg)
     vq2 = [reader.read_bits(8) for _ in range(alloc.k0)]
     vq4 = [reader.read_bits(8) for _ in range(alloc.k1)]
     vq8 = [reader.read_bits(8) for _ in range(alloc.k2)]
@@ -395,23 +399,23 @@ def _read_coefficient_block(
 # Field order, per mode (docs/lpec.md, "Field order")
 # --------------------------------------------------------------------------
 
-def _parse_mode0(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
+def _parse_mode0(reader: BitReader, prev_lsp1_i1: int, ab_table, cfg: Config) -> Frame:
     F = reader.read_bits(1)
     if F == 0:
         lsp_a = None
-        lsp_b = _read_lsp_set(reader)
+        lsp_b = _read_lsp_set(reader, cfg)
         lsp1_i1_next = -1
         i1_block0 = _slot1_i1(-1, lsp_b[0])
     else:
-        lsp_a = _read_lsp_set(reader)
-        lsp_b = _read_lsp_set(reader)
+        lsp_a = _read_lsp_set(reader, cfg)
+        lsp_b = _read_lsp_set(reader, cfg)
         lsp1_i1_next = lsp_a[0]
         i1_block0 = lsp_a[0]
 
-    pitch_a = _read_pitch(reader)
-    pitch_b = _read_pitch(reader)
+    pitch_a = _read_pitch(reader, cfg)
+    pitch_b = _read_pitch(reader, cfg)
 
-    r = 384 - reader.pos
+    r = cfg.mode_bits[0] - reader.pos
 
     shape_flags = []
     shape_indices = []
@@ -425,13 +429,13 @@ def _parse_mode0(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
     beta0 = (r // 2) - c0
     beta1 = (r // 2) - c1
 
-    block0 = _read_coefficient_block(reader, 1, 0, beta0, i1_block0, ab_table)
-    block1 = _read_coefficient_block(reader, 2, 0, beta1, lsp_b[0], ab_table)
+    block0 = _read_coefficient_block(reader, 1, 0, beta0, i1_block0, ab_table, cfg)
+    block1 = _read_coefficient_block(reader, 2, 0, beta1, lsp_b[0], ab_table, cfg)
 
     return Frame(
         mode=0,
         num_bytes=len(reader.data),
-        truncated=len(reader.data) < MODE_BYTES[0],
+        truncated=len(reader.data) < cfg.mode_bytes[0],
         mid_frame_lsp=F,
         lsp_a=lsp_a,
         lsp_b=lsp_b,
@@ -444,15 +448,15 @@ def _parse_mode0(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
     )
 
 
-def _parse_mode1(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
-    lsp_b = _read_lsp_set(reader)
-    pitch_b = _read_pitch(reader)
-    beta = 288 - reader.pos
-    block = _read_coefficient_block(reader, 2, 1, beta, lsp_b[0], ab_table)
+def _parse_mode1(reader: BitReader, prev_lsp1_i1: int, ab_table, cfg: Config) -> Frame:
+    lsp_b = _read_lsp_set(reader, cfg)
+    pitch_b = _read_pitch(reader, cfg)
+    beta = cfg.mode_bits[1] - reader.pos
+    block = _read_coefficient_block(reader, 2, 1, beta, lsp_b[0], ab_table, cfg)
     return Frame(
         mode=1,
         num_bytes=len(reader.data),
-        truncated=len(reader.data) < MODE_BYTES[1],
+        truncated=len(reader.data) < cfg.mode_bytes[1],
         mid_frame_lsp=0,
         lsp_a=None,
         lsp_b=lsp_b,
@@ -465,22 +469,22 @@ def _parse_mode1(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
     )
 
 
-def _parse_mode2(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
-    lsp_b = _read_lsp_set(reader)
-    pitch_a = _read_pitch(reader)
-    pitch_b = _read_pitch(reader)
+def _parse_mode2(reader: BitReader, prev_lsp1_i1: int, ab_table, cfg: Config) -> Frame:
+    lsp_b = _read_lsp_set(reader, cfg)
+    pitch_a = _read_pitch(reader, cfg)
+    pitch_b = _read_pitch(reader, cfg)
 
-    beta0 = (384 - reader.pos) // 2  # docs/lpec.md: "note 384, not 480"
+    beta0 = (cfg.mode_bits[0] - reader.pos) // 2  # docs/lpec.md: "note 384, not 480"
     i1_block0 = _slot1_i1(prev_lsp1_i1, lsp_b[0])
-    block0 = _read_coefficient_block(reader, 1, 0, beta0, i1_block0, ab_table)
+    block0 = _read_coefficient_block(reader, 1, 0, beta0, i1_block0, ab_table, cfg)
 
-    beta1 = 480 - reader.pos  # "used counted after the first block"
-    block1 = _read_coefficient_block(reader, 2, 2, beta1, lsp_b[0], ab_table)
+    beta1 = cfg.mode_bits[2] - reader.pos  # "used counted after the first block"
+    block1 = _read_coefficient_block(reader, 2, 2, beta1, lsp_b[0], ab_table, cfg)
 
     return Frame(
         mode=2,
         num_bytes=len(reader.data),
-        truncated=len(reader.data) < MODE_BYTES[2],
+        truncated=len(reader.data) < cfg.mode_bytes[2],
         mid_frame_lsp=0,
         lsp_a=None,
         lsp_b=lsp_b,
@@ -493,15 +497,15 @@ def _parse_mode2(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
     )
 
 
-def _parse_mode3(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
-    lsp_b = _read_lsp_set(reader)
-    pitch_b = _read_pitch(reader)
-    beta = 384 - reader.pos
-    block = _read_coefficient_block(reader, 2, 3, beta, lsp_b[0], ab_table)
+def _parse_mode3(reader: BitReader, prev_lsp1_i1: int, ab_table, cfg: Config) -> Frame:
+    lsp_b = _read_lsp_set(reader, cfg)
+    pitch_b = _read_pitch(reader, cfg)
+    beta = cfg.mode_bits[3] - reader.pos
+    block = _read_coefficient_block(reader, 2, 3, beta, lsp_b[0], ab_table, cfg)
     return Frame(
         mode=3,
         num_bytes=len(reader.data),
-        truncated=len(reader.data) < MODE_BYTES[3],
+        truncated=len(reader.data) < cfg.mode_bytes[3],
         mid_frame_lsp=0,
         lsp_a=None,
         lsp_b=lsp_b,
@@ -517,15 +521,17 @@ def _parse_mode3(reader: BitReader, prev_lsp1_i1: int, ab_table) -> Frame:
 _MODE_PARSERS = {0: _parse_mode0, 1: _parse_mode1, 2: _parse_mode2, 3: _parse_mode3}
 
 
-def parse_frame(data: bytes, prev_lsp1_i1: int, ab_table: Sequence[Sequence[int]]) -> Frame:
+def parse_frame(data: bytes, prev_lsp1_i1: int, ab_table: Sequence[Sequence[int]],
+                cfg: Config = LP) -> Frame:
     """Parse one frame's worth of bytes (as produced by ``split_frames``)
     into a ``Frame`` record of plain ints and lists.
 
     ``prev_lsp1_i1`` is the persistent "stage-1 LSP index of slot 1" state
     from the previous frame (0 for the first frame after ``InitDecoder``;
     see the module docstring and docs/lpec.md "State between frames").
-    ``ab_table`` is the extracted 64 x 8 allocation-base table (``Tables.AB``).
+    ``ab_table`` is the extracted 64 x bands allocation-base table
+    (``Tables.AB``); ``cfg`` the configuration (LP by default).
     """
     reader = BitReader(data)
     mode = reader.read_bits(2)
-    return _MODE_PARSERS[mode](reader, prev_lsp1_i1, ab_table)
+    return _MODE_PARSERS[mode](reader, prev_lsp1_i1, ab_table, cfg)

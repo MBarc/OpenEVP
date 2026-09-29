@@ -4,7 +4,7 @@ missing" into a failure.
 
 The decoders' golden tests (test vectors, the C cores against pure Python, the
 marks fingerprint of decoded audio) need the git-ignored table data of both
-Sony decoders (LPEC LP and LPEC ST) and the built lpec_core.dll and
+Sony decoders (LPEC LP and SP, and LPEC ST) and the built lpec_core.dll and
 lpec_st_core.dll. On a dev checkout without them those tests skip; a
 release must never be built from such a checkout, nor from one whose tables
 or DLL are damaged (both load as "not available" and would skip as well).
@@ -57,9 +57,9 @@ def skip_or_fail(reason):
     raise unittest.SkipTest(reason)
 
 
-def _load_problem(tables):
+def _load_problem(tables, **kwargs):
     try:
-        tables.load()
+        tables.load(**kwargs)
     except tables.TablesMissing as e:          # TablesInvalid (damaged) is a TablesMissing
         return f"{e} ({e.hint})"
     return None
@@ -77,6 +77,12 @@ def tables_problem():
     """Why the LPEC (LP) table data can't be loaded (missing or damaged), or None."""
     from openevp.decoders.sony_lpec import tables
     return _load_problem(tables)
+
+
+def sp_tables_problem():
+    """Why the LPEC SP (16 kHz) table data can't be loaded (missing or damaged), or None."""
+    from openevp.decoders.sony_lpec import config, tables
+    return _load_problem(tables, config=config.SP)
 
 
 def core_problem():
@@ -98,6 +104,7 @@ def st_core_problem():
 
 
 def decoder_problem():
-    """What keeps the decoders' golden tests (LPEC LP and LPEC ST) from running, or None."""
-    problems = [p for p in (tables_problem(), core_problem(), st_tables_problem(), st_core_problem()) if p]
+    """What keeps the decoders' golden tests (LPEC LP, SP and ST) from running, or None."""
+    problems = [p for p in (tables_problem(), sp_tables_problem(), core_problem(), st_tables_problem(),
+                            st_core_problem()) if p]
     return "; ".join(problems) or None

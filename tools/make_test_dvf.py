@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pack an LPEC frame stream into an ICD-ST25 LP .dvf, laid out as the recorder does.
+"""Pack an LPEC frame stream into an ICD-ST25 LP (or ICD-ST10 SP) .dvf, laid out as the recorder does.
 
 Used to build the decoder's committed test vectors from synthetic audio (no real
 recording is ever committed). The frames themselves come from an LPEC encoder; this module only
@@ -12,7 +12,8 @@ Block layout (1024 bytes: a 10-byte header, then 1014 payload bytes):
   2..3  0x000A (LP)
   4..5  valid bytes in the block, header included (1024 when full)
   6..9  time counter
-Frames are 36, 48 or 60 bytes long and run on across block boundaries.
+Frames are 36, 48 or 60 bytes long (LPEC SP: 96, 128 or 160) and run on
+across block boundaries.
 """
 import os
 import struct
@@ -39,14 +40,21 @@ def frame_offsets(sizes):
         lo = k * PAYLOAD
         while i < len(starts) and starts[i] < lo:
             i += 1
+        if i == len(starts) and k == blocks - 1:
+            # The last block holds only the tail of the last frame (possible
+            # with LPEC SP's 128-byte frames): point at the end of the data.
+            offsets.append(dvf.BLOCK_HEADER + total - lo)
+            continue
         if i == len(starts) or starts[i] >= lo + PAYLOAD:
             raise ValueError(f"no frame starts in block {k}")
         offsets.append(dvf.BLOCK_HEADER + starts[i] - lo)
     return offsets
 
 
-def pack(frames, counter=100, date=DATE, owner="Test"):
-    """A valid .dvf holding the frames (a list of bytes objects) back to back."""
+def pack(frames, counter=100, date=DATE, owner="Test", mode=dvf.MODE_LP):
+    """A valid .dvf holding the frames (a list of bytes objects) back to back.
+    ``mode``: the folder table's mode byte (dvf.MODE_LP, or dvf.MODE_SP for
+    an ICD-ST10 LPEC SP recording)."""
     stream = b"".join(frames)
     offsets = frame_offsets([len(f) for f in frames])
     raw = bytearray()
@@ -61,7 +69,7 @@ def pack(frames, counter=100, date=DATE, owner="Test"):
         block[10:10 + len(chunk)] = chunk
         raw += block[:512] + SPARE + block[512:] + SPARE
         length += dvf.BLOCK_HEADER + len(chunk)
-    return dvf.build(bytes(raw), date, owner, expected_length=length)
+    return dvf.build(bytes(raw), date, owner, expected_length=length, mode=mode)
 
 
 def payload(dvf_bytes):

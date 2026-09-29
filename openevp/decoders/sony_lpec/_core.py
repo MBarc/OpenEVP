@@ -17,19 +17,21 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import bitstream
+from .config import LP, Config
 
 DLL_PATH = Path(__file__).resolve().parent / "lpec_core.dll"
-_ABI_VERSION = 2
-FRAME_SAMPLES = 512
+_ABI_VERSION = 3
+FRAME_SAMPLES = LP.frame      # LP's; a decode uses its tables' config.frame
 
-# Table order: the T_* enums in _lpec.c.
+# Table order: the T_* enums in _lpec.c. "C" and "D" are the per-stage
+# codebooks (C1..C4, D1..D4: a 3-stage configuration passes its third twice),
+# "POST" the post-twiddle tables by transform type.
 _DOUBLE_TABLES = (
-    "C1", "C2", "C3", "PT", "SHAPES", "GAIN", "BG1", "BG2", "VQ2", "VQ4",
-    "VQ8", "NA", "NB", "WIN512", "WIN512_SQ", "WIN1024", "FFT_SIN_2048",
-    "FFT_SIN_1536", "POST256", "POST384", "POST512", "LSP_INIT",
-    "DEFAULT_SHAPE",
+    "C", "PT", "SHAPES", "GAIN", "BG1", "BG2", "VQ2", "VQ4",
+    "VQ8", "NA", "NB", "WIN", "WIN_SQ", "WIN_LONG", "FFT_SIN_2048",
+    "FFT_SIN_1536", "POST", "LSP_INIT", "DEFAULT_SHAPE",
 )
-_INT_TABLES = ("D1", "D2", "D3", "PQ", "S2048", "S1536")
+_INT_TABLES = ("D", "PQ", "S2048", "S1536")
 
 
 def _load() -> Optional[ctypes.CDLL]:
@@ -43,6 +45,7 @@ def _load() -> Optional[ctypes.CDLL]:
         lib.lpec_fcos.argtypes = [ctypes.c_double]
         lib.lpec_decode.restype = ctypes.c_int
         lib.lpec_decode.argtypes = [
+            ctypes.POINTER(ctypes.c_int32), ctypes.c_int,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_double)), ctypes.c_int,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)), ctypes.c_int,
             ctypes.POINTER(ctypes.c_int32), ctypes.c_int, ctypes.c_int,
@@ -74,7 +77,7 @@ def _flat(table) -> list:
 
 def pack_frame(frame: bitstream.Frame, out: array) -> None:
     """Append one frame record (layout read by decode_frame in _lpec.c)."""
-    lsp_a = frame.lsp_a or (0, 0, 0)
+    lsp_a = frame.lsp_a or (0,) * len(frame.lsp_b)
     lag_a, pg_a = frame.pitch_a if frame.pitch_a is not None else (0, None)
     lag_b, pg_b = frame.pitch_b
     flags = frame.shape_flags or (0, 0)
@@ -101,7 +104,7 @@ def pack_frame(frame: bitstream.Frame, out: array) -> None:
 
 def decode_frames(tables, frames: List[bitstream.Frame]) -> bytearray:
     """Decode parsed frames with a fresh decoder state; little-endian int16
-    PCM, 512 samples per frame. (Packs them and calls decode_packed; the
+    PCM, a frame's samples (LP 512, SP 1024) per frame. (Packs them and calls decode_packed; the
     decoder itself packs frame by frame instead, so it never holds a list
     of Frame objects.)"""
     packed = array("i")
@@ -110,13 +113,32 @@ def decode_frames(tables, frames: List[bitstream.Frame]) -> bytearray:
     return decode_packed(tables, packed, len(frames))
 
 
+def _config_array(cfg: Config):
+    """The configuration as the int32 array lpec_decode takes (CFG_* in _lpec.c)."""
+    values = [cfg.frame, cfg.order, cfg.bands, cfg.lsp_stages, cfg.lag_bits,
+              *cfg.transform_n, *cfg.band_width, *cfg.first_coded, *cfg.end_coded,
+              *cfg.overlap]
+    return (ctypes.c_int32 * len(values))(*values)
+
+
+def _expand(tables, name):
+    """The tables behind one T_* slot group, in enum order."""
+    value = getattr(tables, name)
+    if name in ("C", "D"):
+        stages = list(value)
+        return stages + [stages[-1]] * (4 - len(stages))
+    if name == "POST":
+        return list(value)
+    return [value]
+
+
 def _table_pointers(tables):
     """The ctypes table arrays (kept alive by the caller) and the two
     pointer arrays lpec_decode takes."""
     dbufs = [(ctypes.c_double * len(v))(*v)
-             for v in (_flat(getattr(tables, n)) for n in _DOUBLE_TABLES)]
+             for v in (_flat(t) for n in _DOUBLE_TABLES for t in _expand(tables, n))]
     ibufs = [(ctypes.c_int32 * len(v))(*v)
-             for v in (_flat(getattr(tables, n)) for n in _INT_TABLES)]
+             for v in (_flat(t) for n in _INT_TABLES for t in _expand(tables, n))]
     dptrs = (ctypes.POINTER(ctypes.c_double) * len(dbufs))(
         *[ctypes.cast(b, ctypes.POINTER(ctypes.c_double)) for b in dbufs])
     iptrs = (ctypes.POINTER(ctypes.c_int32) * len(ibufs))(
@@ -129,7 +151,7 @@ def decode_packed(tables, packed: array, nframes: int, prefix: int = 0) -> bytea
     pack_frame) with a fresh decoder state.
 
     Returns a bytearray of ``prefix`` zero bytes followed by the
-    little-endian int16 PCM (512 samples per frame). The C core writes the
+    little-endian int16 PCM (the configuration's frame length per frame). The C core writes the
     PCM straight into that bytearray, so the output exists once; ``prefix``
     leaves room for a header (dvf_to_wav's 44-byte WAV header) without a
     second copy.
@@ -137,14 +159,16 @@ def decode_packed(tables, packed: array, nframes: int, prefix: int = 0) -> bytea
     if _lib is None:
         raise RuntimeError(f"{DLL_PATH.name} is not available")
     keep, dptrs, iptrs = _table_pointers(tables)
+    cfg = tables.config
+    cfg_array = _config_array(cfg)
 
-    out = bytearray(prefix + nframes * FRAME_SAMPLES * 2)
-    pcm = (ctypes.c_int16 * (nframes * FRAME_SAMPLES)).from_buffer(out, prefix)
+    out = bytearray(prefix + nframes * cfg.frame * 2)
+    pcm = (ctypes.c_int16 * (nframes * cfg.frame)).from_buffer(out, prefix)
     if not len(packed):
         packed = array("i", [0])
     frame_buf = (ctypes.c_int32 * len(packed)).from_buffer(packed)
     try:
-        done = _lib.lpec_decode(dptrs, len(keep[0]), iptrs, len(keep[1]),
+        done = _lib.lpec_decode(cfg_array, len(cfg_array), dptrs, len(keep[0]), iptrs, len(keep[1]),
                                 frame_buf, len(packed), nframes, pcm)
     finally:
         # Release the buffer exports so ``out`` and ``packed`` can be

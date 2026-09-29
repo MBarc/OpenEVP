@@ -4,7 +4,9 @@
  * An exact port of openevp/decoders/sony_lpec/params.py, synthesis.py, x87.py (fcos) and the
  * per-frame part of decoder.py; see docs/lpec.md. The frame fields come
  * already parsed (openevp/decoders/sony_lpec/bitstream.py, packed by openevp/decoders/sony_lpec/_core.py),
- * and the tables come from openevp/decoders/sony_lpec/tables.py.
+ * and the tables come from openevp/decoders/sony_lpec/tables.py. The
+ * configuration (LPEC LP, 8000 Hz; LPEC SP, 16000 Hz: config.py) is passed in
+ * with every decode.
  *
  * Bit-exactness rules (docs/lpec.md, "Arithmetic"):
  * - every real is an IEEE double (x64 SSE2); no long double, no FMA
@@ -27,7 +29,7 @@
 #include <string.h>
 
 #define EXPORT __declspec(dllexport)
-#define ABI_VERSION 2
+#define ABI_VERSION 3
 
 typedef int64_t i64;
 typedef unsigned __int128 u128;
@@ -208,13 +210,18 @@ static i64 cdiv(i64 a, i64 b) { return a / b; }   /* C: toward zero */
  * ---------------------------------------------------------------------- */
 
 enum {
-    T_C1, T_C2, T_C3, T_PT, T_SHAPES, T_GAIN, T_BG1, T_BG2, T_VQ2, T_VQ4,
-    T_VQ8, T_NA, T_NB, T_WIN512, T_WIN512_SQ, T_WIN1024, T_FFT_SIN_2048,
-    T_FFT_SIN_1536, T_POST256, T_POST384, T_POST512, T_LSP_INIT,
+    T_C1, T_C2, T_C3, T_C4,   /* LSP codebooks by stage; T_C4 unused with 3 stages */
+    T_PT, T_SHAPES, T_GAIN, T_BG1, T_BG2, T_VQ2, T_VQ4, T_VQ8, T_NA, T_NB,
+    T_WIN,              /* F-point sine window v (F = frame) */
+    T_WIN_SQ,           /* its square v2 */
+    T_WIN_LONG,         /* 2F-point sine window */
+    T_FFT_SIN_2048, T_FFT_SIN_1536,
+    T_POST0, T_POST1, T_POST2, T_POST3,   /* post-twiddle by transform type */
+    T_LSP_INIT,
     T_DEFAULT_SHAPE,    /* 8 doubles, all 1.0: Tables.DEFAULT_SHAPE */
     N_DTABLES
 };
-enum { T_D1, T_D2, T_D3, T_PQ, T_S2048, T_S1536, N_ITABLES };
+enum { T_D1, T_D2, T_D3, T_D4, T_PQ, T_S2048, T_S1536, N_ITABLES };
 
 typedef struct {
     const double *d[N_DTABLES];
@@ -222,78 +229,139 @@ typedef struct {
 } Tables;
 
 /* ------------------------------------------------------------------------
- * Configuration constants (params.py)
+ * Configuration (openevp/decoders/sony_lpec/config.py; the layout of the
+ * int32 array _core.py passes)
  * ---------------------------------------------------------------------- */
 
-#define BANDS 8
-#define ORDER 10
-static const int TRANSFORM_N[4] = {512, 768, 768, 1024};
-static const int BAND_WIDTH[4] = {28, 42, 42, 56};
-static const int FIRST_CODED[4] = {2, 3, 3, 4};
-static const int END_CODED[4] = {226, 339, 339, 452};
-static const int OVERLAP[4] = {256, 256, 512, 512};
+enum {
+    CFG_FRAME, CFG_ORDER, CFG_BANDS, CFG_STAGES, CFG_LAG_BITS,
+    CFG_N = 5,          /* 4 entries each, by transform type t */
+    CFG_W = 9,
+    CFG_S = 13,
+    CFG_E = 17,
+    CFG_OVERLAP = 21,
+    N_CFG = 25
+};
+
+typedef struct {
+    int frame, order, bands, stages, max_lag;
+    int N[4], W[4], s[4], e[4], overlap[4];
+} Config;
+
+#define MAX_ORDER 16
+#define MAX_BANDS 10
+#define MAX_FRAME 1024
+#define MAX_N 2048          /* longest transform (2 frames) */
+#define MAX_W 96            /* widest band */
+#define MAX_LAG 255         /* 8-bit lag field */
+#define HISTORY 256         /* pitch history kept between frames (either rate) */
+
 static const double Q15 = 3.0517578125e-05;
 static const double PI_C = 3.14159265359;
 
-/* Table row counts (openevp/decoders/sony_lpec/tables.py: C1/C2/C3/PT/PQ 64 rows, SHAPES/GAIN
- * 128, BG1/BG2 64, VQ2/VQ4/VQ8 256), i.e. the bitstream field widths that
- * index them (bitstream.py: 6-bit LSP/pgidx/band-gain indices, 7-bit
- * lag/global-gain/shape indices, 8-bit VQ indices). Frame records come from
- * this repo's own parser (openevp/decoders/sony_lpec/bitstream.py via _core.py's packing),
- * but decode_frame validates them defensively rather than trusting the
- * packed ints to stay in range.
+/* Checks a configuration against the sizes this file's arrays allow.
+ * Returns 0 when usable. */
+static int config_from(const int32_t *c, int n, Config *cfg)
+{
+    if (n != N_CFG)
+        return -1;
+    cfg->frame = c[CFG_FRAME];
+    cfg->order = c[CFG_ORDER];
+    cfg->bands = c[CFG_BANDS];
+    cfg->stages = c[CFG_STAGES];
+    if (c[CFG_LAG_BITS] < 1 || c[CFG_LAG_BITS] > 8)
+        return -1;
+    cfg->max_lag = (1 << c[CFG_LAG_BITS]) - 1;
+    if ((cfg->frame != 512 && cfg->frame != 1024) || cfg->order < 2 || cfg->order > MAX_ORDER ||
+        cfg->order % 2 || cfg->bands < 1 || cfg->bands > MAX_BANDS ||
+        (cfg->stages != 3 && cfg->stages != 4))
+        return -1;
+    for (int t = 0; t < 4; t++) {
+        cfg->N[t] = c[CFG_N + t];
+        cfg->W[t] = c[CFG_W + t];
+        cfg->s[t] = c[CFG_S + t];
+        cfg->e[t] = c[CFG_E + t];
+        cfg->overlap[t] = c[CFG_OVERLAP + t];
+        int N = cfg->N[t];
+        if (N < 8 || N > MAX_N || N % 8 || (N % 3 != 0 && 2048 % N) || (N % 3 == 0 && 1536 % N) ||
+            cfg->W[t] < 1 || cfg->W[t] > MAX_W || cfg->s[t] < 0 ||
+            cfg->e[t] != cfg->s[t] + cfg->bands * cfg->W[t] || cfg->e[t] > N / 2 ||
+            cfg->overlap[t] < 0 || cfg->overlap[t] > N || cfg->overlap[t] % 2)
+            return -1;
+    }
+    /* The frame layout (decode_frame) assumes type 0 is one frame long and
+     * type 3 two, with the overlaps InitDecoder gives them. */
+    if (cfg->N[0] != cfg->frame || cfg->N[3] != 2 * cfg->frame ||
+        cfg->overlap[0] != cfg->frame / 2 || cfg->overlap[2] != cfg->frame)
+        return -1;
+    return 0;
+}
+
+/* Table row counts (openevp/decoders/sony_lpec/tables.py: C1..C4/D1..D4/PT/PQ
+ * 64 rows, SHAPES/GAIN 128, BG1/BG2 64, VQ2/VQ4/VQ8 256), i.e. the bitstream
+ * field widths that index them (bitstream.py: 6-bit LSP/pgidx/band-gain
+ * indices, 7-bit global-gain/shape indices, 8-bit VQ indices). Frame records
+ * come from this repo's own parser (openevp/decoders/sony_lpec/bitstream.py
+ * via _core.py's packing), but decode_frame validates them defensively
+ * rather than trusting the packed ints to stay in range.
  */
-#define N_LSP 64        /* C1/C2/C3/D1/D2/D3 rows: LSP set indices i1/i2/i3 */
+#define N_LSP 64        /* C1..C4/D1..D4 rows: LSP set indices */
 #define N_PT 64         /* PT/PQ rows: pgidx */
 #define N_SHAPES 128    /* SHAPES rows: shape index */
 #define N_GAIN 128      /* GAIN entries: global_gain */
 #define N_BG 64         /* BG1/BG2 rows: band_gain1/band_gain2 */
 #define N_VQ 256        /* VQ2/VQ4/VQ8 rows: raw 8-bit VQ indices */
-#define MAX_LAG 127     /* 7-bit pitch lag field */
 
 /* ------------------------------------------------------------------------
  * LSP decoding (params.py)
  * ---------------------------------------------------------------------- */
 
-static void sort_pass_d(double *v)
+static void sort_pass_d(double *v, int order)
 {
-    for (int j = 1; j < 11; j++) {
+    for (int j = 1; j <= order; j++) {
         if (v[j] < v[j - 1]) { double t = v[j]; v[j] = v[j - 1]; v[j - 1] = t; }
         if (j >= 2 && v[j - 2] > v[j - 1]) { double t = v[j - 2]; v[j - 2] = v[j - 1]; v[j - 1] = t; }
     }
 }
 
-static void sort_pass_i(i64 *v)
+static void sort_pass_i(i64 *v, int order)
 {
-    for (int j = 1; j < 11; j++) {
+    for (int j = 1; j <= order; j++) {
         if (v[j] < v[j - 1]) { i64 t = v[j]; v[j] = v[j - 1]; v[j - 1] = t; }
         if (j >= 2 && v[j - 2] > v[j - 1]) { i64 t = v[j - 2]; v[j - 2] = v[j - 1]; v[j - 1] = t; }
     }
 }
 
-static void lsp_double(const Tables *T, int i1, int i2, int i3, double *l)
+static void lsp_double(const Tables *T, const Config *cfg, const int *idx, double *l)
 {
-    const double *c1 = T->d[T_C1] + 10 * i1, *c2 = T->d[T_C2] + 10 * i2,
-                 *c3 = T->d[T_C3] + 10 * i3;
+    int order = cfg->order, half = order / 2;
+    const double *c1 = T->d[T_C1] + order * idx[0], *c2 = T->d[T_C2] + order * idx[1],
+                 *c3 = T->d[T_C3] + order * idx[2];
     l[0] = 0.0;
-    for (int j = 0; j < 10; j++)
-        l[j + 1] = (c3[j] + c2[j]) + c1[j];
+    if (cfg->stages == 4) {
+        const double *c4 = T->d[T_C4] + order * idx[3];
+        for (int j = 0; j < order; j++)
+            l[j + 1] = ((c3[j] + c4[j]) + c2[j]) + c1[j];
+    } else {
+        for (int j = 0; j < order; j++)
+            l[j + 1] = (c3[j] + c2[j]) + c1[j];
+    }
 
     double lim = 0.49;
-    for (int j = 10; j > 5; j--) {
+    for (int j = order; j > half; j--) {
         if (l[j] >= 0.5)
             l[j] = lim;
         lim = l[j] - 0.01;
     }
     lim = 0.01;
-    for (int j = 1; j < 6; j++) {
+    for (int j = 1; j <= half; j++) {
         if (l[j] < 0.0)
             l[j] = lim;
         lim = l[j] + 0.01;
     }
     l[0] = 0.0;
-    sort_pass_d(l);
-    for (int j = 1; j < 11; j++) {
+    sort_pass_d(l, order);
+    for (int j = 1; j <= order; j++) {
         if (l[j] - l[j - 1] < 0.01) {
             if (j == 1) {
                 l[1] = 0.01;
@@ -307,31 +375,39 @@ static void lsp_double(const Tables *T, int i1, int i2, int i3, double *l)
     l[0] = 0.0;
 }
 
-static void lsp_q16(const Tables *T, int i1, int i2, int i3, i64 *q)
+static void lsp_q16(const Tables *T, const Config *cfg, const int *idx, i64 *q)
 {
-    const int32_t *d1 = T->i[T_D1] + 10 * i1, *d2 = T->i[T_D2] + 10 * i2,
-                  *d3 = T->i[T_D3] + 10 * i3;
+    int order = cfg->order, half = order / 2;
+    const int32_t *d1 = T->i[T_D1] + order * idx[0], *d2 = T->i[T_D2] + order * idx[1],
+                  *d3 = T->i[T_D3] + order * idx[2];
     q[0] = 0;
-    for (int j = 0; j < 10; j++)
-        q[j + 1] = s16(((i64)d3[j] + 2 * (i64)d2[j] + 4 * (i64)d1[j]) >> 2);
+    if (cfg->stages == 4) {
+        /* D1 is Q16, D2..D4 Q19 */
+        const int32_t *d4 = T->i[T_D4] + order * idx[3];
+        for (int j = 0; j < order; j++)
+            q[j + 1] = s16((((i64)d2[j] + d3[j] + d4[j]) >> 3) + d1[j]);
+    } else {
+        for (int j = 0; j < order; j++)
+            q[j + 1] = s16(((i64)d3[j] + 2 * (i64)d2[j] + 4 * (i64)d1[j]) >> 2);
+    }
 
     i64 lim = 32112;
-    for (int j = 10; j > 5; j--) {
+    for (int j = order; j > half; j--) {
         if (q[j] < 0)
             q[j] = s16(lim);
         lim = q[j] - 655;
     }
     lim = 655;
-    for (int j = 1; j < 6; j++) {
+    for (int j = 1; j <= half; j++) {
         if (q[j] < 0)
             q[j] = s16(lim);
         lim = q[j] + 655;
     }
     q[0] = 0;
-    sort_pass_i(q);
+    sort_pass_i(q, order);
     if (q[1] < 655)
         q[1] = 655;
-    for (int j = 2; j < 11; j++) {
+    for (int j = 2; j <= order; j++) {
         i64 a = q[j], b = q[j - 1];
         if (a - b < 655) {
             q[j] = s16(cdiv(b + 656 + a, 2));
@@ -352,11 +428,12 @@ static i64 qmul(i64 x, i64 c)
     return i32(2 * (((lo * c) >> 15) + 2 * hi * c));
 }
 
-static void lpc_q(const Tables *T, const i64 *q, i64 *a16)
+static void lpc_q(const Tables *T, const i64 *q, int order, i64 *a16)
 {
     const int32_t *S = T->i[T_S2048];
-    i64 c[11];
-    for (int j = 0; j < 11; j++) {
+    int n = order + 1;
+    i64 c[MAX_ORDER + 1];
+    for (int j = 0; j < n; j++) {
         i64 e = i32(shl(q[j], 11));
         i64 f = (e & 0xFFFF) >> 1;
         i64 i = e >> 16;
@@ -364,12 +441,13 @@ static void lpc_q(const Tables *T, const i64 *q, i64 *a16)
         c[j] = s16(((32768 - f) * S[u] + S[u + 1] * f) >> 15);
     }
 
-    i64 Q[11] = {0}, P[11] = {0}, TQ[11] = {0}, TP[11] = {0};
+    i64 Q[MAX_ORDER + 1] = {0}, P[MAX_ORDER + 1] = {0}, TQ[MAX_ORDER + 1] = {0},
+        TP[MAX_ORDER + 1] = {0};
     Q[0] = -((i64)1 << 23);
     Q[1] = (i64)1 << 23;
     P[0] = -((i64)1 << 23);
     P[1] = -((i64)1 << 23);
-    for (int i = 1; i < 6; i++) {
+    for (int i = 1; i <= order / 2; i++) {
         i64 a = c[2 * i];
         i64 b = c[2 * i - 1];
         TQ[1] = qmul(Q[0], a);
@@ -386,9 +464,9 @@ static void lpc_q(const Tables *T, const i64 *q, i64 *a16)
         }
     }
 
-    i64 R[11];
+    i64 R[MAX_ORDER + 1];
     i64 A = 0;
-    for (int j = 0; j < 11; j++) {
+    for (int j = 0; j < n; j++) {
         R[j] = i32(-(P[j] + Q[j]));
         A |= R[j] < 0 ? -R[j] : R[j];
     }
@@ -396,14 +474,15 @@ static void lpc_q(const Tables *T, const i64 *q, i64 *a16)
     while (d < 16 && !(u32(shl(A, d)) & 0x40000000))
         d++;
     i64 rnd = d <= 15 ? ((i64)1 << (15 - d)) : 0;
-    for (int j = 0; j < 11; j++)
+    for (int j = 0; j < n; j++)
         a16[j] = s16((R[j] + rnd) >> (16 - d));
 }
 
-static void autocorrelation(const i64 *a16, i64 *E0, i64 *E1, i64 *r)
+static void autocorrelation(const i64 *a16, int order, i64 *E0, i64 *E1, i64 *r)
 {
+    int n = order + 1;
     i64 lo = 0, hi = 0;
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < n; i++) {
         i64 sq = a16[i] * a16[i];
         lo += sq & 0x7FFF;
         hi += sq >> 15;
@@ -413,9 +492,9 @@ static void autocorrelation(const i64 *a16, i64 *E0, i64 *E1, i64 *r)
 
     int s = 0;
     i64 ah = h < 0 ? -h : h;
-    for (int n = 0; n < 20; n++) {
-        if (shl(ah, n) & ((i64)1 << 18)) {
-            s = 19 - n;
+    for (int k = 0; k < 20; k++) {
+        if (shl(ah, k) & ((i64)1 << 18)) {
+            s = 19 - k;
             break;
         }
     }
@@ -435,9 +514,9 @@ static void autocorrelation(const i64 *a16, i64 *E0, i64 *E1, i64 *r)
 
     r[0] = 0;
     i64 mask = ((i64)1 << s) - 1;
-    for (int m = 1; m < 11; m++) {
+    for (int m = 1; m < n; m++) {
         i64 slo = 0, shi = 0;
-        for (int i = 0; i < 11 - m; i++) {
+        for (int i = 0; i < n - m; i++) {
             i64 p = a16[i] * a16[i + m];
             slo += p & mask;
             shi += p >> s;
@@ -446,12 +525,12 @@ static void autocorrelation(const i64 *a16, i64 *E0, i64 *E1, i64 *r)
     }
 }
 
-static void envelope(const Tables *T, const i64 *q, int lag, double pg, int N, i64 *w)
+static void envelope(const Tables *T, const i64 *q, int order, int lag, double pg, int N, i64 *w)
 {
     int M = N / 2;
-    i64 a16[11], E0, E1, r[11];
-    lpc_q(T, q, a16);
-    autocorrelation(a16, &E0, &E1, r);
+    i64 a16[MAX_ORDER + 1], E0, E1, r[MAX_ORDER + 1];
+    lpc_q(T, q, order, a16);
+    autocorrelation(a16, order, &E0, &E1, r);
 
     const int32_t *table;
     int step;
@@ -470,7 +549,7 @@ static void envelope(const Tables *T, const i64 *q, int lag, double pg, int N, i
         gq = s16((i64)(32768 * pg));
     for (int k = 0; k < M; k++) {
         i64 accH = E0, accL = E1;
-        for (int m = 1; m < 11; m++) {
+        for (int m = 1; m <= order; m++) {
             i64 v = r[m] * TT(quarter + m * k);
             accL += v & 0x7FFFF;
             accH += v >> 19;
@@ -494,7 +573,7 @@ static void envelope(const Tables *T, const i64 *q, int lag, double pg, int N, i
 
 typedef struct {
     int slot, type, gg, bg1, bg2;
-    int n4[BANDS], n2[BANDS], n1[BANDS], ns[BANDS];
+    int n4[MAX_BANDS], n2[MAX_BANDS], n1[MAX_BANDS], ns[MAX_BANDS];
     int k0, k1, k2, ks;
     const int32_t *vq2, *vq4, *vq8, *signs;
 } Block;
@@ -524,21 +603,22 @@ static int rank_cmp(const void *a, const void *b)
     return ka < kb ? -1 : ka > kb;
 }
 
-static void coefficients(const Tables *T, const Block *blk, const i64 *q, int lag,
-                         const int32_t *pq, int *noise_z, double *X)
+static void coefficients(const Tables *T, const Config *cfg, const Block *blk, const i64 *q,
+                         int lag, const int32_t *pq, int *noise_z, double *X)
 {
+    int bands = cfg->bands;
     int t = blk->type;
-    int N = TRANSFORM_N[t];
+    int N = cfg->N[t];
     int M = N / 2;
-    int W = BAND_WIDTH[t];
-    int s = FIRST_CODED[t];
-    int e = END_CODED[t];
+    int W = cfg->W[t];
+    int s = cfg->s[t];
+    int e = cfg->e[t];
 
     double G = T->d[T_GAIN][blk->gg];
-    const double *bg1 = T->d[T_BG1] + 8 * blk->bg1;
-    const double *bg2 = T->d[T_BG2] + 8 * blk->bg2;
-    double bg[BANDS];
-    for (int b = 0; b < BANDS; b++) {
+    const double *bg1 = T->d[T_BG1] + bands * blk->bg1;
+    const double *bg2 = T->d[T_BG2] + bands * blk->bg2;
+    double bg[MAX_BANDS];
+    for (int b = 0; b < bands; b++) {
         double v = bg2[b] + bg1[b];
         if (v < 1e-05)
             v = 1e-05;
@@ -546,8 +626,8 @@ static void coefficients(const Tables *T, const Block *blk, const i64 *q, int la
     }
     double pg = (double)pq[1] * Q15;
 
-    i64 w[512];
-    envelope(T, q, lag, pg, N, w);
+    i64 w[MAX_N / 2];
+    envelope(T, q, cfg->order, lag, pg, N, w);
 
     VQStream vq2 = {T->d[T_VQ2], blk->vq2, 2, 0, 0};
     VQStream vq4 = {T->d[T_VQ4], blk->vq4, 4, 0, 0};
@@ -558,9 +638,9 @@ static void coefficients(const Tables *T, const Block *blk, const i64 *q, int la
 
     for (int i = 0; i < M; i++)
         X[i] = 0.0;
-    for (int b = 0; b < BANDS; b++) {
+    for (int b = 0; b < bands; b++) {
         int base = s + b * W;
-        Rank order[56];
+        Rank order[MAX_W];
         for (int j = 0; j < W; j++) {
             order[j].key = (w[base + j] & ~(i64)0x7F) | j;
             order[j].x = base + j;
@@ -586,7 +666,7 @@ static void coefficients(const Tables *T, const Block *blk, const i64 *q, int la
         X[i] = 0.0;
     for (int i = e; i < M; i++)
         X[i] = 0.0;
-    for (int b = 0; b < BANDS; b++) {
+    for (int b = 0; b < bands; b++) {
         int base = s + b * W;
         double g = bg[b];
         for (int x = base; x < base + W; x++)
@@ -650,13 +730,15 @@ static void fft_radix2(double *re, double *im, int n, double c, const double *S)
     }
 }
 
-static void fft384(double *re, double *im, const double *S, const double *U, double s3)
+/* Size n = 3m (384 or 768): one radix-3 stage, three radix-2 FFTs of m. */
+static void fft_radix3(double *re, double *im, int n, const double *S, const double *U, double s3)
 {
-    const int m = 128;
+    const int m = n / 3;
+    const int step = 1536 / n;
     for (int j = 0; j < m; j++) {
         double x0 = re[j], x1 = re[j + m], x2 = re[j + 2 * m];
         double y0 = im[j], y1 = im[j + m], y2 = im[j + 2 * m];
-        int k = 4 * j;
+        int k = step * j;
         re[j] = x0 + (x2 + x1);
         im[j] = y0 + (y2 + y1);
         double alpha = x0 - (0.5 * (x2 + x1));
@@ -673,11 +755,11 @@ static void fft384(double *re, double *im, const double *S, const double *U, dou
         im[j + 2 * m] = (u2 * U[2 * k]) - (v2 * U[2 * k + 384]);
     }
 
-    double c = 1.0 / 384;
-    double tr[3][128], ti[3][128];
+    double c = 1.0 / n;
+    double tr[3][MAX_N / 6], ti[3][MAX_N / 6];
     for (int p = 0; p < 3; p++) {
-        memcpy(tr[p], re + p * m, sizeof tr[p]);
-        memcpy(ti[p], im + p * m, sizeof ti[p]);
+        memcpy(tr[p], re + p * m, m * sizeof(double));
+        memcpy(ti[p], im + p * m, m * sizeof(double));
         fft_radix2(tr[p], ti[p], m, c, S);
     }
     for (int j = 0; j < m; j++) {
@@ -689,24 +771,21 @@ static void fft384(double *re, double *im, const double *S, const double *U, dou
 }
 
 static void inverse_transform(const Tables *T, const double *X, int N, int overlap,
-                              double s3, double *Y)
+                              const double *w, double s3, double *Y)
 {
     int h = N / 2;
     int q = N / 4;
     const double *S;
     int sigma;
-    if (N == 768) {
+    if (N % 3 == 0) {
         S = T->d[T_FFT_SIN_1536];
-        sigma = 2;
-    } else if (N == 512) {
-        S = T->d[T_FFT_SIN_2048];
-        sigma = 4;
+        sigma = 1536 / N;
     } else {
         S = T->d[T_FFT_SIN_2048];
-        sigma = 2;
+        sigma = 2048 / N;
     }
 
-    double re[512], im[512];
+    double re[MAX_N / 2], im[MAX_N / 2];
     for (int i = 0; i < q; i++) {
         double x = X[2 * i];
         re[i] = x * S[(q - i) * sigma];
@@ -718,12 +797,11 @@ static void inverse_transform(const Tables *T, const double *X, int N, int overl
         im[i] = x * S[(N - i) * sigma];
     }
 
-    if (h == 384)
-        fft384(re, im, T->d[T_FFT_SIN_2048], T->d[T_FFT_SIN_1536], s3);
+    if (h % 3 == 0)
+        fft_radix3(re, im, h, T->d[T_FFT_SIN_2048], T->d[T_FFT_SIN_1536], s3);
     else
         fft_radix2(re, im, h, 1.0 / h, T->d[T_FFT_SIN_2048]);
 
-    const double *w = N == 512 ? T->d[T_POST256] : N == 768 ? T->d[T_POST384] : T->d[T_POST512];
     int half_lambda = overlap / 2;
     int top = N - half_lambda - 1;
     for (int i = 0; i < h; i++)
@@ -746,16 +824,18 @@ static void overlap_add_plain(double *O, const double *Y, int length, int carry,
     memcpy(O, Y + length, carry * sizeof(double));
 }
 
-/* Returns -1 (Python would raise ZeroDivisionError, or later fail casting a
+/* The mode-0 half: `half` outputs from the F-point Y (F = 2 * half).
+ * Returns -1 (Python would raise ZeroDivisionError, or later fail casting a
  * non-finite sample to int16) instead of letting a non-finite result run
  * through the rest of the pipeline undetected. */
-static int overlap_add_shaped(double *O, const double *Y, int fp, const double *Ap,
+static int overlap_add_shaped(double *O, const double *Y, int half, int fp, const double *Ap,
                               int fc, const double *Ac, const double *v,
                               const double *v2, double *out)
 {
+    int part = half / 4;
     if (fp == 0 && fc == 0) {
-        for (int j = 0; j < 256; j++) {
-            out[j] = (O[j] * v[256 + j]) + (v[j] * Y[j]);
+        for (int j = 0; j < half; j++) {
+            out[j] = (O[j] * v[half + j]) + (v[j] * Y[j]);
             if (!isfinite(out[j]))
                 return -1;
         }
@@ -765,15 +845,15 @@ static int overlap_add_shaped(double *O, const double *Y, int fp, const double *
             double ac = Ac[3 - r];
             double rho1 = ap / Ap[4 + r];
             double rho2 = ac / Ac[r];
-            for (int j = 64 * r; j < 64 * r + 64; j++) {
-                out[j] = ((O[j] * (ap * v[256 + j])) + ((ac * v[j]) * Y[j])) /
-                         ((v2[256 + j] * rho1) + (v2[j] * rho2));
+            for (int j = part * r; j < part * r + part; j++) {
+                out[j] = ((O[j] * (ap * v[half + j])) + ((ac * v[j]) * Y[j])) /
+                         ((v2[half + j] * rho1) + (v2[j] * rho2));
                 if (!isfinite(out[j]))
                     return -1;
             }
         }
     }
-    memcpy(O, Y + 256, 256 * sizeof(double));
+    memcpy(O, Y + half, half * sizeof(double));
     return 0;
 }
 
@@ -791,7 +871,7 @@ static double q15_floor(double v)
 static int taps_stable(int lag, const double *taps)
 {
     double b0 = taps[0], b1 = taps[1], b2 = taps[2];
-    double c[130], r[130], nr[130];
+    double c[MAX_LAG + 2], r[MAX_LAG + 2], nr[MAX_LAG + 2];
     int len = lag + 2;
     for (int j = 0; j < len; j++)
         c[j] = 0.0;
@@ -819,7 +899,7 @@ static void pitch_section(double *H, const double *x, int start, int length, int
 {
     if (lag == 0) {
         for (int n = start; n < start + length; n++)
-            H[n] = x[n - 256];
+            H[n] = x[n - HISTORY];
         return;
     }
     double b0 = taps[0], b1 = taps[1], b2 = taps[2];
@@ -828,24 +908,26 @@ static void pitch_section(double *H, const double *x, int start, int length, int
         b2 = 0.0;
     }
     for (int n = start; n < start + length; n++)
-        H[n] = (((b2 * H[n - lag - 1]) + x[n - 256]) + (b1 * H[n - lag])) + (H[n - lag + 1] * b0);
+        H[n] = (((b2 * H[n - lag - 1]) + x[n - HISTORY]) + (b1 * H[n - lag])) + (H[n - lag + 1] * b0);
 }
 
 /* ------------------------------------------------------------------------
  * LPC synthesis (synthesis.py)
  * ---------------------------------------------------------------------- */
 
-static void lsp_to_lpc(const double *l, double *a)
+static void lsp_to_lpc(const double *l, int order, double *a)
 {
-    double C[12] = {0};
-    for (int j = 1; j < 12; j++)
+    int n = order + 1;
+    double C[MAX_ORDER + 2] = {0};
+    for (int j = 1; j <= n; j++)
         C[j] = lpec_fcos((l[j - 1] * PI_C) * 2.0);
-    double P[11] = {0}, Q[11] = {0}, TQ[11] = {0}, TP[11] = {0};
+    double P[MAX_ORDER + 1] = {0}, Q[MAX_ORDER + 1] = {0}, TQ[MAX_ORDER + 1] = {0},
+           TP[MAX_ORDER + 1] = {0};
     P[0] = -1.0;
     P[1] = -1.0;
     Q[0] = -1.0;
     Q[1] = 1.0;
-    for (int i = 2; i <= 10; i += 2) {
+    for (int i = 2; i <= order; i += 2) {
         double u = C[i];
         double v = C[i + 1];
         TQ[1] = (v * 2.0) * Q[0];
@@ -861,33 +943,25 @@ static void lsp_to_lpc(const double *l, double *a)
             P[i + 1 - m] = P[m];
         }
     }
-    for (int m = 0; m < 11; m++)
+    for (int m = 0; m < n; m++)
         a[m] = (Q[m] + P[m]) * (-0.5);
 }
 
-static void interpolate_lsp(const double *lA, const double *lB, double t, double *l)
+static void interpolate_lsp(const double *lA, const double *lB, double t, int n, double *l)
 {
-    for (int j = 0; j < 11; j++)
+    for (int j = 0; j < n; j++)
         l[j] = (lA[j] * (1.0 - t)) + (lB[j] * t);
 }
 
-/* y[k] for k = count..count+length-1; y[count-10..count-1] is the memory. */
-static void lpc_filter(const double *e, int start, int length, const double *a,
+/* y[k] for k = count..count+length-1; y[count-order..count-1] is the memory. */
+static void lpc_filter(const double *e, int start, int length, const double *a, int order,
                        double *y, int *count)
 {
     int k = *count;
     for (int n = start; n < start + length; n++, k++) {
         double v = e[n];
-        v = v - (y[k - 1] * a[1]);
-        v = v - (y[k - 2] * a[2]);
-        v = v - (y[k - 3] * a[3]);
-        v = v - (y[k - 4] * a[4]);
-        v = v - (y[k - 5] * a[5]);
-        v = v - (y[k - 6] * a[6]);
-        v = v - (y[k - 7] * a[7]);
-        v = v - (y[k - 8] * a[8]);
-        v = v - (y[k - 9] * a[9]);
-        v = v - (y[k - 10] * a[10]);
+        for (int m = 1; m <= order; m++)
+            v = v - (y[k - m] * a[m]);
         y[k] = v;
     }
     *count = k;
@@ -916,22 +990,22 @@ static int to_int16(double y, int16_t *out)
 
 typedef struct {
     int noise_z;
-    double H[768];
-    double lsp0[11];
-    i64 q0[11];
+    double H[HISTORY + MAX_FRAME];
+    double lsp0[MAX_ORDER + 1];
+    i64 q0[MAX_ORDER + 1];
     int lag0;
     double taps0[3];
     int flags[3];
     const double *shapes[3];
-    double mem[ORDER];
-    double O[512];
+    double mem[MAX_ORDER];
+    double O[MAX_FRAME];
 } State;
 
-static void state_init(State *st, const Tables *T)
+static void state_init(State *st, const Tables *T, const Config *cfg)
 {
     memset(st, 0, sizeof *st);
-    memcpy(st->lsp0, T->d[T_LSP_INIT], sizeof st->lsp0);
-    for (int j = 0; j < 11; j++)
+    memcpy(st->lsp0, T->d[T_LSP_INIT], (cfg->order + 1) * sizeof(double));
+    for (int j = 0; j <= cfg->order; j++)
         st->q0[j] = s16((i64)floor(st->lsp0[j] * 65536.0));
     for (int i = 0; i < 3; i++)
         st->shapes[i] = T->d[T_DEFAULT_SHAPE];
@@ -949,17 +1023,24 @@ static void pitch_params(const Tables *T, int lag, int pgidx, double *taps, cons
     }
 }
 
-/* Frame record layout: see openevp/decoders/sony_lpec/_core.py (pack_frame). */
-#define HDR 17
-
-static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
-                        int16_t *samples, double s3)
+/* Frame record layout: see openevp/decoders/sony_lpec/_core.py (pack_frame).
+ * Header: mode, F, lsp_b[stages], lsp_a[stages], lag_a, pgidx_a, lag_b,
+ * pgidx_b, shape flag 0, flag 1, shape index 0, index 1, number of blocks.
+ * Block: slot, type, global gain, band gain 1, 2, n4/n2/n1/ns[bands],
+ * k0, k1, k2, ks, then the indices and sign bits. */
+static int decode_frame(State *st, const Tables *T, const Config *cfg, const int32_t *f,
+                        int avail, int16_t *samples, double s3)
 {
-    if (avail < HDR)
+    const int stages = cfg->stages, bands = cfg->bands, order = cfg->order;
+    const int F = cfg->frame, half = F / 2;
+    const int hdr = 11 + 2 * stages;
+    const int brec = 9 + 4 * bands;
+    if (avail < hdr)
         return -1;
-    int mode = f[0], F = f[1];
-    int nblocks = f[16];
-    if (mode < 0 || mode > 3 || (F != 0 && F != 1))
+    const int32_t *lsp_b = f + 2, *lsp_a = f + 2 + stages, *g = f + 2 + 2 * stages;
+    int mode = f[0], Fl = f[1];
+    int nblocks = g[8];
+    if (mode < 0 || mode > 3 || (Fl != 0 && Fl != 1))
         return -1;
     /* mode<->nblocks: modes 0 and 2 always carry a slot-1 and a slot-2
      * block, modes 1 and 3 only slot-2 (bitstream.py: _parse_mode0/2 append
@@ -968,44 +1049,45 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
     if (nblocks != expected_blocks)
         return -1;
 
-    /* LSP set indices (i1/i2/i3): 6-bit fields, table rows 0..N_LSP-1.
-     * f[5..7] (slot A) are always present in the record, defaulted to
-     * (0, 0, 0) by pack_frame when the frame has no slot-1 LSP set, so
-     * checking them unconditionally matches what a real frame ever holds. */
-    if (f[2] < 0 || f[2] >= N_LSP || f[3] < 0 || f[3] >= N_LSP ||
-        f[4] < 0 || f[4] >= N_LSP)
-        return -1;
-    if (f[5] < 0 || f[5] >= N_LSP || f[6] < 0 || f[6] >= N_LSP ||
-        f[7] < 0 || f[7] >= N_LSP)
-        return -1;
+    /* LSP set indices: 6-bit fields, table rows 0..N_LSP-1. Slot A's are
+     * always present in the record, defaulted to zeros by pack_frame when
+     * the frame has no slot-1 LSP set, so checking them unconditionally
+     * matches what a real frame ever holds. */
+    int ib[4], ia[4];
+    for (int k = 0; k < stages; k++) {
+        ib[k] = lsp_b[k];
+        ia[k] = lsp_a[k];
+        if (ib[k] < 0 || ib[k] >= N_LSP || ia[k] < 0 || ia[k] >= N_LSP)
+            return -1;
+    }
 
-    /* Pitch lag: 7-bit field. pgidx is a 6-bit field only actually read
-     * (into a table index) when lag != 0 -- _read_pitch never reads it
-     * otherwise, and pack_frame stores 0 for it either way. */
-    int lag1 = f[8], lag2 = f[10];
-    if (lag1 < 0 || lag1 > MAX_LAG || lag2 < 0 || lag2 > MAX_LAG)
+    /* Pitch lag: a 7-bit (SP: 8-bit) field. pgidx is a 6-bit field only
+     * actually read (into a table index) when lag != 0 -- _read_pitch never
+     * reads it otherwise, and pack_frame stores 0 for it either way. */
+    int lag1 = g[0], lag2 = g[2];
+    if (lag1 < 0 || lag1 > cfg->max_lag || lag2 < 0 || lag2 > cfg->max_lag)
         return -1;
-    if (lag1 != 0 && (f[9] < 0 || f[9] >= N_PT))
+    if (lag1 != 0 && (g[1] < 0 || g[1] >= N_PT))
         return -1;
-    if (lag2 != 0 && (f[11] < 0 || f[11] >= N_PT))
+    if (lag2 != 0 && (g[3] < 0 || g[3] >= N_PT))
         return -1;
 
     /* Shape flags/indices: mode 0 only; the index is only read (and only
      * meaningful) when its flag is set (_parse_mode0). */
     if (mode == 0) {
-        if ((f[12] != 0 && f[12] != 1) || (f[13] != 0 && f[13] != 1))
+        if ((g[4] != 0 && g[4] != 1) || (g[5] != 0 && g[5] != 1))
             return -1;
-        if (f[12] && (f[14] < 0 || f[14] >= N_SHAPES))
+        if (g[4] && (g[6] < 0 || g[6] >= N_SHAPES))
             return -1;
-        if (f[13] && (f[15] < 0 || f[15] >= N_SHAPES))
+        if (g[5] && (g[7] < 0 || g[7] >= N_SHAPES))
             return -1;
     }
 
-    int used = HDR;
+    int used = hdr;
     Block blocks[2];
     for (int bi = 0; bi < nblocks; bi++) {
         Block *b = &blocks[bi];
-        if (avail - used < 41)
+        if (avail - used < brec)
             return -1;
         const int32_t *p = f + used;
         b->slot = p[0];
@@ -1013,16 +1095,16 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
         b->gg = p[2];
         b->bg1 = p[3];
         b->bg2 = p[4];
-        for (int k = 0; k < BANDS; k++) {
+        for (int k = 0; k < bands; k++) {
             b->n4[k] = p[5 + k];
-            b->n2[k] = p[13 + k];
-            b->n1[k] = p[21 + k];
-            b->ns[k] = p[29 + k];
+            b->n2[k] = p[5 + bands + k];
+            b->n1[k] = p[5 + 2 * bands + k];
+            b->ns[k] = p[5 + 3 * bands + k];
         }
-        b->k0 = p[37];
-        b->k1 = p[38];
-        b->k2 = p[39];
-        b->ks = p[40];
+        b->k0 = p[5 + 4 * bands];
+        b->k1 = p[6 + 4 * bands];
+        b->k2 = p[7 + 4 * bands];
+        b->ks = p[8 + 4 * bands];
         if (b->type < 0 || b->type > 3 ||
             b->k0 < 0 || b->k1 < 0 || b->k2 < 0 || b->ks < 0)
             return -1;
@@ -1035,22 +1117,27 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
         int expected_slot = (nblocks == 2 && bi == 0) ? 1 : 2;
         if (b->slot != expected_slot)
             return -1;
+        /* ... and so is each block's transform type (mode 0: 0, 0; mode 1:
+         * 1; mode 2: 0, 2; mode 3: 3), which the frame layout below relies on. */
+        int expected_type = mode == 0 ? 0 : mode == 2 ? (bi == 0 ? 0 : 2) : mode;
+        if (b->type != expected_type)
+            return -1;
         if (b->gg < 0 || b->gg >= N_GAIN || b->bg1 < 0 || b->bg1 >= N_BG ||
             b->bg2 < 0 || b->bg2 >= N_BG)
             return -1;
         /* Per band, n4+n2+n1+ns must not exceed the band width W: coefficients()
-         * ranks exactly W positions per band into a W-sized prefix of order[56],
+         * ranks exactly W positions per band into a W-sized prefix of order[],
          * so an over-budget band would read past the entries it filled (and,
-         * for W < 56, could still write X[] through garbage stack indices).
+         * for W < MAX_W, could still write X[] through garbage stack indices).
          * The totals must also match k0/k1/k2 exactly (VQ2 dim 2, VQ4 dim 4,
          * VQ8 dim 8; bitstream.bit_allocation always produces this): each
          * band's n4/n2/n1 quota is exactly what advances vq_next() by, so a
          * mismatch would run a VQStream past the vq2/vq4/vq8 arrays the
          * record actually provided (already bounds-checked above only for
          * their combined length, not per-class use). */
-        int W = BAND_WIDTH[b->type];
+        int W = cfg->W[b->type];
         i64 sum_n4 = 0, sum_n2 = 0, sum_n1 = 0, sum_ns = 0;
-        for (int k = 0; k < BANDS; k++) {
+        for (int k = 0; k < bands; k++) {
             if (b->n4[k] < 0 || b->n2[k] < 0 || b->n1[k] < 0 || b->ns[k] < 0)
                 return -1;
             i64 band_sum = (i64)b->n4[k] + b->n2[k] + b->n1[k] + b->ns[k];
@@ -1064,7 +1151,7 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
         if (sum_n4 != 2 * (i64)b->k0 || sum_n2 != 4 * (i64)b->k1 ||
             sum_n1 != 8 * (i64)b->k2 || sum_ns != (i64)b->ks)
             return -1;
-        used += 41;
+        used += brec;
         if (avail - used < b->k0 + b->k1 + b->k2 + b->ks)
             return -1;
         b->vq2 = f + used; used += b->k0;
@@ -1086,15 +1173,15 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
     }
 
     /* --- Parameter sets --- */
-    double l1[11], l2[11];
-    i64 q1[11], q2[11];
-    lsp_double(T, f[2], f[3], f[4], l2);
-    lsp_q16(T, f[2], f[3], f[4], q2);
-    if (mode == 0 && F == 1) {
-        lsp_double(T, f[5], f[6], f[7], l1);
-        lsp_q16(T, f[5], f[6], f[7], q1);
+    double l1[MAX_ORDER + 1], l2[MAX_ORDER + 1];
+    i64 q1[MAX_ORDER + 1], q2[MAX_ORDER + 1];
+    lsp_double(T, cfg, ib, l2);
+    lsp_q16(T, cfg, ib, q2);
+    if (mode == 0 && Fl == 1) {
+        lsp_double(T, cfg, ia, l1);
+        lsp_q16(T, cfg, ia, q1);
     } else if (mode == 0 || mode == 2) {
-        for (int j = 0; j < 11; j++) {
+        for (int j = 0; j <= order; j++) {
             l1[j] = (l2[j] + st->lsp0[j]) * 0.5;
             q1[j] = s16(cdiv(st->q0[j] + q2[j], 2));
         }
@@ -1102,15 +1189,15 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
 
     double taps1[3], taps2[3];
     const int32_t *pq1, *pq2;
-    pitch_params(T, lag1, f[9], taps1, &pq1);
-    pitch_params(T, lag2, f[11], taps2, &pq2);
+    pitch_params(T, lag1, g[1], taps1, &pq1);
+    pitch_params(T, lag2, g[3], taps2, &pq2);
 
     /* --- Shape state --- */
     if (mode == 0) {
         for (int h = 0; h < 2; h++) {
-            st->flags[1 + h] = f[12 + h];
-            st->shapes[1 + h] = f[12 + h] ? T->d[T_SHAPES] + 8 * f[14 + h]
-                                          : T->d[T_DEFAULT_SHAPE];
+            st->flags[1 + h] = g[4 + h];
+            st->shapes[1 + h] = g[4 + h] ? T->d[T_SHAPES] + 8 * g[6 + h]
+                                         : T->d[T_DEFAULT_SHAPE];
         }
     } else if (mode == 2) {
         st->flags[1] = st->flags[2] = 0;
@@ -1120,45 +1207,46 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
     }
 
     /* --- Coefficient blocks -> transforms --- */
-    double Ys[2][1024];
+    static const int POST[4] = {T_POST0, T_POST1, T_POST2, T_POST3};
+    double Ys[2][MAX_N];
     for (int bi = 0; bi < nblocks; bi++) {
         const Block *b = &blocks[bi];
-        double X[512];
-        int N = TRANSFORM_N[b->type];
+        double X[MAX_N / 2];
+        int t = b->type;
         if (b->slot == 1)
-            coefficients(T, b, q1, lag1, pq1, &st->noise_z, X);
+            coefficients(T, cfg, b, q1, lag1, pq1, &st->noise_z, X);
         else
-            coefficients(T, b, q2, lag2, pq2, &st->noise_z, X);
-        inverse_transform(T, X, N, OVERLAP[b->type], s3, Ys[bi]);
+            coefficients(T, cfg, b, q2, lag2, pq2, &st->noise_z, X);
+        inverse_transform(T, X, cfg->N[t], cfg->overlap[t], T->d[POST[t]], s3, Ys[bi]);
     }
 
-    double x[512];
+    double x[MAX_FRAME];
     double *O = st->O;
     if (mode == 0) {
         for (int h = 0; h < 2; h++)
-            if (overlap_add_shaped(O, Ys[h], st->flags[h], st->shapes[h], st->flags[h + 1],
-                                   st->shapes[h + 1], T->d[T_WIN512], T->d[T_WIN512_SQ],
-                                   x + 256 * h) < 0)
+            if (overlap_add_shaped(O, Ys[h], half, st->flags[h], st->shapes[h], st->flags[h + 1],
+                                   st->shapes[h + 1], T->d[T_WIN], T->d[T_WIN_SQ],
+                                   x + half * h) < 0)
                 return -1;
     } else if (mode == 1) {
-        overlap_add_plain(O, Ys[0], 512, 256, T->d[T_WIN1024], x);
+        overlap_add_plain(O, Ys[0], F, half, T->d[T_WIN_LONG], x);
     } else if (mode == 2) {
-        overlap_add_plain(O, Ys[0], 256, 256, T->d[T_WIN512], x);
-        overlap_add_plain(O, Ys[1], 256, 512, T->d[T_WIN512], x + 256);
+        overlap_add_plain(O, Ys[0], half, half, T->d[T_WIN], x);
+        overlap_add_plain(O, Ys[1], half, F, T->d[T_WIN], x + half);
     } else {
-        overlap_add_plain(O, Ys[0], 512, 512, T->d[T_WIN1024], x);
+        overlap_add_plain(O, Ys[0], F, F, T->d[T_WIN_LONG], x);
     }
 
-    /* --- Long-term predictor over H[256..767] --- */
-    static const int SECTIONS[4][3][2] = {
-        {{128, 0}, {256, 1}, {128, 2}},
-        {{256, 0}, {256, 2}, {0, 0}},
-        {{128, 0}, {256, 1}, {128, 2}},
-        {{256, 0}, {256, 2}, {0, 0}},
+    /* --- Long-term predictor over H[HISTORY..HISTORY+F-1] --- */
+    static const int SECTIONS[4][3][2] = {   /* (length in quarter frames, lag slot) */
+        {{1, 0}, {2, 1}, {1, 2}},
+        {{2, 0}, {2, 2}, {0, 0}},
+        {{1, 0}, {2, 1}, {1, 2}},
+        {{2, 0}, {2, 2}, {0, 0}},
     };
-    int n = 256;
+    int n = HISTORY;
     for (int si = 0; si < 3; si++) {
-        int length = SECTIONS[mode][si][0], slot = SECTIONS[mode][si][1];
+        int length = SECTIONS[mode][si][0] * (F / 4), slot = SECTIONS[mode][si][1];
         if (length == 0)
             break;
         if (slot == 0)
@@ -1171,12 +1259,12 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
     }
 
     /* --- LPC synthesis with interpolated coefficients --- */
-    double y[ORDER + 512];
-    memcpy(y, st->mem, sizeof st->mem);
-    int count = ORDER;
+    double y[MAX_ORDER + MAX_FRAME];
+    memcpy(y, st->mem, order * sizeof(double));
+    int count = order;
     const double *runA[2], *runB[2];
     int runs;
-    if (mode == 0 && F == 1) {
+    if (mode == 0 && Fl == 1) {
         runA[0] = st->lsp0; runB[0] = l1;
         runA[1] = l1; runB[1] = l2;
         runs = 2;
@@ -1185,28 +1273,29 @@ static int decode_frame(State *st, const Tables *T, const int32_t *f, int avail,
         runs = 1;
     }
     int steps = runs == 2 ? 8 : 16;
-    int pos = 256;
+    int step_len = (runs == 2 ? half : F) / steps;
+    int pos = HISTORY;
     for (int ri = 0; ri < runs; ri++) {
         double inv = 1.0 / steps;
         for (int k = 0; k <= steps; k++) {
             double tk = k * inv;
-            int block_len = (k == 0 || k == steps) ? 16 : 32;
-            double l[11], a[11];
-            interpolate_lsp(runA[ri], runB[ri], tk, l);
-            lsp_to_lpc(l, a);
-            lpc_filter(st->H, pos, block_len, a, y, &count);
+            int block_len = (k == 0 || k == steps) ? step_len / 2 : step_len;
+            double l[MAX_ORDER + 1], a[MAX_ORDER + 1];
+            interpolate_lsp(runA[ri], runB[ri], tk, order + 1, l);
+            lsp_to_lpc(l, order, a);
+            lpc_filter(st->H, pos, block_len, a, order, y, &count);
             pos += block_len;
         }
     }
-    for (int i = 0; i < 512; i++)
-        if (to_int16(y[ORDER + i], &samples[i]) < 0)
+    for (int i = 0; i < F; i++)
+        if (to_int16(y[order + i], &samples[i]) < 0)
             return -1;
 
     /* --- End of frame --- */
-    memcpy(st->H, st->H + 512, 256 * sizeof(double));
-    memcpy(st->mem, y + 512, ORDER * sizeof(double));
-    memcpy(st->lsp0, l2, sizeof l2);
-    memcpy(st->q0, q2, sizeof q2);
+    memcpy(st->H, st->H + F, HISTORY * sizeof(double));
+    memcpy(st->mem, y + F, order * sizeof(double));
+    memcpy(st->lsp0, l2, (order + 1) * sizeof(double));
+    memcpy(st->q0, q2, (order + 1) * sizeof(i64));
     st->lag0 = lag2;
     memcpy(st->taps0, taps2, sizeof taps2);
     st->flags[0] = st->flags[2];
@@ -1225,15 +1314,20 @@ EXPORT int lpec_abi_version(void)
 
 /*
  * Decode `nframes` packed frame records (`nints` int32s in all) from a
- * freshly initialised decoder into out[nframes * 512].
- * Returns the number of frames decoded, or -1 on a malformed record or a
- * table count mismatch.
+ * freshly initialised decoder of configuration `config` (`nconfig` int32s,
+ * the layout of the CFG_* enum) into out[nframes * frame].
+ * Returns the number of frames decoded, or -1 on a malformed record, an
+ * unusable configuration or a table count mismatch.
  */
-EXPORT int lpec_decode(const double *const *dtables, int n_dtables,
+EXPORT int lpec_decode(const int32_t *config, int nconfig,
+                       const double *const *dtables, int n_dtables,
                        const int32_t *const *itables, int n_itables,
                        const int32_t *frames, int nints, int nframes,
                        int16_t *out)
 {
+    Config cfg;
+    if (config_from(config, nconfig, &cfg) < 0)
+        return -1;
     if (n_dtables != N_DTABLES || n_itables != N_ITABLES)
         return -1;
     Tables T;
@@ -1242,11 +1336,12 @@ EXPORT int lpec_decode(const double *const *dtables, int n_dtables,
     State *st = malloc(sizeof *st);
     if (!st)
         return -1;
-    state_init(st, &T);
+    state_init(st, &T, &cfg);
     double s3 = sqrt(3.0) * 0.5;
     int pos = 0, fi;
     for (fi = 0; fi < nframes; fi++) {
-        int used = decode_frame(st, &T, frames + pos, nints - pos, out + (ptrdiff_t)fi * 512, s3);
+        int used = decode_frame(st, &T, &cfg, frames + pos, nints - pos,
+                                out + (ptrdiff_t)fi * cfg.frame, s3);
         if (used < 0) {
             fi = -1;
             break;

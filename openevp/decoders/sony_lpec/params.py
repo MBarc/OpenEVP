@@ -24,18 +24,22 @@ from __future__ import annotations
 
 from typing import List, Sequence, Tuple
 
+from .config import LP
+
 # --------------------------------------------------------------------------
-# Configuration constants (docs/lpec.md, "Configuration constants")
+# Configuration constants (docs/lpec.md, "Configuration constants"): LP's.
+# The functions below take theirs from ``tables.config`` (config.LP or
+# config.SP), so the same code decodes LPEC SP.
 # --------------------------------------------------------------------------
 
-BANDS = 8
+BANDS = LP.bands
 
 # type t -> transform length N
-TRANSFORM_N = {0: 512, 1: 768, 2: 768, 3: 1024}
+TRANSFORM_N = dict(enumerate(LP.transform_n))
 # type t -> band width W, first coded coefficient s, end of coded region e
-BAND_WIDTH = {0: 28, 1: 42, 2: 42, 3: 56}
-FIRST_CODED = {0: 2, 1: 3, 2: 3, 3: 4}
-END_CODED = {0: 226, 1: 339, 2: 339, 3: 452}
+BAND_WIDTH = dict(enumerate(LP.band_width))
+FIRST_CODED = dict(enumerate(LP.first_coded))
+END_CODED = dict(enumerate(LP.end_coded))
 
 Q15 = 3.0517578125e-05  # 2^-15
 
@@ -73,29 +77,36 @@ def cdiv(a: int, b: int) -> int:
 
 
 def _sort_pass(v: List) -> None:
-    """One sorting pass, j = 1..10, one step back only (not a full sort)."""
-    for j in range(1, 11):
+    """One sorting pass, j = 1..order, one step back only (not a full sort)."""
+    for j in range(1, len(v)):
         if v[j] < v[j - 1]:
             v[j], v[j - 1] = v[j - 1], v[j]
         if j >= 2 and v[j - 2] > v[j - 1]:
             v[j - 2], v[j - 1] = v[j - 1], v[j - 2]
 
 
-def lsp_double(tables, i1: int, i2: int, i3: int) -> List[float]:
-    """The double LSP vector l[0..10] of an LSP set."""
-    c1, c2, c3 = tables.C1[i1], tables.C2[i2], tables.C3[i3]
-    l = [0.0] * 11
-    for j in range(10):
-        l[j + 1] = (c3[j] + c2[j]) + c1[j]
+def lsp_double(tables, *idx: int) -> List[float]:
+    """The double LSP vector l[0..order] of an LSP set (i1, i2, i3[, i4])."""
+    order = len(tables.C[0][0])
+    half = order // 2
+    l = [0.0] * (order + 1)
+    if len(idx) == 4:
+        c1, c2, c3, c4 = (tables.C[k][idx[k]] for k in range(4))
+        for j in range(order):
+            l[j + 1] = ((c3[j] + c4[j]) + c2[j]) + c1[j]
+    else:
+        c1, c2, c3 = (tables.C[k][idx[k]] for k in range(3))
+        for j in range(order):
+            l[j + 1] = (c3[j] + c2[j]) + c1[j]
 
     lim = 0.49
-    for j in range(10, 5, -1):
+    for j in range(order, half, -1):
         if l[j] >= 0.5:
             l[j] = lim
         lim = l[j] - 0.01
 
     lim = 0.01
-    for j in range(1, 6):
+    for j in range(1, half + 1):
         if l[j] < 0.0:
             l[j] = lim
         lim = l[j] + 0.01
@@ -103,7 +114,7 @@ def lsp_double(tables, i1: int, i2: int, i3: int) -> List[float]:
     l[0] = 0.0
     _sort_pass(l)
 
-    for j in range(1, 11):
+    for j in range(1, order + 1):
         if l[j] - l[j - 1] < 0.01:
             if j == 1:
                 l[1] = 0.01
@@ -116,21 +127,29 @@ def lsp_double(tables, i1: int, i2: int, i3: int) -> List[float]:
     return l
 
 
-def lsp_q16(tables, i1: int, i2: int, i3: int) -> List[int]:
-    """The Q16 LSP vector q[0..10] of an LSP set (envelope path only)."""
-    d1, d2, d3 = tables.D1[i1], tables.D2[i2], tables.D3[i3]
-    q = [0] * 11
-    for j in range(10):
-        q[j + 1] = s16((d3[j] + 2 * d2[j] + 4 * d1[j]) >> 2)
+def lsp_q16(tables, *idx: int) -> List[int]:
+    """The Q16 LSP vector q[0..order] of an LSP set (envelope path only)."""
+    order = len(tables.D[0][0])
+    half = order // 2
+    q = [0] * (order + 1)
+    if len(idx) == 4:
+        # D1 is Q16, D2..D4 are Q19 (docs/lpec.md, "LPEC SP (16000 Hz)")
+        d1, d2, d3, d4 = (tables.D[k][idx[k]] for k in range(4))
+        for j in range(order):
+            q[j + 1] = s16(((d2[j] + d3[j] + d4[j]) >> 3) + d1[j])
+    else:
+        d1, d2, d3 = (tables.D[k][idx[k]] for k in range(3))
+        for j in range(order):
+            q[j + 1] = s16((d3[j] + 2 * d2[j] + 4 * d1[j]) >> 2)
 
     lim = 32112
-    for j in range(10, 5, -1):
+    for j in range(order, half, -1):
         if q[j] < 0:
             q[j] = s16(lim)
         lim = q[j] - 655
 
     lim = 655
-    for j in range(1, 6):
+    for j in range(1, half + 1):
         if q[j] < 0:
             q[j] = s16(lim)
         lim = q[j] + 655
@@ -141,7 +160,7 @@ def lsp_q16(tables, i1: int, i2: int, i3: int) -> List[int]:
     if q[1] < 655:
         q[1] = 655
 
-    for j in range(2, 11):
+    for j in range(2, order + 1):
         a, b = q[j], q[j - 1]
         if a - b < 655:
             q[j] = s16(cdiv(b + 656 + a, 2))
@@ -153,12 +172,12 @@ def lsp_q16(tables, i1: int, i2: int, i3: int) -> List[int]:
 
 def interpolate_lsp_double(l0: Sequence[float], l2: Sequence[float]) -> List[float]:
     """Interpolated slot 1: l1[j] = (l2[j] + l0[j])*0.5."""
-    return [(l2[j] + l0[j]) * 0.5 for j in range(11)]
+    return [(l2[j] + l0[j]) * 0.5 for j in range(len(l2))]
 
 
 def interpolate_lsp_q16(q0: Sequence[int], q2: Sequence[int]) -> List[int]:
     """Interpolated slot 1: q1[j] = s16((q0[j] + q2[j]) div 2)."""
-    return [s16(cdiv(q0[j] + q2[j], 2)) for j in range(11)]
+    return [s16(cdiv(q0[j] + q2[j], 2)) for j in range(len(q2))]
 
 
 # --------------------------------------------------------------------------
@@ -185,25 +204,26 @@ def _mul(x: int, c: int) -> int:
 
 
 def _lpc_q(tables, q: Sequence[int]) -> List[int]:
-    """Step 1: Q16 LSPs to the normalised int16 LPC coefficients a16[0..10]."""
+    """Step 1: Q16 LSPs to the normalised int16 LPC coefficients a16[0..order]."""
     S = tables.S2048
-    c = [0] * 11
-    for j in range(11):
+    n = len(q)
+    c = [0] * n
+    for j in range(n):
         e = i32(q[j] << 11)
         f = (e & 0xFFFF) >> 1
         i = e >> 16
         u = (i + 512) % 2048
         c[j] = s16(((32768 - f) * S[u] + S[u + 1] * f) >> 15)
 
-    Q = [0] * 11
-    P = [0] * 11
+    Q = [0] * n
+    P = [0] * n
     Q[0] = -(1 << 23)
     Q[1] = 1 << 23
     P[0] = -(1 << 23)
     P[1] = -(1 << 23)
-    TQ = [0] * 11
-    TP = [0] * 11
-    for i in range(1, 6):
+    TQ = [0] * n
+    TP = [0] * n
+    for i in range(1, (n - 1) // 2 + 1):
         a = c[2 * i]
         b = c[2 * i - 1]
         TQ[1] = _mul(Q[0], a)
@@ -217,7 +237,7 @@ def _lpc_q(tables, q: Sequence[int]) -> List[int]:
             P[m] = i32(P[m] - TP[m])
             P[2 * i + 1 - m] = P[m]
 
-    R = [i32(-(P[j] + Q[j])) for j in range(11)]
+    R = [i32(-(P[j] + Q[j])) for j in range(n)]
 
     A = 0
     for r in R:
@@ -227,14 +247,15 @@ def _lpc_q(tables, q: Sequence[int]) -> List[int]:
         d += 1
 
     rnd = (1 << (15 - d)) if d <= 15 else 0
-    return [s16((R[j] + rnd) >> (16 - d)) for j in range(11)]
+    return [s16((R[j] + rnd) >> (16 - d)) for j in range(n)]
 
 
 def _autocorrelation(a16: Sequence[int]) -> Tuple[int, int, List[int]]:
-    """Step 2: (E0, E1, r[0..10]) with the split accumulator."""
+    """Step 2: (E0, E1, r[0..order]) with the split accumulator."""
+    n = len(a16)
     lo = 0
     hi = 0
-    for i in range(11):
+    for i in range(n):
         sq = a16[i] * a16[i]
         lo += sq & 0x7FFF
         hi += sq >> 15
@@ -243,9 +264,9 @@ def _autocorrelation(a16: Sequence[int]) -> Tuple[int, int, List[int]]:
 
     s = 0
     ah = abs(h)
-    for n in range(20):
-        if (ah << n) & (1 << 18):
-            s = 19 - n
+    for sh in range(20):
+        if (ah << sh) & (1 << 18):
+            s = 19 - sh
             break
 
     x = s - 10
@@ -261,12 +282,12 @@ def _autocorrelation(a16: Sequence[int]) -> Tuple[int, int, List[int]]:
     E0 = h + 2
     E1 = l
 
-    r = [0] * 11
+    r = [0] * n
     mask = (1 << s) - 1
-    for m in range(1, 11):
+    for m in range(1, n):
         slo = 0
         shi = 0
-        for i in range(11 - m):
+        for i in range(n - m):
             p = a16[i] * a16[i + m]
             slo += p & mask
             shi += p >> s
@@ -289,13 +310,14 @@ def envelope(tables, q: Sequence[int], lag: int, pg: float, N: int) -> List[int]
         return table[step * (p % N)]
 
     quarter = N // 4
+    order = len(q) - 1
     if lag != 0:
         gq = s16(int(32768 * pg))
     w = [0] * M
     for k in range(M):
         accH = E0
         accL = E1
-        for m in range(1, 11):
+        for m in range(1, order + 1):
             v = r[m] * T(quarter + m * k)
             accL += v & 0x7FFFF
             accH += v >> 19
@@ -354,12 +376,14 @@ def coefficients(tables, block, q: Sequence[int], lag: int, pq: Sequence[int],
     ``q``, ``lag`` and ``pq`` are the Q16 LSPs, lag and Q15 taps of the
     block's parameter slot k. ``noise`` is advanced in place.
     """
+    cfg = tables.config
+    BANDS = cfg.bands
     t = block.type
-    N = TRANSFORM_N[t]
+    N = cfg.transform_n[t]
     M = N // 2
-    W = BAND_WIDTH[t]
-    s = FIRST_CODED[t]
-    e = END_CODED[t]
+    W = cfg.band_width[t]
+    s = cfg.first_coded[t]
+    e = cfg.end_coded[t]
 
     G = tables.GAIN[block.global_gain]
     bg1 = tables.BG1[block.band_gain1]
