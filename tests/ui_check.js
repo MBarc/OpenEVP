@@ -627,6 +627,13 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual([what, ids], ["files", ["r4", "r5"]]);                  // the .dvf and its WAV
   assert.ok(vm.runInContext("S.clips.running", context));
   assert.match($("banner-text").textContent, /^Exporting the clips of x\.dvf…/);
+  // Meanwhile the folder tools, Export WAV with marks and the clip actions wait for it.
+  context.renderLibrary();
+  assert.ok($("library-new").disabled && $("library-move").disabled, "the folder tools wait for the clips");
+  vm.runInContext(`S.marks = [{ id: "m9", start: 1, end: 2, cls: "A", note: "" }]; renderMarks();`, context);
+  assert.ok($("export-marked").disabled && $("export-clips").disabled);
+  assert.ok($("marks-list").children[0].children.find((b) => b.textContent === "Save clip").disabled);
+  vm.runInContext(`S.marks = []; renderMarks();`, context);
   window.onBackendEvent("clips-progress", { job, done: 1, total: 2, name: "x.dvf" });
   assert.strictEqual($("banner-text").textContent, "Exporting the clips of x.dvf… 1 of 2");
   assert.strictEqual($("banner-action").textContent, "Cancel");
@@ -645,6 +652,16 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                         cancelled: true, closing: false, recordings: 0 });
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "Stopped. 0 clips saved.");
+  context.renderLibrary();
+  assert.ok(!$("library-new").disabled, "the folder tools are back");
+  // A WAV with marks being saved: the library's tools and Export clips wait too.
+  vm.runInContext(`S.exportingMarked = true; renderLibrary();`, context);
+  assert.ok($("library-new").disabled);
+  rightClick(folderRow("f1").cells[1]);
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", true]);
+  assert.strictEqual(menu.children[3].title, "Wait for the WAV or clips being saved");
+  press("Escape");
+  vm.runInContext(`S.exportingMarked = false; renderLibrary();`, context);
   assert.ok($("banner-action").hidden);                                            // nothing to open
   await settle();
   // A folder: its id; the summary counts what was already there and what was skipped, and why.
@@ -670,5 +687,12 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "The library changed. Refresh and try again.");
+  // The call itself fails (rejects): nothing stays running either.
+  api.export_clips_folder = async () => { throw new Error("boom"); };
+  rightClick(folderRow("f1").cells[1]);
+  choose("Export clips");
+  await settle();
+  assert.ok(!vm.runInContext("S.clips.running", context));
+  assert.strictEqual($("banner-text").textContent, "The clips export did not start: boom");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

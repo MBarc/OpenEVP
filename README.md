@@ -226,11 +226,14 @@ with **Open folder**.
   the WAV with marks.
 - Nothing is overwritten: a clip already saved with the same bytes counts as
   "already there"; a different one gets a numbered name ("… (2).wav").
-- Clips are for sharing, so the EVP Library ignores every folder named `Clips`
-  (in any case, at any depth): they are not listed, checked or counted, their
-  markers are not read as marks, and clips are never cut from clips. Open them
-  with **Open folder**. Renaming, moving or deleting a folder takes its `Clips`
-  folder along untouched.
+- Clips are for sharing, so the EVP Library ignores the `Clips` folders OpenEVP
+  creates: they are not listed, checked or counted, their markers are not read
+  as marks, and clips are never cut from clips. Open them with **Open folder**.
+  OpenEVP recognises its own `Clips` folders by a small hidden file inside,
+  `.openevp-clips`; delete that file and the folder shows up in the library
+  again. A folder you named `Clips` yourself is an ordinary folder (clips saved
+  into it show up in the library). Renaming, moving or deleting a folder takes
+  its `Clips` folder along untouched.
 
 ### Where marks live
 

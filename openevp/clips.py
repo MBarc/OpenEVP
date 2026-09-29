@@ -11,6 +11,7 @@ it, clamped to the recording, and carries the mark as a standard RIFF marker
 import math
 import re
 import struct
+import unicodedata
 
 from . import wavinfo
 
@@ -85,8 +86,10 @@ def cut(wav_bytes, mark, pad=PAD):
 def safe_note(note, limit=MAX_NOTE):
     """A note as it can be part of a Windows file name: characters Windows refuses
     removed, runs of spaces made one, cut to `limit` characters, no trailing dot
-    or space. "" when nothing usable is left."""
-    text = _FORBIDDEN.sub(" ", note or "")
+    or space; invisible format characters (Unicode category Cf: zero-width spaces,
+    direction marks...) dropped. "" when nothing usable is left."""
+    text = "".join(c for c in (note or "") if unicodedata.category(c) != "Cf")
+    text = _FORBIDDEN.sub(" ", text)
     text = " ".join(text.split())
     text = text[:limit].rstrip(" .")
     return text.lstrip(" .")

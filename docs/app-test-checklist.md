@@ -46,5 +46,7 @@ from the frozen build is caught):
 17. A second OpenEVP window: Export clips (player and library) is refused with
     the "another OpenEVP is open" reason.
 18. After exporting clips into the library: the EVP Library shows no `Clips`
-    folder and no clip, "Has EVPs" and the folder counts are unchanged; renaming
-    the investigation folder keeps its `Clips` folder (open it in Explorer).
+    folder and no clip, "Has EVPs" and the folder counts are unchanged; the
+    `Clips` folder holds a hidden `.openevp-clips` file (Explorer: show hidden
+    items). Renaming the investigation folder keeps its `Clips` folder. Delete
+    `.openevp-clips`: the folder and its clips show up in the library again.

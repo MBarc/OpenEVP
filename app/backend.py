@@ -60,7 +60,7 @@ from .updater import UpdateCancelled
 from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
-                          _clips_folder, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
+                          _clips_folder, _make_clips_folder, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
                           _kind_format,
                           _plain)
 from .library_ops import (BACKUP_RECYCLED, CLIPS, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
@@ -173,8 +173,8 @@ def _scan_library(folder):
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
-    hidden or system (AppData, $RECYCLE.BIN...) and folders named Clips (any case: EVP
-    clips) are skipped. complete is
+    hidden or system (AppData, $RECYCLE.BIN...) and the Clips folders OpenEVP made
+    (they hold its marker file) are skipped. complete is
     False when a folder could not be read (its files are missing from the
     list). investigation is the first folder under `folder` ("" for files
     directly in it). The folders list holds every subfolder walked (including
@@ -201,9 +201,9 @@ def _scan_library(folder):
                 if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
-                    # AppData, System Volume Information..., and Clips folders (EVP clips: output
-                    # for sharing, never listed, indexed or counted, their markers never imported)
-                    if not folders.entry_is_hidden(e) and not _clips_folder(e.name):
+                    # AppData, System Volume Information..., and the Clips folders OpenEVP made (EVP
+                    # clips: output for sharing, never listed, indexed or counted, markers never imported)
+                    if not folders.entry_is_hidden(e) and not _clips_folder(e.path):
                         subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
@@ -952,11 +952,13 @@ class Api(LibraryOps):
         except Exception as e:
             return _error(e)
 
-    def _marked_folder(self, path):
+    def _marked_folder(self, path, dest=None, library=None):
         """Where export_marked() saves a file's WAV: the Save-to folder's folder named
-        like the file's investigation, or the Save-to folder itself."""
-        investigation = _investigation(path, self._library_path())
-        return os.path.join(self._dest, investigation) if investigation else self._dest
+        like the file's investigation, or the Save-to folder itself. dest and library:
+        the Save-to and library folders to use (default: the current ones)."""
+        dest = self._dest if dest is None else dest
+        investigation = _investigation(path, self._library_path() if library is None else library)
+        return os.path.join(dest, investigation) if investigation else dest
 
     def _export_marked(self, entry):
         marks = self._store.marks(entry["fp"])
@@ -1024,7 +1026,7 @@ class Api(LibraryOps):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")
                     continue
-            os.makedirs(outdir, exist_ok=True)
+            _make_clips_folder(outdir)
             path, done = save_wav(clip, outdir, name)
             names.append(os.path.basename(path))
             if done:
@@ -1052,8 +1054,8 @@ class Api(LibraryOps):
 
     def export_clips_folder(self, folder_id, job):
         """Export the clips of every marked recording in a library folder and all its
-        subfolders as a background job (recordings in folders named Clips, which
-        hold clips already, are left out); see _clips_job."""
+        subfolders as a background job (the Clips folders OpenEVP made are left out,
+        as the library leaves them out); see _clips_job."""
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1066,7 +1068,7 @@ class Api(LibraryOps):
             return refused
 
         def work():
-            files = _scan_library(path)[0]                 # never inside a Clips folder
+            files = _scan_library(path)[0]                 # never inside a Clips folder of OpenEVP's
             # A folder's WAV copies first: a .dvf with a WAV copy beside it is then never decoded.
             files.sort(key=lambda f: (tuple(p.casefold() for p in f[5]), f[2] != "wav", f[1].casefold()))
             return [(f[3], f[2]) for f in files]
@@ -1096,7 +1098,12 @@ class Api(LibraryOps):
         if refused:
             return refused
         cancel = threading.Event()
-        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel), name="clips")
+        # Save-to and the library folder as they are now: a change during the job never splits its clips.
+        with self._dest_lock:
+            dest = self._dest
+        library = self._library_path()
+        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library),
+                                  name="clips")
         with self._workers_lock:              # admitted, started and registered in one step against shutdown()
             if self._stop.is_set():
                 return _fail(CLOSING)
@@ -1111,22 +1118,30 @@ class Api(LibraryOps):
             self._workers = [t for t in self._workers if t.is_alive()] + [thread]
         return {"ok": True, "job": job}
 
-    def _clips_job(self, work, where, job, cancel):
+    def clips_running(self):
+        """True while a library clips job runs (the close prompt says so)."""
+        return self._clips_running is not None
+
+    def _clips_job(self, work, where, job, cancel, dest, library):
         """Cut the clips of each marked recording in work() ([(path, kind)]): copies
         of one recording (the same fingerprint) are exported once per destination.
         Unmarked recordings are passed over; ones that cannot be read or decoded are
         skipped and reported. Events: "clips-progress", then "clips-done" (also when
-        cancelled or closing) or "clips-failed" (a clip could not be written)."""
+        cancelled or closing) or "clips-failed" (a clip could not be written), sent
+        once _busy is free again. dest, library: the Save-to and library folders
+        when the job started."""
         saved = already = recordings = 0
         skipped, notes, outdirs, done_keys = [], [], [], set()
+        outcome = []
 
         def stopped():
             return self._stop.is_set() or cancel.is_set()
 
         def finish(event, **extra):
-            folder = outdirs[0] if len(outdirs) == 1 else (self._dest if outdirs else None)
-            self._emit(event, {"job": job, "saved": saved, "already": already, "recordings": recordings,
-                               "skipped": skipped, "notes": notes, "folder": folder, "where": where, **extra})
+            folder = outdirs[0] if len(outdirs) == 1 else (dest if outdirs else None)
+            outcome.append((event, {"job": job, "saved": saved, "already": already, "recordings": recordings,
+                                    "skipped": skipped, "notes": notes, "folder": folder, "where": where,
+                                    **extra}))
         try:
             try:
                 items = work()
@@ -1148,7 +1163,7 @@ class Api(LibraryOps):
                     skipped.append(f"{name} ({got})")
                 elif got is not None:
                     wav, fp, marks = got
-                    outdir = os.path.join(self._marked_folder(path), CLIPS)
+                    outdir = os.path.join(self._marked_folder(path, dest, library), CLIPS)
                     key = (fp, os.path.normcase(os.path.abspath(outdir)))
                     if key not in done_keys:
                         done_keys.add(key)
@@ -1171,7 +1186,9 @@ class Api(LibraryOps):
             with self._workers_lock:
                 if self._clips_running is not None and self._clips_running[0] == job:
                     self._clips_running = None
-            self._busy.release()
+            self._busy.release()                 # before the page hears it is over: it may start another
+            for event, payload in outcome[:1]:
+                self._emit(event, payload)
 
     def _file_clips_audio(self, path, problems, stopped):
         """(wav, fp, marks) of a library file with marks; None when it has none; or
@@ -1784,8 +1801,10 @@ class Api(LibraryOps):
             self._workers = [t for t in self._workers if t.is_alive()] + [thread]
 
     def exporting(self):
-        """True while an export of recorder recordings runs (export_marked(): saving_marked())."""
-        return self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
+        """True while an export of recorder recordings runs (export_marked(): saving_marked();
+        a clips job: clips_running())."""
+        return (self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
+                and self._clips_running is None)
 
     def stopping(self):
         """True once the app is closing: long decodes poll this to stop early."""

@@ -35,7 +35,10 @@ BACKUP_RECYCLED = "The backup was moved to the Recycle Bin."
 BACKUP_UNCHECKED = ("The backup could not be checked before a library folder was deleted "
                     "(it may have been in it); back it up again.")
 ROOT_CHANGED = "The library folder changed. Refresh and try again."
-CLIPS = "Clips"             # the subfolder EVP clips go into; the library leaves it out
+CLIPS = "Clips"             # the subfolder EVP clips go into
+CLIPS_MARKER = ".openevp-clips"   # in a Clips folder OpenEVP created: the library leaves that folder out
+CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library leaves it out while this "
+                     b"file is here; delete this file to list the folder again.\r\n")
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
@@ -49,10 +52,29 @@ def _plain(e):
     return str(e) or type(e).__name__
 
 
-def _clips_folder(name):
-    """Is a folder name a Clips folder (any case)? Clips are output for sharing: the
-    library never lists, indexes or counts them, nor imports their markers."""
-    return name.casefold() == CLIPS.casefold()
+def _clips_folder(path):
+    """Is a folder a Clips folder OpenEVP created (it holds CLIPS_MARKER)? Clips are
+    output for sharing: the library never lists, indexes or counts such a folder,
+    nor imports its markers. A folder the user named Clips is an ordinary folder."""
+    try:
+        return os.path.isfile(os.path.join(path, CLIPS_MARKER))
+    except (OSError, ValueError):
+        return False
+
+
+def _make_clips_folder(path):
+    """Create a Clips folder for clips; when this creates it, mark it as OpenEVP's
+    (a hidden CLIPS_MARKER file). A folder that was already there is left as it is."""
+    if os.path.isdir(path):
+        return
+    os.makedirs(path, exist_ok=True)
+    marker = os.path.join(path, CLIPS_MARKER)
+    try:
+        with open(marker, "xb") as f:
+            f.write(CLIPS_MARKER_TEXT)
+    except FileExistsError:
+        return
+    folders.hide(marker)
 
 
 def _kind_format(kind):
@@ -300,7 +322,7 @@ class LibraryOps:
                         continue
                     if e.is_dir():
                         info["subfolders"] += 1
-                        if _clips_folder(e.name):       # goes along, but its clips are not recordings
+                        if _clips_folder(e.path):       # goes along, but its clips are not recordings
                             files, dirs = self._count_files(e.path)
                             info["other_files"] += files
                             info["subfolders"] += dirs

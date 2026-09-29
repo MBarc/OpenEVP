@@ -865,8 +865,12 @@ function renderLibraryBar() {
 function libraryToolsReady() {
   const L = S.lib;
   // A second OpenEVP window (its store is read-only) can view the library but not change it.
-  return L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op && !S.caps.marks_read_only;
+  // Nor while a WAV with marks or clips are being saved (the backend would refuse: one at a time).
+  return L.listed && !L.problem && L.exists && L.folders.length > 0 && !L.op && !S.caps.marks_read_only &&
+         !savingAudio();
 }
+// A WAV with marks, the player's clips, or a library clips job is being saved.
+function savingAudio() { return !!(S.exportingMarked || S.savingClips || S.clips.running); }
 function canNewFolder() { return libraryToolsReady() && !S.lib.flat && S.lib.folderById.has(S.lib.folderId); }
 function canChangeFolder(id) { return libraryToolsReady() && S.lib.folderById.has(id) && id !== "root"; }   // rename, delete
 function canMove(ids) { return libraryToolsReady() && ids.length > 0 && S.lib.folders.length >= 2; }
@@ -2240,8 +2244,8 @@ function renderMarks() {
   list.hidden = !S.marks.length;
   for (const m of S.marks) list.appendChild(markRow(m));
   $("marks-empty").hidden = S.marks.length > 0;
-  $("export-marked").disabled = !S.marks.length || S.exportingMarked || S.savingClips;
-  $("export-clips").disabled = !S.marks.length || S.exportingMarked || S.savingClips || S.clips.running;
+  $("export-marked").disabled = !S.marks.length || savingAudio();
+  $("export-clips").disabled = !S.marks.length || savingAudio();
   renderBackup();
   // Every change of the loaded marks ends here: the library shows the same counts and notes.
   if (S.current) syncLibraryMarks(S.current.fp, S.marks, $("reviewed").checked);
@@ -2272,7 +2276,7 @@ function markRow(m) {
   row.append(chip, time, note,
     markButton("▶", "Play this EVP", () => playMark(m)),
     markButton("Save clip", "Save this EVP as its own WAV clip (in a Clips folder)", () => exportClips(m),
-               !S.exportingMarked && !S.savingClips && !S.clips.running),
+               !savingAudio()),
     markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
     markButton("✕", tip || "Delete this mark", () => deleteMark(m), writable));
   return row;
@@ -2397,9 +2401,11 @@ async function retryBackup(rec) {
 async function exportMarked() {
   if (!S.current) return;
   const rec = S.current.rec;
-  S.exportingMarked = true; renderMarks(); status("Saving a WAV with the marks…");
-  const r = await api().export_marked(rec);
-  S.exportingMarked = false; status(""); renderMarks();
+  S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status("Saving a WAV with the marks…");
+  let r;
+  try { r = await api().export_marked(rec); } finally {
+    S.exportingMarked = false; status(""); renderMarks(); scheduleLibraryRender();
+  }
   if (!r.ok) { showError(r); return; }
   const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
   banner(r.already ? `✓ ${r.name} with these marks was already saved in ${where}.`
@@ -2425,9 +2431,11 @@ function clipsSummary(p) {
 async function exportClips(mark) {
   if (!S.current || S.savingClips) return;
   const rec = S.current.rec;
-  S.savingClips = true; renderMarks(); status(mark ? "Saving the clip…" : "Saving the clips…");
+  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(mark ? "Saving the clip…" : "Saving the clips…");
   let r;
-  try { r = await api().export_clips(rec, mark ? mark.id : null); } finally { S.savingClips = false; status(""); renderMarks(); }
+  try { r = await api().export_clips(rec, mark ? mark.id : null); } finally {
+    S.savingClips = false; status(""); renderMarks(); scheduleLibraryRender();
+  }
   if (!r.ok) { showError(r); return; }
   clipsSummary({ ...r, skipped: [], cancelled: false, recordings: 1 });
   loadLibrary();                               // the clips may be in the library
@@ -2436,11 +2444,12 @@ async function exportClips(mark) {
 // The library's Export clips: off while an operation, an export or another clips job runs, and
 // in a second window (it would say why).
 function canExportClips() {
-  return !!S.caps.marks && !S.caps.marks_read_only && !S.lib.op && !S.clips.running && !S.exporting;
+  return !!S.caps.marks && !S.caps.marks_read_only && !S.lib.op && !savingAudio() && !S.exporting;
 }
 function clipsTip(tip) {
   if (S.caps.marks_read_only) return readOnlyTip();
   if (S.clips.running) return "Wait for the clips being exported";
+  if (S.exportingMarked || S.savingClips) return "Wait for the WAV or clips being saved";
   if (S.lib.op || S.exporting) return "Wait for the operation to finish";
   return tip;
 }
@@ -2451,9 +2460,14 @@ async function exportLibraryClips(what, name) {
   if (!canExportClips()) return;
   const job = ++S.clips.job;
   S.clips.running = true; S.clips.name = name; S.clips.cancelling = false;
-  renderMarks(); updateExport();
+  renderMarks(); updateExport(); scheduleLibraryRender();
   clipsRunning(0, null);
-  const r = what.folder ? await api().export_clips_folder(what.folder, job) : await api().export_clips_files(what.files, job);
+  let r;
+  try {
+    r = what.folder ? await api().export_clips_folder(what.folder, job) : await api().export_clips_files(what.files, job);
+  } catch (e) {                                 // the call itself failed: nothing is running
+    r = { ok: false, error: `The clips export did not start: ${(e && e.message) || e}` };
+  }
   if (!r.ok && job === S.clips.job && S.clips.running) {
     S.clips.running = false; progress(0, null); renderMarks(); updateExport(); scheduleLibraryRender();
     showError(r);
