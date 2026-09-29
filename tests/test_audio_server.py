@@ -103,6 +103,43 @@ class AudioServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.s.prepare(("1-4@7", "A", 99))
 
+    def test_a_streamed_decode_is_written_into_the_cache_file(self):
+        """write(f) decodes into the cache file itself (a long ICD-ST10 recording is
+        never held in memory); peaks, duration and fingerprint come from the file."""
+        seen = []
+
+        def write(f):
+            seen.append(f.name)
+            for at in range(0, len(WAV), 1000):     # as a decoder would: frame by frame
+                f.write(WAV[at:at + 1000])
+        info = self.s.prepare(("1-4@7", "A", 5), write=write)
+        self.assertEqual(os.path.dirname(seen[0]), self.dir.name)
+        self.assertEqual(info["fp"], wavinfo.wav_fingerprint(io.BytesIO(WAV)))
+        self.assertAlmostEqual(info["duration"], 1.0)
+        self.assertEqual(self.get(info["url"]).read(), WAV)
+        self.assertEqual(self.calls, [])                          # the provider is not asked
+        self.assertEqual(self.s.prepare(("1-4@7", "A", 5), write=write)["url"], info["url"])
+        self.assertEqual(len(seen), 1)                            # cached: decoded once
+
+    def test_a_failed_or_bad_decode_leaves_no_file(self):
+        def broken(f):
+            f.write(b"RIFF half a")
+            raise ValueError("the decoder stopped")
+        with self.assertRaisesRegex(ValueError, "the decoder stopped"):
+            self.s.prepare(("1-4@7", "A", 6), write=broken)
+        with self.assertRaises(ValueError):                       # not a PCM WAV
+            self.s.prepare(("1-4@7", "A", 7), write=lambda f: f.write(b"not a wav at all"))
+        with self.assertRaises(ValueError):
+            self.s.prepare(("1-4@7", "A", 8), make=lambda: b"not a wav either")
+        self.assertEqual(os.listdir(self.dir.name), [])
+        self.assertEqual(self.s._inflight, {})
+
+    def test_the_cache_holds_two_of_the_longest_st10_recordings(self):
+        from app import audio_server
+        longest_st10_wav = 44 + 92 * 60 * 44100 * 2 * 2            # 92 minutes, 44.1 kHz stereo 16-bit
+        self.assertGreaterEqual(audio_server.CACHE_BYTES, 2 * longest_st10_wav)
+        self.assertEqual(AudioServer(None, self.dir.name)._max, audio_server.CACHE_BYTES)
+
     def test_inflight_cleared_after_provider_failure(self):
         with self.assertRaises(ValueError):
             self.s.prepare(("1-4@7", "A", 99))

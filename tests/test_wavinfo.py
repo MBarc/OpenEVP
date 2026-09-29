@@ -128,6 +128,25 @@ class MarkerTests(unittest.TestCase):
         got = wavinfo.read_markers(io.BytesIO(out))
         self.assertEqual(got, [{"start": 0.5, "end": 0.5, "note": "EVP B: tick"}])
 
+    def test_marked_parts_are_with_markers_without_the_copy(self):
+        wav = bytearray(make_wav())
+        marks = [{"start": 0.25, "end": 1.0, "cls": "A", "note": "get out"}]
+        parts = wavinfo.marked_parts(wav, marks)
+        self.assertEqual(b"".join(parts), wavinfo.with_markers(wav, marks))
+        self.assertTrue(any(isinstance(p, memoryview) and p.obj is wav and len(p) > 1000 for p in parts))
+
+    def test_buffer_file_reads_in_place(self):
+        wav = bytearray(make_wav())
+        with wavinfo.buffer_file(wav) as f:
+            self.assertEqual(wavinfo.wav_fingerprint(f), wavinfo.wav_fingerprint(io.BytesIO(bytes(wav))))
+            f.seek(0)
+            self.assertEqual(f.read(4), b"RIFF")
+            self.assertEqual(f.seek(-2, io.SEEK_END), len(wav) - 2)
+            self.assertEqual(f.read(), bytes(wav[-2:]))
+        wav += b"x"                                  # closed: the bytearray can grow again
+        with wavinfo.buffer_file(b"") as f, self.assertRaises(ValueError):
+            wavinfo.wav_fingerprint(f)
+
     def test_replacing_markers_does_not_accumulate(self):
         once = wavinfo.with_markers(make_wav(), [{"start": 0, "end": 0.5, "cls": "B", "note": "x"}])
         twice = wavinfo.with_markers(once, [{"start": 0, "end": 0.5, "cls": "B", "note": "x"}])

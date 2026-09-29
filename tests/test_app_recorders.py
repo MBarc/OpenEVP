@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 from fakes import fake_models  # noqa: E402
 from fakes.fake_models import FakeFolder, FakeRecording, alpha_bytes  # noqa: E402
-from fixtures import DATE, FakeRecorderDevice  # noqa: E402
+from fixtures import DATE, FakeRecorderDevice, made_wav  # noqa: E402
 from app import backend  # noqa: E402
 from app.devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceManager  # noqa: E402
 from app.store import AppData  # noqa: E402
@@ -36,9 +36,9 @@ class Server:
     def __init__(self):
         self.cache, self.made, self.forgotten = {}, [], []
 
-    def prepare(self, key, make=None):
+    def prepare(self, key, make=None, write=None):
         if key not in self.cache:
-            wav = make()
+            wav = made_wav(make, write)
             self.made.append(key)
             with wave.open(io.BytesIO(wav)) as w:
                 duration = w.getnframes() / w.getframerate()

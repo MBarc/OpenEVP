@@ -13,7 +13,7 @@ import wave
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, make_raw  # noqa: E402
+from fixtures import DATE, made_wav, make_raw  # noqa: E402
 import release_gate  # noqa: E402
 from app import backend  # noqa: E402
 from app.store import AppData  # noqa: E402
@@ -93,8 +93,8 @@ class FakeServer:
         return {"url": "http://x/f.wav", "peaks": [0.1], "duration": duration,
                 "fp": wavinfo.wav_fingerprint(path), "stat": (os.stat(path).st_size, os.stat(path).st_mtime_ns)}
 
-    def prepare(self, key, make=None):
-        wav = make()
+    def prepare(self, key, make=None, write=None):
+        wav = made_wav(make, write)
         self.made.append(key)
         return {"url": "http://x/d.wav", "peaks": [0.2], "duration": 2.0,
                 "fp": wavinfo.wav_fingerprint(io.BytesIO(wav))}

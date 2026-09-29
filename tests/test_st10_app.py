@@ -135,6 +135,27 @@ class St10AppTests(St10Base):
         self.assertEqual(event, "backup-done", p)
         self.assertEqual(fp_of(self.read("A", "001_A_001_Unknown.wav")), fp_of(WAV_1))
 
+    def test_playback_streams_into_the_audio_servers_cache(self):
+        """The real AudioServer: the recording is decoded straight into its cache
+        file (never as a whole WAV in memory: to_wav is not called)."""
+        import tempfile
+        from unittest import mock
+        from app.audio_server import AudioServer
+        with tempfile.TemporaryDirectory() as cache:
+            server = AudioServer(None, cache)
+            server.start()
+            self.addCleanup(server.stop)
+            self.api._server = server
+            self.api.recordings(ID)
+            with mock.patch.object(type(formats.DVF.decoder), "to_wav", side_effect=AssertionError("to_wav")):
+                r = self.api.audio(ID, "A", 1)
+            self.assertTrue(r["ok"], r)
+            self.assertEqual((r["fp"], r["rate"]), (fp_of(WAV_1), 44100))
+            [name] = os.listdir(cache)
+            with open(os.path.join(cache, name), "rb") as f:
+                self.assertEqual(f.read(), WAV_1)
+            server.stop()
+
     def test_recording_wav(self):
         self.api.recordings(ID)
         self.assertEqual(bytes(backend.recording_wav(self.m, (ID, "A", 1))), WAV_1)
@@ -231,6 +252,15 @@ class St10LibraryTests(unittest.TestCase):
         r = api.play_library(f["id"])
         self.assertTrue(r["ok"], r)
         self.assertEqual(r["fp"], fp_of(WAV_1))
+
+    @release_gate.require(HAVE_ST, NO_ST_TABLES)
+    def test_indexing_fingerprints_without_a_wav_in_memory(self):
+        from unittest import mock
+        self.write("x.dvf", st10_dvf())
+        with mock.patch.object(type(formats.DVF.decoder), "to_wav", side_effect=AssertionError("to_wav")):
+            r = self.index(self.new_api())
+        row = self.events.rows(r["scan_id"])[self.by_name(r)["x.dvf"]["id"]]
+        self.assertEqual((row["fp"], row["seconds"], row["error"]), (fp_of(WAV_1), SECONDS_1, None))
 
     def test_without_the_decoder_listed_as_not_playable_and_never_cached(self):
         path = self.write("Old Mill/A/001_A_001_Unknown.dvf", st10_dvf())

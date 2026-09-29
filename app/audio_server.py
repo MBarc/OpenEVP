@@ -1,8 +1,11 @@
 """Serve decoded recordings to the player over http://127.0.0.1.
 
 Only this machine can connect, and every URL carries a random per-run token.
-Decoded WAVs live in a disk cache bounded by total size and are served from
-disk with Range support, so long recordings stream. prepare() returns
+Decoded WAVs live in a disk cache bounded by total size (CACHE_BYTES) and are
+served from disk with Range support, so long recordings stream. A decoder that
+can stream writes straight into the cache file, and peaks are computed from
+the file, so even a 90-minute ICD-ST10 recording (about 930 MB of WAV) is never
+held in memory for playback. prepare() returns
 waveform peaks and the duration, so the player never has to download and
 decode a whole file just to draw it.
 
@@ -18,7 +21,6 @@ so that they can still be moved, renamed or recycled while they are being read
 new place, and its URL keeps working.
 """
 import hashlib
-import io
 import os
 import re
 import secrets
@@ -123,8 +125,16 @@ def _stat_of(st):
     return st.st_size, st.st_mtime_ns
 
 
+# The decoded-WAV cache's budget on disk. The longest ICD-ST10 recording (its
+# 32 MB of flash, about 92 minutes of 44.1 kHz stereo) decodes to about 930 MB,
+# so this holds two of those, or many hours of ICD-ST25 audio (8 kHz mono). The
+# entry just prepared is always kept, so the cache can exceed the budget by at
+# most that one file; older entries are evicted first.
+CACHE_BYTES = 2 << 30
+
+
 class AudioServer:
-    def __init__(self, provider, cache_dir, max_bytes=1 << 30):
+    def __init__(self, provider, cache_dir, max_bytes=CACHE_BYTES):
         self._provider = provider            # (device_id, folder id, number) -> WAV bytes
         self._dir = cache_dir
         self._max = max_bytes
@@ -157,7 +167,14 @@ class AudioServer:
     def _url(self, file_id):
         return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.wav"
 
-    def prepare(self, key, make=None):
+    def prepare(self, key, make=None, write=None):
+        """Decode a recording into the cache (once per key) and return _info().
+        ``write(f)``, when given, decodes straight into the cache file ``f`` (a
+        seekable binary file), so a long recording is never held in memory;
+        otherwise ``make()`` (or the provider) returns the WAV bytes. Either
+        way the peaks and fingerprint are then read back from the file in
+        chunks. A WAV that is not playable PCM raises ValueError and leaves
+        nothing behind."""
         with self._lock:
             gate = self._inflight.setdefault(key, threading.Lock())
         with gate:                                   # concurrent requests wait for one decode
@@ -167,13 +184,28 @@ class AudioServer:
                     self._entries.move_to_end(key)
                     return self._info(e)
             try:
-                wav = make() if make else self._provider(key)
-                peaks, duration, rate, fp = _analyze(io.BytesIO(wav))
                 file_id = secrets.token_hex(8)
-                with open(os.path.join(self._dir, file_id + ".wav"), "wb") as f:
-                    f.write(wav)
+                path = os.path.join(self._dir, file_id + ".wav")
+                try:
+                    if write is not None:
+                        with open(path, "wb") as f:
+                            write(f)
+                    else:
+                        wav = make() if make else self._provider(key)
+                        with open(path, "wb") as f:
+                            f.write(wav)
+                        del wav
+                    with open(path, "rb") as f:
+                        peaks, duration, rate, fp = _analyze(f)
+                        size = os.fstat(f.fileno()).st_size
+                except BaseException:
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                    raise
                 with self._lock:
-                    self._entries[key] = {"file": file_id, "size": len(wav), "peaks": peaks, "duration": duration,
+                    self._entries[key] = {"file": file_id, "size": size, "peaks": peaks, "duration": duration,
                                           "rate": rate, "fp": fp}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
