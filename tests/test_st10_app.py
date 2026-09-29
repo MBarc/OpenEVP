@@ -148,6 +148,23 @@ class St10LibraryTests(unittest.TestCase):
         self.assertEqual((r["ok"], r["error"]), (False, f"001_A_001_Unknown.dvf: {NOT_YET}."))
         self.assertEqual(self.server.made, [])
 
+    def test_headers_are_read_once_per_version_of_a_file(self):
+        from unittest import mock
+        path = self.write("x.dvf", st10_dvf())
+        real = formats.Format.file_problem
+        for store in ("default", None):
+            with self.subTest(store=store), \
+                    mock.patch.object(formats.Format, "file_problem", autospec=True, side_effect=real) as spy:
+                api = self.new_api(store=store)
+                for _ in range(3):
+                    f = self.by_name(self.index(api))["x.dvf"]
+                    self.assertEqual(f["unplayable"], NOT_YET)
+                self.assertEqual(spy.call_count, 1)
+                with open(path, "ab") as fh:                    # a new version of the file: read again
+                    fh.write(b"\xff" * 1024)
+                self.index(api)
+                self.assertEqual(spy.call_count, 2)
+
     def test_the_indexer_checks_the_header_first(self):
         path = self.write("x.dvf", st10_dvf())
         api = self.new_api()

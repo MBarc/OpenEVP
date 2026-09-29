@@ -241,12 +241,16 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!$("device-table").classList.contains("playable"));
   assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) audio can't be played yet. Its recordings can still be saved.");
   assert.strictEqual($("banner-text").textContent, "", "not an error");
+  assert.strictEqual($("devices").children[3].children[0].textContent, "Sony ICD-ST10 #4 (port 2-1)");  // relabelled at once
   const st10row = $("rows").children[0];
   assert.deepStrictEqual(texts(st10row).slice(1), ["001", "undated", "0:20", ""]);
   assert.ok(!st10row.onclick, "not playable: no click handler");
   assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) audio can't be played yet.");
   assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
   assert.ok(!calls.some((c) => c[0] === "audio"));
+  $("status").textContent = "";
+  await context.openDevice("2-1@3");                               // already read: shown again, reason again
+  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) audio can't be played yet. Its recordings can still be saved.");
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });
   await context.poll();

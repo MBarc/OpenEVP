@@ -305,7 +305,9 @@ async function setupRecorder() {
 
 async function openDevice(id) {
   if (id === S.device && S.folders.length) {                // already read: just show it again
-    S.view = "device"; renderDevices(); renderMain(); return;
+    S.view = "device"; renderDevices(); renderMain();
+    if (!S.playable && S.playReason) status(`${sentence(S.playReason)} Its recordings can still be saved.`);
+    return;
   }
   if (S.exporting) { banner("Wait for the export to finish before switching recorders."); return; }
   S.view = "device";
@@ -319,6 +321,10 @@ async function openDevice(id) {
   S.folders = r.folders;
   S.folder = (r.folders.find((f) => f.recordings.length) || r.folders[0] || {}).id ?? null;
   S.model = r.model; S.playable = !!r.playable; S.playReason = r.play_reason || ""; S.formats = r.formats || [];
+  // Opening a recorder can tell what it is (an ICD-ST10 is found as an ICD-ST25): relabel it now,
+  // not at the next poll.
+  const listed = S.devices.find((d) => d.id === id);
+  if (listed) Object.assign(listed, { model: r.model, model_id: r.model_id });
   $("device-table").classList.toggle("playable", S.playable);
   setFormats(S.formats);
   // A recorder whose recordings can't be played here (e.g. an ICD-ST10, not yet): said once, plainly.

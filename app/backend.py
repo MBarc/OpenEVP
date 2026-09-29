@@ -384,6 +384,8 @@ class Api(LibraryOps):
         self._lib_folder = None               # the library folder chosen in this session
         self._scan_folder = None              # normcased folder of the latest scan
         self._fp_session = OrderedDict()      # index key -> (size, mtime_ns, entry): read-only store
+        self._headers = OrderedDict()         # index key -> (size, mtime_ns, Format.file_problem result)
+        self._headers_lock = threading.Lock()
         self._recycle = recycle or folders.recycle   # (path) -> None or raises folders.RecycleError
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
@@ -1147,7 +1149,7 @@ class Api(LibraryOps):
                 # A file's own header can say it cannot be decoded yet (an ICD-ST10
                 # recording; only the header is read): listed like a file without
                 # a decoder, and never cached. A cached file was decoded before.
-                unplayable = fmt.file_problem(path)
+                unplayable = self._file_problem(fmt, path, st)
             if fmt.decoder is None:
                 # Listed, never fingerprinted or cached: no decoder is not the file's fault.
                 seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {_decoder_problem(fmt)}."
@@ -1212,6 +1214,20 @@ class Api(LibraryOps):
                 self._add_worker(thread)
         result.update(indexing=True, pending=len(pending))
         return result
+
+    def _file_problem(self, fmt, path, st):
+        """fmt.file_problem(path), read once per version (size, mtime) of the file:
+        such a file is never cached in the store's index, and without a store no
+        file is, so a listing would otherwise read its header every time."""
+        key = os.path.normcase(os.path.abspath(path))
+        with self._headers_lock:
+            held = self._headers.get(key)
+        if held is not None and held[:2] == (st.st_size, st.st_mtime_ns):
+            return held[2]
+        problem = fmt.file_problem(path)
+        with self._headers_lock:
+            _bounded_put(self._headers, key, (st.st_size, st.st_mtime_ns, problem), SESSION_CACHE)
+        return problem
 
     def _library_worker(self):
         """The one indexer thread. It runs the latest scan's job. A newer scan of
