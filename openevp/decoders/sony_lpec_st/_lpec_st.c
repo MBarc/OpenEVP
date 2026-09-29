@@ -194,6 +194,7 @@ EXPORT int lst_init(void *mem, const double *const *dt, const int *dlen, int nd,
     for (int i = 0; i < 33; i++) if (t->QS[i] < 0 || t->QS[i] > 2048) return -1;
     for (int i = 0; i < 32; i++) {
         if (t->QS[i] > t->QS[i + 1] || t->QL[i] < 0 || t->QS[i] + t->QL[i] > 2048) return -1;
+        if (t->QS[i + 1] - t->QS[i] > 128) return -1;      /* power_comp's noise buffer: tmp[128] */
     }
     for (int i = 0; i < 17; i++) if (t->SBQU[i] < 0 || t->SBQU[i] > 32) return -1;
     for (int i = 0; i < 16; i++) {
@@ -257,7 +258,8 @@ static int unpack(Unit *u, const int32_t *r) {
             for (int i = 0; i < MAXW; i++) { tb->amp_sf[i] = *r++; if (!in(tb->amp_sf[i], 0, 63)) return E_RECORD; }
             for (int i = 0; i < MAXW; i++) { tb->amp_idx[i] = *r++; if (!in(tb->amp_idx[i], 0, 15)) return E_RECORD; }
             for (int i = 0; i < MAXW; i++) tb->phase[i] = *r++;
-            for (int i = 0; i < MAXW; i++) tb->freq[i] = *r++;
+            for (int i = 0; i < MAXW; i++) { tb->freq[i] = *r++; if (!in(tb->freq[i], 0, 0x3FF)) return E_RECORD; }
+            for (int i = 0; i < MAXW; i++) if (!in(tb->phase[i], -0x10000, 0x10000)) return E_RECORD;
         }
         for (int i = 0; i < 2048; i++) ch->spec[i] = *r++;
     }

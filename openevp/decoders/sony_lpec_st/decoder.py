@@ -256,7 +256,24 @@ def dvf_payload(dvf_bytes) -> bytes:
     if codec != dvf_module.CODEC_ST:
         raise dvf_module.FormatError(f"this is not an LPEC ST recording (codec 0x{codec:02x}); "
                                      "the LPEC ST decoder cannot convert it")
+    payload_bytes = struct.unpack(">I", bytes(dvf_bytes[464:468]))[0]    # validate() checked it
+    if max_wav_bytes(payload_bytes) > MAX_WAV_BYTES:
+        raise dvf_module.FormatError(
+            f"this LPEC ST recording is too long to convert: its WAV could be "
+            f"{max_wav_bytes(payload_bytes) / 2**30:.1f} GiB, over the WAV format's 4 GiB limit")
     return dvf_module.payload(dvf_bytes)
+
+
+# A WAV's RIFF size field is 32 bits. ICD-ST10 recordings (at most 32 MB of
+# flash, about 930 MB of WAV) are far below; a larger .dvf is refused before
+# anything is decoded, allocated or written.
+MAX_WAV_BYTES = 0xFFFFFFFF
+
+
+def max_wav_bytes(payload_bytes: int) -> int:
+    """The largest WAV ``payload_bytes`` of LPEC ST frames can decode to:
+    every whole frame giving its 2048 stereo samples."""
+    return WAV_HEADER_BYTES + payload_bytes // FRAME_BYTES * FRAME_SAMPLES * CHANNELS * 2
 
 
 def dvf_to_wav(dvf_bytes, tables=None, should_stop: Optional[Callable[[], bool]] = None,

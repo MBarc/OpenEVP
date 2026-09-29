@@ -39,6 +39,13 @@ _I32P = ctypes.POINTER(ctypes.c_int32)
 _DP = ctypes.POINTER(ctypes.c_double)
 
 
+def record_size() -> int:
+    """The int32 count of one pack_unit() record (the DLL's RECORD must match)."""
+    unit = 9 + 4 * 16
+    channel = 32 * 3 + 5 + 16 + 16 * (1 + 7 + 7) + 16 * (6 + 4 * MAX_WAVES) + 2048
+    return unit + 2 * channel
+
+
 def _load() -> Optional[ctypes.CDLL]:
     try:
         lib = ctypes.CDLL(str(DLL_PATH))
@@ -59,6 +66,8 @@ def _load() -> Optional[ctypes.CDLL]:
         lib.lst_frame.restype = ctypes.c_int
         lib.lst_frame.argtypes = [ctypes.c_void_p, _I32P, ctypes.c_int,
                                   ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_int16)]
+        if lib.lst_record_size() != record_size():
+            return None                 # a DLL built for another record layout: use pure Python
         return lib
     except (OSError, AttributeError):
         return None

@@ -120,6 +120,72 @@ class CoreIdenticalToPythonTests(unittest.TestCase):
             _core.CoreDecoder(bad)
 
 
+@release_gate.require(HAVE_TABLES, NO_TABLES)
+@release_gate.require(_core.available(), NO_CORE)
+class CoreChecksTests(unittest.TestCase):
+    """What lst_init and lst_frame refuse instead of reading out of bounds."""
+
+    def test_a_wave_frequency_out_of_range_is_refused(self):
+        t = tables.load()
+        data = payload("all-features-400")
+        for pos in range(0, len(data), 283):             # the first frame with tones
+            u = decoder.parse(data, pos, t)
+            if u is not None and any(tb.waves for c in u.ch for tb in c.tones):
+                break
+        tb = next(tb for c in u.ch for tb in c.tones if tb.waves)
+        tb.waves[0].freq = 0x400
+        with self.assertRaises(_core.CoreError):
+            _core.CoreDecoder(t).frame_pcm(u)
+
+    def test_a_quantisation_unit_wider_than_128_is_refused(self):
+        class Bad:
+            pass
+        bad = Bad()
+        bad.__dict__.update(vars(tables.load()))
+        qs = list(bad.QU_START)
+        qs[1], qs[2] = 0, 129                # unit 1: 129 coefficients (still inside 0..2048)
+        bad.QU_START = qs
+        with self.assertRaises(_core.CoreError):
+            _core.CoreDecoder(bad)
+
+    def test_a_dll_with_another_record_layout_is_not_used(self):
+        with mock.patch.object(_core, "record_size", return_value=_core.record_size() + 1):
+            self.assertIsNone(_core._load())
+        self.assertIsNotNone(_core._load())
+
+
+@release_gate.require(HAVE_TABLES, NO_TABLES)
+@release_gate.require(_core.available(), NO_CORE)
+class CoreFuzzTests(unittest.TestCase):
+    """Seeded damaged streams (bit flips and random bytes in generated frames):
+    the C core and pure Python give the same PCM, and neither raises."""
+
+    def test_damaged_streams_decode_the_same(self):
+        import random
+        t = tables.load()
+        base = payload("all-features-400")
+        rng = random.Random(20260929)
+        for trial in range(24):
+            n = rng.randint(3, 12)
+            start = rng.randrange(0, len(base) // 283 - n) * 283
+            buf = bytearray(base[start:start + n * 283])
+            for k in range(n):                           # counters that follow on, no resets
+                buf[k * 283], buf[k * 283 + 1] = 0, k + 1
+            flips = rng.random() < 0.5
+            for _ in range(rng.randint(1, 60)):
+                i = rng.randrange(len(buf))
+                if i % 283 < 2:
+                    continue
+                if flips:
+                    buf[i] ^= 1 << rng.randrange(8)
+                else:
+                    buf[i] = rng.randrange(256)
+            with self.subTest(trial=trial):
+                core = hashlib.sha256(b"".join(decoder.pcm_chunks(bytes(buf), t, use_core=True))).hexdigest()
+                python = hashlib.sha256(b"".join(decoder.pcm_chunks(bytes(buf), t, use_core=False))).hexdigest()
+                self.assertEqual(core, python)
+
+
 class FallbackTests(unittest.TestCase):
     """Without the DLL the decoder is pure Python, and asking for the core says so."""
 
@@ -137,6 +203,7 @@ class FallbackTests(unittest.TestCase):
     def test_record_layout_matches_the_dll(self):
         if not _core.available():
             release_gate.skip_or_fail(NO_CORE)
+        self.assertEqual(_core.RECORD_SIZE, _core.record_size())
         self.assertEqual(_core.RECORD_SIZE,
                          9 + 64 + 2 * (32 * 3 + 5 + 16 + 16 * 15 + 16 * (6 + 4 * _core.MAX_WAVES) + 2048))
 
