@@ -7,7 +7,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from st25 import policy  # noqa: E402
 from st25.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE  # noqa: E402
-from st25.protocol import CMD_FOLDER_INFO, CMD_GET_VOICE, _completion_opcode  # noqa: E402
+from st25.protocol import CMD_FOLDER_INFO, _completion_opcode  # noqa: E402
 
 DATE = bytes.fromhex("07ed051713360403")   # 2029-05-23 19:54:04, Wednesday
 
@@ -60,8 +60,9 @@ class FakeRecorderDevice:
     """Emulates the recorder's side of the protocol, enforcing the real policy.
 
     folders maps 1..5 (A..E) to make_table() message tuples; other folders are
-    empty. GET_VOICE serves make_raw() for message N of the folder whose table
-    was read last, as the real recorder does.
+    empty. GET_VOICE serves make_raw() for message N of the folder named in
+    its opcode's low word (0x11FF0000 | folder), as the real recorder does;
+    which table was read last does not matter.
     """
     CONTROL_BUF = 4096
 
@@ -85,10 +86,10 @@ class FakeRecorderDevice:
             size = struct.pack(">I", TABLE_SIZE)
             self.queue = [self._msg(0x0F, op, size + bytes(8)), self._msg(0x09, done, size + bytes(8))]
             self.bulk = make_table(self.folders.get(self.current, []))
-        elif op == CMD_GET_VOICE:
-            number = words[1] >> 16
-            _slot, counter, _start, length, _date, _owner = self.folders[self.current][number - 1]
-            self.voice_calls.append((self.current, number))
+        elif policy.is_get_voice(op):
+            folder, number = op & 0xFFFF, words[1] >> 16
+            _slot, counter, _start, length, _date, _owner = self.folders[folder][number - 1]
+            self.voice_calls.append((folder, number))
             raw = make_raw(length, counter)
             size = struct.pack(">I", len(raw))
             self.queue = [self._msg(0x0F, op, bytes(12) + size), self._msg(0x09, done, bytes(12) + size)]

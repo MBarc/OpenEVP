@@ -1,7 +1,7 @@
 """The Sony ICD-ST25 model (openevp.recorders.sony_st25): the shared recorder
 contract, and the adapter against today's st25 RecorderSession on the same
 emulated recorder (listings, bytes, file names, errors, the exact commands
-sent, folder reselection), plus the placeholder models."""
+sent, the folder named in GET_VOICE), plus the placeholder models."""
 import os
 import struct
 import sys
@@ -54,8 +54,8 @@ class Device(FakeRecorderDevice):
                 at = (5 + slot // 64) * PAGE + (slot % 64) * 8
                 table[at:at + 8] = b"\xff" * 8
             self.bulk = bytes(table)
-        elif op == policy.CMD_GET_VOICE and self.skew:
-            _slot, counter, _start, length, _date, _owner = self.folders[self.current][(struct.unpack(
+        elif policy.is_get_voice(op) and self.skew:
+            _slot, counter, _start, length, _date, _owner = self.folders[op & 0xFFFF][(struct.unpack(
                 ">I", data[16:20])[0] >> 16) - 1]
             self.bulk = make_raw(length, counter + self.skew)
 
@@ -177,15 +177,15 @@ class AdapterMatchesTodayTests(unittest.TestCase):
         self.assertEqual(dev.voice_calls, old_dev.voice_calls)
         old.close()
 
-    def test_command_sequence_and_folder_reselection_match_today(self):
+    def test_command_sequence_matches_today_and_get_voice_names_the_folder(self):
         s, dev = self.adapter()
         old_dev = Device()
         old = today(old_dev)
         for session, (listing, download) in ((s, (s.recordings, s.download)),
                                              (old, (old.messages, old.download))):
             listing("A")
-            listing("B")                 # the recorder's current folder is now B
-            download("A", 2)             # so A is read again before GET_VOICE
+            listing("B")                 # the last table read is B's ...
+            download("A", 2)             # ... but GET_VOICE names folder A; no table is re-read
             download("A", 2)             # a second request is served from the session's cache
             listing("A")
         self.assertEqual(dev.frames, old_dev.frames)
@@ -194,7 +194,7 @@ class AdapterMatchesTodayTests(unittest.TestCase):
         self.assertEqual(ops[:4], [policy.CMD_DEVICE_INFO, policy.CMD_READ_BLOCK, policy.CMD_READ_BLOCK,
                                    policy.CMD_INFO_03])
         self.assertEqual(ops[5:], [policy.CMD_FOLDER_INFO | 1 << 8, policy.CMD_FOLDER_INFO | 2 << 8,
-                                   policy.CMD_FOLDER_INFO | 1 << 8, policy.CMD_GET_VOICE])
+                                   0x11FF0001])
         old.close()
 
     def test_close_releases_the_device_once(self):

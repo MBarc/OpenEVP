@@ -111,7 +111,7 @@ def run(args, progress=None):
                     problems.append(f"{label}: skipped ({m.problem})")
                     continue
                 t0 = time.monotonic()
-                raw = rec.voice_data(m.number, m.blocks)
+                raw = rec.voice_data(fi, m.number, m.blocks)
                 # --- transaction complete: disk work and printing are safe from here ---
                 name = dvf.filename(letter, m.number, m.owner, m.date, m.dated)
                 raw_note = ""

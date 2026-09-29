@@ -40,7 +40,6 @@ class RecorderSession:
         self.rec = recorder
         self.model = ""
         self._tables = {}         # letter -> [Message]
-        self._current = None      # folder whose table was read last (GET_VOICE uses it)
         self._downloads = {}      # (letter, number) -> Download
 
     @classmethod
@@ -71,16 +70,12 @@ class RecorderSession:
                     return m.owner
         return ""
 
-    def _select(self, letter):
-        msgs = parse(self.rec.folder_table(LETTERS.index(letter) + 1))
-        self._tables[letter] = msgs
-        self._current = letter
-        return msgs
-
     def messages(self, letter):
         if letter not in LETTERS:
             raise ValueError(f"no folder {letter!r}")
-        return self._tables[letter] if letter in self._tables else self._select(letter)
+        if letter not in self._tables:
+            self._tables[letter] = parse(self.rec.folder_table(LETTERS.index(letter) + 1))
+        return self._tables[letter]
 
     def download(self, letter, number):
         key = (letter, number)
@@ -95,9 +90,8 @@ class RecorderSession:
         if m.problem:
             dl = Download(label, name, error=m.problem)
         else:
-            if self._current != letter:
-                self._select(letter)
-            raw = self.rec.voice_data(m.number, m.blocks)
+            # GET_VOICE names the folder itself; reading its table does not select it.
+            raw = self.rec.voice_data(LETTERS.index(letter) + 1, m.number, m.blocks)
             try:
                 dl = Download(label, name, dvf=build_dvf(raw, m, label))
             except dvf.FormatError as e:

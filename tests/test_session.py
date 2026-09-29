@@ -1,6 +1,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice, make_raw, make_table  # noqa: E402
@@ -38,12 +39,29 @@ class SessionTests(unittest.TestCase):
         self.assertIs(s.download("A", 2), d1)
         self.assertEqual(dev.voice_calls, [(1, 2)])
 
-    def test_download_reselects_the_folder_first(self):
+    def test_download_names_its_folder_without_rereading_the_table(self):
         s, dev = session()
         s.messages("A")
-        s.messages("B")                  # the recorder's current folder is now B
-        s.download("A", 1)
+        s.messages("B")                  # the last table read is B's; that does not select B
+        with mock.patch.object(s.rec, "folder_table", side_effect=AssertionError("table re-read")):
+            s.download("A", 1)
         self.assertEqual(dev.voice_calls, [(1, 1)])
+
+    def test_each_folder_sends_its_own_get_voice_opcode(self):
+        folders = {f: [(0, 100 * f, 0x1000, 1000 + f, DATE, "Casey")] for f in range(1, 6)}
+        s, dev = session(folders)
+        for letter in "ABCDE":
+            s.messages(letter)           # every table first, so "last read" is always E
+        sent = []
+        real = s.rec.query_bulk
+        s.rec.query_bulk = lambda words, *a: sent.append(words[0]) or real(words, *a)
+        for f, letter in enumerate("ABCDE", 1):
+            d = s.download(letter, 1)
+            self.assertEqual(d.error, "")
+            self.assertEqual(d.dvf, dvf.build(make_raw(1000 + f, 100 * f), DATE, "Casey",
+                                              expected_length=1000 + f))
+        self.assertEqual(sent, [0x11FF0001, 0x11FF0002, 0x11FF0003, 0x11FF0004, 0x11FF0005])
+        self.assertEqual(dev.voice_calls, [(f, 1) for f in range(1, 6)])
 
     def test_unsupported_recording_is_reported_not_raised(self):
         s, _ = session()

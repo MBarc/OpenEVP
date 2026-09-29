@@ -25,7 +25,24 @@ CMD_READ_BLOCK = 0x090005FF       # args: length 0x1E0, offset 0 or 0x1E0
 CMD_INFO_03 = 0x090003FF
 CMD_TARGET_STATUS = 0x092000FF
 CMD_FOLDER_INFO = 0x091000FF      # 0x0910NNff for folder NN = 1..5 (A..E)
-CMD_GET_VOICE = 0x11FF0001        # args: msg<<16, 1, blocks, blocks*1056
+# GET_VOICE: 0x11FF0000 | folder, folder 1..5 (A..E); args: msg<<16, 1, blocks, blocks*1056.
+# icdcomm2.dll's GetVoiceDataST writes its first argument (the folder) into the
+# opcode's low 16 bits. Reading a folder's table does not select the folder: on
+# an ICD-ST10, 0x11FF0001 sent after folder B's table read returned A-001's data.
+CMD_GET_VOICE_BASE = 0x11FF0000
+GET_VOICE_FOLDERS = range(1, 6)
+
+
+def get_voice_opcode(folder):
+    """The GET_VOICE opcode for folder 1..5 (A..E)."""
+    if folder not in GET_VOICE_FOLDERS:
+        raise ValueError("folder must be 1..5")
+    return CMD_GET_VOICE_BASE | folder
+
+
+def is_get_voice(op):
+    return op & 0xFFFF0000 == CMD_GET_VOICE_BASE and op & 0xFFFF in GET_VOICE_FOLDERS
+
 
 BLOCK_RAW = 1056
 MAX_BLOCKS = 32 * 1024 * 1024 // 1024   # the ST25 has 32 MB of flash
@@ -41,7 +58,7 @@ def args_ok(words):
         return args in ([0x1E0, 0], [0x1E0, 0x1E0])
     if op & 0xFFFF00FF == CMD_FOLDER_INFO and 1 <= (op >> 8) & 0xFF <= 5:
         return args == [0, 0]
-    if op == CMD_GET_VOICE:
+    if is_get_voice(op):
         if len(args) != 4:
             return False
         msg, one, blocks, size = args
@@ -56,7 +73,7 @@ def frame_ok(frame):
     if len(frame) not in (24, 32) or frame[:12] != FRAME_PREFIX:
         return False
     words = struct.unpack(f">{(len(frame) - 12) // 4}I", frame[12:])
-    return args_ok(words) and len(frame) == (32 if words[0] == CMD_GET_VOICE else 24)
+    return args_ok(words) and len(frame) == (32 if is_get_voice(words[0]) else 24)
 
 
 def allow_out(request_type, request, value, index, data):

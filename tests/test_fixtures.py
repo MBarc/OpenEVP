@@ -18,14 +18,15 @@ def recorder(dev):
 
 
 class FakeRecorderTests(unittest.TestCase):
-    def test_serves_tables_and_voice_of_the_last_folder_read(self):
+    def test_serves_tables_and_voice_of_the_folder_in_the_opcode(self):
         dev = FakeRecorderDevice(FOLDERS)
         r = recorder(dev)
         msgs = parse(r.folder_table(1))
         self.assertEqual([m.length for m in msgs], [2958, 4000])
-        self.assertEqual(r.voice_data(2, msgs[1].blocks), make_raw(4000, 900))
-        self.assertEqual(parse(r.folder_table(2)), [])
-        self.assertEqual(dev.voice_calls, [(1, 2)])
+        self.assertEqual(parse(r.folder_table(2)), [])       # the last table read is B's
+        self.assertEqual(r.voice_data(1, 2, msgs[1].blocks), make_raw(4000, 900))
+        self.assertEqual(r.voice_data(3, 1, 3), make_raw(3000, 50))
+        self.assertEqual(dev.voice_calls, [(1, 2), (3, 1)])
 
 
 if __name__ == "__main__":

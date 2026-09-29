@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from st25 import dvf  # noqa: E402
 from st25.export import publish, target_path  # noqa: E402
 from st25.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE, TableError, parse  # noqa: E402
-from st25.protocol import (BLOCK_RAW, CMD_FOLDER_INFO, CMD_GET_VOICE, CMD_READ_BLOCK,  # noqa: E402
+from st25.protocol import (BLOCK_RAW, CMD_FOLDER_INFO, CMD_READ_BLOCK,  # noqa: E402
                            _args_ok, _completion_opcode)
 from fixtures import DATE, FakeRecorderDevice, make_raw, make_table  # noqa: E402
 
@@ -183,10 +183,43 @@ class AllowListTests(unittest.TestCase):
         self.assertFalse(_args_ok([CMD_READ_BLOCK, 0x1E0, 0x3C0]))
         self.assertTrue(_args_ok([CMD_FOLDER_INFO | (3 << 8), 0, 0]))
         self.assertFalse(_args_ok([CMD_FOLDER_INFO | (6 << 8), 0, 0]))
-        self.assertTrue(_args_ok([CMD_GET_VOICE, 5 << 16, 1, 3, 3 * BLOCK_RAW]))
-        self.assertFalse(_args_ok([CMD_GET_VOICE, 5 << 16, 1, 3, 3 * BLOCK_RAW + 1]))
-        self.assertFalse(_args_ok([0x11FF0002, 5 << 16, 1, 3, 3 * BLOCK_RAW]))
+        self.assertTrue(_args_ok([0x11FF0001, 5 << 16, 1, 3, 3 * BLOCK_RAW]))
+        self.assertFalse(_args_ok([0x11FF0001, 5 << 16, 1, 3, 3 * BLOCK_RAW + 1]))
         self.assertFalse(_args_ok([0xDEADBEEF, 0, 0]))
+
+    def test_get_voice_takes_folders_1_to_5_only(self):
+        from st25 import policy
+        args = [5 << 16, 1, 3, 3 * BLOCK_RAW]
+        for folder in range(1, 6):
+            op = 0x11FF0000 | folder
+            self.assertTrue(_args_ok([op] + args), hex(op))
+            self.assertEqual(policy.get_voice_opcode(folder), op)
+            self.assertTrue(policy.frame_ok(policy.FRAME_PREFIX + struct.pack(">5I", op, *args)))
+            self.assertFalse(_args_ok([op, 5 << 16, 2, 3, 3 * BLOCK_RAW]))       # other checks kept
+            self.assertFalse(_args_ok([op, 5 << 16, 1, 3, 3 * BLOCK_RAW + 1]))
+            self.assertFalse(_args_ok([op, 5 << 16 | 1, 1, 3, 3 * BLOCK_RAW]))
+            self.assertFalse(_args_ok([op, 0, 1, 3, 3 * BLOCK_RAW]))
+            self.assertFalse(_args_ok([op] + args[:3]))
+            self.assertFalse(policy.frame_ok(policy.FRAME_PREFIX + struct.pack(">3I", op, 0, 0)))
+        for op in (0x11FF0000, 0x11FF0006, 0x11FF0007, 0x11FF00FF, 0x11FF0101, 0x11FFFFFF,
+                   0x11FE0001, 0x10FF0001, 0x11FF1001, 0x11000001):
+            self.assertFalse(_args_ok([op] + args), hex(op))
+            self.assertFalse(policy.frame_ok(policy.FRAME_PREFIX + struct.pack(">5I", op, *args)), hex(op))
+        for folder in (0, 6, -1, 0x10001):
+            with self.assertRaises(ValueError):
+                policy.get_voice_opcode(folder)
+
+    def test_folder_a_get_voice_frame_is_byte_identical(self):
+        # Pinned: the exact frame Digital Voice Editor (and OpenEVP <= 0.8.2) sends for folder A.
+        from st25.protocol import Recorder
+        sent = []
+        r = Recorder.__new__(Recorder)
+        r.dev = FakeRecorderDevice({1: [(0, 100, 0x1000, 2958, DATE, "X"), (1, 900, 0x3000, 4000, DATE, "X")]})
+        real = r.dev.control_out
+        r.dev.control_out = lambda rt, req, v, i, data, t: sent.append(bytes(data)) or real(rt, req, v, i, data, t)
+        self.assertEqual(r.voice_data(1, 2, 4), make_raw(4000, 900))
+        self.assertEqual(sent, [bytes.fromhex("00e00008" "0046abab" "00000000" "11ff0001"
+                                              "00020000" "00000001" "00000004" "00001080")])
 
     def test_bad_size_rejected_before_allocation(self):
         from unittest import mock
@@ -195,9 +228,13 @@ class AllowListTests(unittest.TestCase):
         r.dev = mock.Mock()
         with mock.patch("builtins.bytearray", side_effect=AssertionError("allocated")):
             with self.assertRaises(RecorderError):
-                r.voice_data(1, 2_000_000)          # > 32 MB
+                r.voice_data(1, 1, 2_000_000)       # > 32 MB
             with self.assertRaises(RecorderError):
-                r.query_bulk([CMD_GET_VOICE, 1 << 16, 1, 3, 3 * BLOCK_RAW], 28, 10 ** 9)
+                r.query_bulk([0x11FF0001, 1 << 16, 1, 3, 3 * BLOCK_RAW], 28, 10 ** 9)
+            with self.assertRaises(ValueError):
+                r.voice_data(6, 1, 3)               # no folder F
+            with self.assertRaises(ValueError):
+                r.voice_data(0, 1, 3)
         self.assertEqual(r.dev.mock_calls, [])      # no USB traffic of any kind
 
     def _guarded_device(self):
@@ -258,6 +295,7 @@ class AllowListTests(unittest.TestCase):
     def test_completion_opcode(self):
         self.assertEqual(_completion_opcode(0x091001FF), 0x09100100)
         self.assertEqual(_completion_opcode(0x11FF0001), 0x11000001)
+        self.assertEqual(_completion_opcode(0x11FF0005), 0x11000005)
         self.assertEqual(_completion_opcode(0x092000FF), 0x09200000)
 
 

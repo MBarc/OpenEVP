@@ -12,7 +12,7 @@ Transport (vendor requests, recipient interface, wValue 0xABAB, wIndex 0):
 
 Replies echo the command's opcode: the acknowledgement of a bulk command echoes
 it unchanged; the final reply replaces its 0xFF byte with 0x00
-(091001ff -> 09100100, 11ff0001 -> 11000001).
+(091001ff -> 09100100, 11ff0002 -> 11000002).
 
 Safety: the only thing ever sent to the recorder is a command frame, and the
 USB layer itself (usb.Device, enforcing st25/policy.py) refuses any control OUT that
@@ -32,10 +32,10 @@ import time
 
 from .usb import Device, LIBUSB_ERROR_TIMEOUT
 
-from .policy import (BLOCK_RAW, CMD_DEVICE_INFO, CMD_FOLDER_INFO, CMD_GET_VOICE,  # noqa: F401
+from .policy import (BLOCK_RAW, CMD_DEVICE_INFO, CMD_FOLDER_INFO, CMD_GET_VOICE_BASE,  # noqa: F401
                      CMD_INFO_03, CMD_READ_BLOCK, CMD_TARGET_STATUS, EP_BULK_IN, FRAME_PREFIX,
                      MAX_BLOCKS, REQ_COMMAND, REQ_REPLY, REQ_STATUS, REQTYPE_IN, REQTYPE_OUT,
-                     WVALUE, frame_ok)
+                     WVALUE, frame_ok, get_voice_opcode, is_get_voice)
 from .policy import args_ok as _args_ok
 
 VID, PID = 0x054C, 0x0103
@@ -107,7 +107,7 @@ class Recorder:
             raise RecorderError("refusing to send a command that Digital Voice Editor does not send: "
                                 + " ".join(f"{w:08x}" for w in words))
         frame = FRAME_PREFIX + b"".join(struct.pack(">I", w) for w in words)
-        if len(frame) != (32 if words[0] == CMD_GET_VOICE else 24):
+        if len(frame) != (32 if is_get_voice(words[0]) else 24):
             raise RecorderError("unexpected frame length")
         self._wait(want_reply=False)
         self.dev.control_out(REQTYPE_OUT, REQ_COMMAND, WVALUE, 0, frame, CONTROL_TIMEOUT_MS)
@@ -139,7 +139,7 @@ class Recorder:
         if not _args_ok(words):
             raise RecorderError("refusing to send a command that Digital Voice Editor does not send: "
                                 + " ".join(f"{w:08x}" for w in words))
-        allowed = FOLDER_TABLE_SIZE if words[0] != CMD_GET_VOICE else words[4]
+        allowed = words[4] if is_get_voice(words[0]) else FOLDER_TABLE_SIZE
         if expected_size != allowed or not 0 < expected_size <= MAX_BLOCKS * BLOCK_RAW:
             raise RecorderError(f"refusing implausible transfer size {expected_size}")
         data = bytearray(expected_size)
@@ -185,8 +185,12 @@ class Recorder:
         _, table, _ = self.query_bulk([CMD_FOLDER_INFO | (folder << 8), 0, 0], 16, FOLDER_TABLE_SIZE)
         return table
 
-    def voice_data(self, msg, blocks):
-        """Raw wire data of message `msg` (1-based) in the current folder."""
+    def voice_data(self, folder, msg, blocks):
+        """Raw wire data of message `msg` (1-based) in folder 1..5 (A..E).
+
+        The folder travels in the opcode's low 16 bits, as Digital Voice
+        Editor sends it; reading a folder's table does not select the folder.
+        """
         size = blocks * BLOCK_RAW
-        _, raw, _ = self.query_bulk([CMD_GET_VOICE, msg << 16, 1, blocks, size], 28, size)
+        _, raw, _ = self.query_bulk([get_voice_opcode(folder), msg << 16, 1, blocks, size], 28, size)
         return raw
