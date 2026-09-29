@@ -251,7 +251,8 @@ can't add, edit or delete marks (it says so) until the first is closed.
   recording in memory while it is saved. The player draws the waveform from
   the audio itself only for the first 2.7 minutes' worth of stereo samples
   (30 minutes of ICD-ST25 audio); longer recordings are drawn from 400 peaks
-  per second. Decoding takes about 1.3 s of CPU per minute of audio.
+  per second. Decoding takes about 1.4 s of CPU per minute of audio (about two
+  minutes for the longest recording).
 - An ICD-ST10 shows as ICD-ST25 until you open it, and uses the same driver.
 - Messages in table slots 64 and above rely on an assumed layout. Each message is
   cross-checked against its downloaded data, so a wrong assumption stops the

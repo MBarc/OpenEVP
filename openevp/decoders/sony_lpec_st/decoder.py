@@ -268,10 +268,16 @@ def dvf_to_wav(dvf_bytes, tables=None, should_stop: Optional[Callable[[], bool]]
     frame after each reset gives no samples), so the samples, and with them
     the marks fingerprint, are exactly those of Sony's decoder."""
     payload = dvf_payload(dvf_bytes)
-    wav = bytearray(WAV_HEADER_BYTES)
+    # Sized for every frame up front and cut to what was decoded at the end:
+    # growing a bytearray chunk by chunk reallocates it, briefly holding two
+    # copies of a long recording.
+    wav = bytearray(WAV_HEADER_BYTES + len(payload) // FRAME_BYTES * FRAME_SAMPLES * CHANNELS * 2)
+    pos = WAV_HEADER_BYTES
     for chunk in pcm_chunks(payload, tables, should_stop, use_core):
-        wav += chunk
-    wav[0:WAV_HEADER_BYTES] = wav_header(len(wav) - WAV_HEADER_BYTES)
+        wav[pos:pos + len(chunk)] = chunk
+        pos += len(chunk)
+    del wav[pos:]
+    wav[0:WAV_HEADER_BYTES] = wav_header(pos - WAV_HEADER_BYTES)
     return wav
 
 
