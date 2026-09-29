@@ -230,14 +230,17 @@ can't add, edit or delete marks (it says so) until the first is closed.
   names the folder, as Digital Voice Editor does; checked on an ICD-ST10
   (folders B and C), not yet on an ICD-ST25.
 - **ICD-ST25: LP mode only.** Only LP recordings have been checked. The folder
-  table names each recording's mode; a mode OpenEVP doesn't know (SP, perhaps)
-  is reported and not saved, so record in LP.
+  table names each recording's mode; a mode OpenEVP doesn't know is reported
+  and not saved. SP would be caught this way if SP uses a different mode byte
+  (unverified), so record in LP.
 - **ICD-ST10: download only**, verified on one recorder with three recordings
   (2026-09-29). Its recordings have no owner name, and no date while its clock
   isn't set, so their files are named like `001_A_001_Unknown.dvf`. Lengths
   include a few short segment frames, so they can read a fraction of a second
-  long. Its flash size is not known; a recording longer than 32 MB (about an
-  hour and a half of LPEC ST) would be reported, not saved.
+  too long. Its flash size is not known; a recording longer than 32 MB (about an
+  hour and a half of LPEC ST) would be reported, not saved. Its other quality
+  modes, and recordings made with its clock set, are untested.
+- An ICD-ST10 shows as ICD-ST25 until you open it, and uses the same driver.
 - Messages in table slots 64 and above rely on an assumed layout. Each message is
   cross-checked against its downloaded data, so a wrong assumption stops the
   download rather than writing a bad file.

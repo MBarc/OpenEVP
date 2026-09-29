@@ -58,7 +58,7 @@ class Progress:
 
 def run(args, progress=None):
     pr = progress if progress is not None else Progress()
-    print(f"OpenEVP {__version__} (ICD-ST25 downloader)")
+    print(f"OpenEVP {__version__} (Sony ICD-ST downloader)")
     if args.output:
         out_root = os.path.abspath(args.output)
     else:
@@ -182,7 +182,7 @@ def check_wav(path):
     build (openevp.decoders.sony_lpec plus its bundled table data and DLL), without touching
     the recorder. Does not save anything. Used to verify a build: e.g.
     `openevp-st25.exe --check-wav some.dvf`."""
-    print(f"OpenEVP {__version__} (ICD-ST25 downloader)")
+    print(f"OpenEVP {__version__} (Sony ICD-ST downloader)")
     try:
         with open(path, "rb") as f:
             data = f.read()

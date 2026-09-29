@@ -9,8 +9,8 @@ Pages used (offsets are page numbers):
   5   flash address range of each slot: start u32, end u32 with bit 31 set
       (64 per page)
   9+  one entry page per slot: owner name at 276 after a 03 00 tag at 274,
-      date/time at 452..459 (the ICD-ST10 has a 90 00 tag there, which is not
-      parsed: its recordings get no owner name)
+      date/time at 452..459 (the ICD-ST10 has a 90 00 tag at 274 instead,
+      which is not parsed: its recordings get no owner name)
 Page 4 is NOT the message list: it keeps 00 01 02 ... even in an empty folder.
 Pages after the live entries hold stale entries from deleted recordings; only
 slots listed on page 0 are used.
