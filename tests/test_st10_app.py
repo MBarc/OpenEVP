@@ -156,6 +156,20 @@ class St10AppTests(St10Base):
                 self.assertEqual(f.read(), WAV_1)
             server.stop()
 
+    def test_a_redownload_is_decoded_once(self):
+        """No captured bytes: the check decode is the WAV copy's decode too."""
+        from unittest import mock
+        self.api.recordings(ID)
+        self.api.audio(ID, "A", 1)
+        self.api._natives.clear()
+        rec = self.api.audio(ID, "A", 1)["rec"]
+        real = type(formats.DVF.decoder).to_wav
+        with mock.patch.object(type(formats.DVF.decoder), "to_wav", autospec=True, side_effect=real) as decode:
+            self.api.add_mark(rec, 0.1, 0.2, "B", "")
+            event, p = self.events.wait("backup-done", "backup-failed")
+        self.assertEqual(event, "backup-done", p)
+        self.assertEqual(decode.call_count, 1)
+
     def test_recording_wav(self):
         self.api.recordings(ID)
         self.assertEqual(bytes(backend.recording_wav(self.m, (ID, "A", 1))), WAV_1)

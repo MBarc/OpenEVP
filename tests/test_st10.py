@@ -249,6 +249,36 @@ class St10FormatTests(unittest.TestCase):
         self.assertEqual(formats.write_wav(formats.WAV, wav, buf), len(wav))
         self.assertEqual(buf.getvalue(), wav)
 
+    @release_gate.require(_st_tables(), NO_ST_TABLES)
+    def test_a_recording_too_long_for_a_wav_is_refused_up_front(self):
+        """Its worst-case WAV (every frame's samples) over the 4 GiB WAV limit:
+        a DecodeError before anything is allocated, decoded or written."""
+        from openevp.decoders.sony_lpec_st import decoder as st_decoder
+        f = st10_dvf(st_audio_frames())
+        worst = st_decoder.max_wav_bytes(len(st_audio_frames()))
+        self.assertEqual(worst, 44 + 40 * 2048 * 4)
+        self.assertLess(st_decoder.max_wav_bytes(32 << 20), st_decoder.MAX_WAV_BYTES)   # the ST10's whole flash fits
+        with mock.patch.object(st_decoder, "MAX_WAV_BYTES", worst - 1), \
+                mock.patch.object(st_decoder, "pcm_chunks", side_effect=AssertionError("decoded")):
+            for call in (lambda: formats.DVF.decoder.to_wav(f),
+                         lambda: formats.analyze(formats.DVF, f)):
+                with self.assertRaisesRegex(formats.DecodeError, "too long to convert"):
+                    call()
+            out = io.BytesIO()
+            with self.assertRaisesRegex(formats.DecodeError, "4 GiB"):
+                formats.write_wav(formats.DVF, f, out)
+            self.assertEqual(out.getvalue(), b"")                 # nothing written
+        with mock.patch.object(st_decoder, "MAX_WAV_BYTES", worst):
+            self.assertEqual(bytes(formats.DVF.decoder.to_wav(f)), st_audio_wav())
+
+    def test_expected_wav_size_from_the_header(self):
+        f = st10_dvf(st_audio_frames())
+        self.assertEqual(formats.expected_wav_bytes(formats.DVF, f), 44 + 40 * 2048 * 4)
+        lp = dvf.build(make_raw(3000, 1), DATE, "X")
+        self.assertEqual(formats.expected_wav_bytes(formats.DVF, lp), 44 + (3000 - 10 * 3) * 64 // 3)
+        self.assertEqual(formats.expected_wav_bytes(formats.WAV, b"RIFF1234"), 8)
+        self.assertIsNone(formats.expected_wav_bytes(formats.DVF, b"short"))
+
     def test_without_its_decoder_it_is_not_the_files_fault(self):
         with without_st_decoder():
             for call in (lambda: formats.DVF.decoder.to_wav(st10_dvf()),

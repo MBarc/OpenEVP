@@ -39,6 +39,8 @@ A Format describes one native file type:
   - optional ``pcm(data, should_stop=None)``: (channels, sample width, rate,
     PCM chunks) decoded as the chunks are consumed, or None when this data
     cannot be streamed; for fingerprinting without a WAV in memory.
+  - optional ``wav_bytes(data) -> int | None``: about how big to_wav's WAV
+    will be, from the header alone (the audio server makes room for it).
 
 decoder_problem(fmt) is why a format cannot be decoded now at all.
 write_wav(fmt, ...) and analyze(fmt, ...) use a decoder's streamed forms
@@ -132,6 +134,9 @@ def decoder_problem(fmt):
 class _PcmPassthrough:
     """A WAV "decodes" to itself, once the wave module accepts it as PCM."""
 
+    def wav_bytes(self, data):
+        return len(data)
+
     def available(self):
         return True
 
@@ -204,6 +209,16 @@ class _SonyLpec:
 
     def to_wav(self, data, should_stop=None):
         return self._run(data, lambda: _st25_audio.dvf_to_wav(data, should_stop=should_stop))
+
+    def wav_bytes(self, data):
+        """The WAV's size from the header's payload field: at most every LPEC ST
+        frame's 2048 stereo samples; LPEC LP's 750 bytes a second become 16000."""
+        if len(data) < 468:
+            return None
+        payload = struct.unpack(">I", bytes(data[464:468]))[0]
+        if _dvf.codec(data) == CODEC_ST:
+            return 44 + payload // _dvf.ST_FRAME * _dvf.ST_SAMPLES * 4
+        return 44 + payload * 64 // 3
 
     def write_wav(self, data, f, should_stop=None):
         return self._run(data, lambda: _st25_audio.dvf_write_wav(data, f, should_stop=should_stop))
@@ -329,6 +344,18 @@ def analyze(fmt, data, should_stop=None):
         fp = _wavinfo.wav_fingerprint(f)
     with _wavinfo.buffer_file(wav) as f, wave.open(f) as w:
         return fp, (w.getnframes() / w.getframerate() if w.getframerate() else None)
+
+
+def expected_wav_bytes(fmt, data):
+    """About how many bytes of WAV ``data`` will decode to (the decoder's
+    wav_bytes), or None when it cannot say."""
+    estimate = getattr(fmt.decoder, "wav_bytes", None)
+    if estimate is None:
+        return None
+    try:
+        return estimate(data)
+    except Exception:
+        return None
 
 
 def fingerprint(fmt, data, should_stop=None):

@@ -549,8 +549,10 @@ class Api(LibraryOps):
         made = []
 
         def write(f):                    # runs only when the audio server has no decode cached
-            dl = _download(self._manager, key)
-            made.append(dl)
+            if not made:                 # (a retry after a full disk reuses the download)
+                made.append(_download(self._manager, key))
+            dl = made[-1]
+            self._reserve(fmt, dl.data)
             formats.write_wav(fmt, dl.data, f, should_stop=self._stop.is_set)
         try:
             info = self._server.prepare(key, write=write)
@@ -761,15 +763,16 @@ class Api(LibraryOps):
                             f"{entry['source']['label']} was not backed up because the app closed.")
 
     def _device_audio(self, entry):
-        """(native bytes, their file name) for a recorder recording's handle. When
-        the handle has no captured bytes, the recording is downloaded once more
-        from the same recorder, folder and number, and trusted only if it decodes
-        to the same audio that was loaded (checked by fingerprint: a decoder that
-        streams never holds the WAV for it). Raises ValueError in plain words."""
+        """(native bytes, their file name, WAV or None) for a recorder recording's
+        handle. When the handle has no captured bytes, the recording is downloaded
+        once more from the same recorder, folder and number, and trusted only if it
+        decodes to the same audio that was loaded (fingerprinted in place); that
+        decode is returned as the WAV, so the caller (a WAV copy, a marked export)
+        does not decode it again. Raises ValueError in plain words."""
         src = entry["source"]
         with self._recs_lock:
             if src["native"] is not None:
-                return src["native"], src["native_name"]
+                return src["native"], src["native_name"], None
         try:
             dl = _download(self._manager, (src["device"], src["folder"], src["number"]))
         except ValueError:
@@ -778,12 +781,15 @@ class Api(LibraryOps):
             raise ValueError(_error(e)["error"]) from e
         if not _usable_filename(src["format"], dl.filename):
             raise ValueError(f"the recorder gave {src['label']} a file name OpenEVP cannot use")
-        if formats.fingerprint(src["format"], dl.data, should_stop=self._stop.is_set) != entry["fp"]:
+        wav = _decoder(src["format"]).to_wav(dl.data, should_stop=self._stop.is_set)
+        with wavinfo.buffer_file(wav) as f:
+            same = wavinfo.wav_fingerprint(f) == entry["fp"]
+        if not same:
             raise ValueError(f"{src['label']} on the recorder is no longer the recording that was marked. "
                              "Load it again, then retry.")
         with self._recs_lock:
             src["native"], src["native_name"] = dl.data, dl.filename
-        return dl.data, dl.filename
+        return dl.data, dl.filename, wav
 
     def _backup(self, fp, rec, entry):
         """Save the recording's native file (a .dvf for the ST25) into
@@ -794,7 +800,7 @@ class Api(LibraryOps):
         label = src["label"]
         fmt = src["format"]
         try:
-            data, native_name = self._device_audio(entry)
+            data, native_name, wav = self._device_audio(entry)
         except formats.Cancelled:                     # the app is closing; retried on the next mark
             self._closed_before_backup(fp, rec, entry)
             return
@@ -818,7 +824,8 @@ class Api(LibraryOps):
         if _wav_problem(src, data) is None:
             wav_name = os.path.splitext(native_name)[0] + ".wav"
             try:
-                wav = _decoder(fmt).to_wav(data, should_stop=self._stop.is_set)
+                if wav is None:
+                    wav = _decoder(fmt).to_wav(data, should_stop=self._stop.is_set)
                 wav_path, _ = save_wav(wavinfo.marked_parts(wav, self._store.marks(fp)), outdir, wav_name)
                 del wav
                 paths.append(wav_path)
@@ -844,6 +851,13 @@ class Api(LibraryOps):
                    {"rec": rec, "label": entry["source"]["label"], "detail": detail})
 
     # ---- WAV with marks ----------------------------------------------------------
+    def _reserve(self, fmt, data):
+        """Before a decode into the audio server's cache: make room for the WAV it
+        is expected to write (older decodes are evicted first)."""
+        reserve = getattr(self._server, "reserve", None)
+        if reserve is not None:
+            reserve(formats.expected_wav_bytes(fmt, data))
+
     def _marked_wav(self, wav):
         """(wav, note): a freshly decoded WAV with the marks of its recording written
         in (as wavinfo.marked_parts: pieces, not a copy), or unchanged when it has
@@ -913,7 +927,7 @@ class Api(LibraryOps):
                 if problem:
                     return _fail(f"WAV export: {problem}.")
                 try:
-                    data, native_name = self._device_audio(entry)
+                    data, native_name, wav = self._device_audio(entry)
                 except ValueError as e:
                     return _fail(str(e))
                 problem = _wav_problem(src, data)
@@ -921,7 +935,8 @@ class Api(LibraryOps):
                     return _fail(f"WAV export: {problem}.")
                 if not _usable_filename(src["format"], native_name):
                     return _fail(f"The recorder gave {src['label']} a file name OpenEVP cannot use.")
-                wav = _decoder(src["format"]).to_wav(data, should_stop=self._stop.is_set)
+                if wav is None:
+                    wav = _decoder(src["format"]).to_wav(data, should_stop=self._stop.is_set)
                 outdir = os.path.join(self._dest, src["safe_name"])
                 out_name = os.path.splitext(native_name)[0] + ".wav"
             else:
@@ -1049,6 +1064,7 @@ class Api(LibraryOps):
             def write(out):
                 with open(path, "rb") as f:
                     data = f.read()
+                self._reserve(fmt, data)
                 formats.write_wav(fmt, data, out, should_stop=self._stop.is_set)
             return self._loaded(self._server.prepare(key, write=write), name, name, source, {"name": name})
         except Exception as e:

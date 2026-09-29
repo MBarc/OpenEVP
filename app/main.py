@@ -13,7 +13,7 @@ from openevp import __version__
 from openevp.paths import default_output
 
 from . import folders, updater
-from .audio_server import AudioServer
+from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
 from .backend import Api, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
@@ -312,7 +312,11 @@ def _run_app(smoke=None):
     """The app. smoke: (report, a throwaway folder) for --smoke (see above)."""
     _own_taskbar_identity()
     running = [] if smoke else _announce_running()   # keeps the mutex handles alive until the app closes
-    cache = tempfile.mkdtemp(prefix="st25-audio-")
+    # Decode caches left in the temp folder by runs that crashed (another running
+    # OpenEVP holds its own open, so it is kept: see clean_stale_caches).
+    clean_stale_caches(tempfile.gettempdir())
+    cache = tempfile.mkdtemp(prefix=CACHE_PREFIX)
+    cache_lock = hold_cache(cache)
     manager = None
     server = None
     api = None
@@ -414,4 +418,5 @@ def _run_app(smoke=None):
             server.stop()
         if manager is not None:
             manager.close()
+        cache_lock.close()
         shutil.rmtree(cache, ignore_errors=True)

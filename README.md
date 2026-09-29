@@ -246,7 +246,9 @@ can't add, edit or delete marks (it says so) until the first is closed.
   clock set, are untested.
 - **Long ICD-ST10 recordings are big**: 92 minutes of 44.1 kHz stereo is about
   930 MB of WAV. Playback decodes straight into a disk cache (2 GB, the oldest
-  recordings dropped first) and the library fingerprints recordings without
+  recordings dropped first, room made before a decode and again if the disk
+  fills up; a cache left behind by a crash is deleted at the next start) and
+  the library fingerprints recordings without
   holding their audio, but a WAV export or a marked backup holds one decoded
   recording in memory while it is saved. The player draws the waveform from
   the audio itself only for the first 2.7 minutes' worth of stereo samples

@@ -135,6 +135,76 @@ class AudioServerTests(unittest.TestCase):
         self.assertEqual(os.listdir(self.dir.name), [])
         self.assertEqual(self.s._inflight, {})
 
+    def test_room_is_made_before_writing(self):
+        """With the expected size known, older decodes are evicted down to the
+        budget minus it before the new one is written (not only afterwards)."""
+        urls = [self.s.prepare(("1-4@7", "A", n))["url"] for n in (1, 2, 3)]      # budget: 3 x len(WAV)
+        seen = []
+
+        def write(f):
+            seen.append(sorted(os.listdir(self.dir.name)))
+            f.write(WAV)
+        self.s.prepare(("1-4@7", "A", 5), write=write, expected=2 * len(WAV))
+        self.assertEqual(len(seen[0]), 2)                         # two evicted before the write (+ the new file)
+        self.assertEqual(self.get(urls[2]).read(), WAV)            # the newest one kept
+        for url in urls[:2]:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.get(url)
+        self.s.reserve(3 * len(WAV))                               # write() can ask once it knows
+        self.assertEqual(len(os.listdir(self.dir.name)), 0)
+
+    def test_a_full_disk_evicts_everything_else_and_retries_once(self):
+        import errno
+        self.s.prepare(("1-4@7", "A", 1))
+        tries = []
+
+        def write(f):
+            tries.append(len(os.listdir(self.dir.name)))
+            if len(tries) == 1:
+                f.write(WAV[:100])
+                raise OSError(errno.ENOSPC, "No space left on device")
+            f.write(WAV)
+        info = self.s.prepare(("1-4@7", "A", 6), write=write)
+        self.assertEqual(tries, [2, 1])                            # then only the new file: the first entry gone
+        self.assertEqual(self.get(info["url"]).read(), WAV)
+
+        def full(f):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with self.assertRaises(OSError):                           # only once more
+            self.s.prepare(("1-4@7", "A", 7), write=full)
+        self.assertEqual(os.listdir(self.dir.name), [])           # everything else evicted, nothing left behind
+
+    def test_stale_cache_folders_are_removed_but_not_one_in_use(self):
+        from app import audio_server
+        with tempfile.TemporaryDirectory() as parent:
+            def folder(name, age=3600):
+                path = os.path.join(parent, name)
+                os.makedirs(path)
+                with open(os.path.join(path, "x.wav"), "wb") as f:
+                    f.write(b"x")
+                old = os.path.getmtime(path) - age
+                os.utime(path, (old, old))
+                return path
+            crashed = folder(audio_server.CACHE_PREFIX + "crashed")
+            marked = folder(audio_server.CACHE_PREFIX + "marked")
+            open(os.path.join(marked, audio_server.IN_USE), "wb").close()     # its app is gone
+            running = folder(audio_server.CACHE_PREFIX + "running")
+            held = audio_server.hold_cache(running)                  # another OpenEVP, still open
+            starting = folder(audio_server.CACHE_PREFIX + "starting", age=0)
+            other = folder("something-else")
+            mine = folder(audio_server.CACHE_PREFIX + "mine")
+            try:
+                removed = audio_server.clean_stale_caches(parent, keep=mine)
+                if sys.platform == "win32":                          # an open file can't be deleted there
+                    self.assertTrue(os.path.isdir(running))
+                self.assertEqual(sorted(removed), sorted([crashed, marked] +
+                                                         ([] if sys.platform == "win32" else [running])))
+                for path in (starting, other, mine):
+                    self.assertTrue(os.path.isdir(path))
+            finally:
+                held.close()
+            self.assertIn(running, audio_server.clean_stale_caches(parent))
+
     def test_the_cache_holds_two_of_the_longest_st10_recordings(self):
         from app import audio_server
         longest_st10_wav = 44 + 92 * 60 * 44100 * 2 * 2            # 92 minutes, 44.1 kHz stereo 16-bit
