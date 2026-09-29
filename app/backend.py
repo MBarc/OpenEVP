@@ -97,11 +97,12 @@ def _decoder(fmt):
 def recording_wav(manager, key, should_stop=None):
     """WAV bytes for one recording (the AudioServer provider). ``should_stop``
     lets app shutdown interrupt a long decode (formats.Cancelled). Raises
-    formats.DecoderUnavailable when the recorder's model cannot be played (the
-    model is read after the download: opening the recorder may relabel it)."""
+    formats.DecoderUnavailable when the recorder's model, or this recording's
+    codec (an ICD-ST10's LPEC SP), cannot be played (the model is read after
+    the download: opening the recorder may relabel it)."""
     data = _download(manager, key).data
     model = manager.model(key[0])
-    problem = model.wav_problem()
+    problem = model.wav_problem() or model.native.data_problem(data)
     if problem:
         raise formats.DecoderUnavailable(problem)
     return _decoder(model.native).to_wav(data, should_stop=should_stop)
@@ -332,12 +333,15 @@ def _check_listing(model, folders_, rows):
 
 
 def _recording(folder, r):
-    """One recording row for the page."""
+    """One recording row for the page. play_problem: why this recording cannot be
+    played (e.g. its codec has no decoder), or None; the model's own reason is
+    the listing's play_reason."""
     seconds = r.get("seconds")
     return {"number": r["number"], "label": _label(folder, r["number"]),
             "recorded": r.get("recorded_label") or "",
             "seconds": round(seconds, 1) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None,
-            "owner": r.get("owner"), "problem": r.get("problem") or None}
+            "owner": r.get("owner"), "problem": r.get("problem") or None,
+            "play_problem": r.get("play_problem") or None}
 
 
 class Api(LibraryOps):
@@ -543,6 +547,8 @@ class Api(LibraryOps):
         if found is None:
             return _fail("No such recording.")
         _model, folder, row = found
+        if row.get("play_problem"):          # this recording's codec (e.g. LPEC SP), not the model's
+            return _fail(f"Playback: {row['play_problem']}.")
         number = row["number"]
         key = (device_id, folder_id, number)
 

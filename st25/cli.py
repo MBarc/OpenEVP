@@ -3,10 +3,11 @@
     st25-download [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav]
     st25-download --check-wav DVF_FILE
 
---wav also writes a WAV file (8000 Hz, 16-bit mono) beside each .dvf, decoded
-by the built-in LPEC decoder; a .wav missing beside an already-saved .dvf is
-filled in. ICD-ST10 recordings (LPEC ST) get no WAV yet: they are saved as
-.dvf only, with a note. --check-wav decodes one .dvf file to verify that WAV
+--wav also writes a WAV file beside each .dvf, decoded by the built-in LPEC
+decoders (LPEC LP: 8000 Hz mono; LPEC ST: 44.1 kHz stereo); a .wav missing
+beside an already-saved .dvf is filled in. A recording whose codec can't be
+decoded in this build (LPEC SP, an ICD-ST10's SP mode, has no decoder yet) is
+saved as .dvf only, with a note. --check-wav decodes one .dvf file to verify that WAV
 conversion works in this build, and saves nothing.
 
 Nothing on the recorder is changed or deleted. Every recording is downloaded
@@ -72,7 +73,7 @@ def run(args, progress=None):
     # tables.load() caches the parsed data in-process, so there's nothing to save
     # by re-checking inside the loop below.
     wav_ok = args.wav and audio.available()
-    st_ok = args.wav and audio.available(dvf.CODEC_ST)      # ICD-ST10 recordings (LPEC ST)
+    codec_ok = {dvf.CODEC_LP: wav_ok}       # other codecs (ICD-ST10: LPEC ST, SP) when first seen
     if args.wav and not args.list and not wav_ok:
         print(f"Note: --wav requested but {audio.status()}; only .dvf files will be saved.")
     elif wav_ok and not args.list and audio.status():
@@ -104,7 +105,7 @@ def run(args, progress=None):
             print(f"\nFolder {letter}: {len(msgs)} recording(s)")
             for m in msgs:
                 note = f"  ** {m.problem}" if m.problem else ""
-                mode = f"  {dvf.MODES[m.mode]}" if m.mode != dvf.MODE_LP and m.mode in dvf.MODES else ""
+                mode = f"  {dvf.MODES[m.mode]}" if m.mode in dvf.MODES else ""
                 seconds = m.seconds()
                 length = "      ?" if seconds is None else f"{seconds:7.1f}"
                 print(f"  {m.number:3d}  {m.when():19s}  {length} s  {m.owner}{mode}{note}")
@@ -137,11 +138,13 @@ def run(args, progress=None):
                 path, done = save_dvf(data, outdir, name)
                 wav_note = ""
                 wav_written = False
-                is_st = dvf.codec(data) == dvf.CODEC_ST
-                if args.wav and is_st and not st_ok:
+                codec = dvf.codec(data)
+                if args.wav and codec not in codec_ok:
+                    codec_ok[codec] = audio.available(codec)
+                if args.wav and not codec_ok[codec] and codec != dvf.CODEC_LP:   # LP's reason was said up front
                     if not done:
-                        wav_note = f"; no WAV: {audio.status(dvf.CODEC_ST)}"
-                elif (st_ok if is_st else wav_ok):
+                        wav_note = f"; no WAV: {audio.status(codec)}"
+                elif args.wav and codec_ok[codec]:
                     try:
                         wav_path, wav_done = save_wav(audio.dvf_to_wav(data), outdir, name[:-4] + ".wav")
                         if not wav_done:
@@ -228,14 +231,14 @@ def _wav_seconds(wav):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="st25-download", description=__doc__.splitlines()[0],
                                  epilog="WAV conversion is built in: --wav decodes each recording "
-                                 "with OpenEVP's own LPEC decoders (LPEC LP for the ICD-ST25, "
-                                 "LPEC ST for the ICD-ST10).")
+                                 "with OpenEVP's own LPEC decoders (LPEC LP, and LPEC ST from an "
+                                 "ICD-ST10; its LPEC SP recordings can't be converted yet).")
     ap.add_argument("output", nargs="?", help="output folder (default: Documents\\OpenEVP)")
     ap.add_argument("--list", action="store_true", help="only list the recordings")
     ap.add_argument("--folder", choices=list(LETTERS), help="only this folder")
     ap.add_argument("--raw", action="store_true", help="also save the raw wire data (for debugging)")
     ap.add_argument("--wav", action="store_true", help="also write a WAV file beside each .dvf (16-bit; 8000 Hz mono "
-                    "for the ICD-ST25, 44100 Hz stereo for the ICD-ST10); also fills in a "
+                    "for LPEC LP, 44100 Hz stereo for LPEC ST); also fills in a "
                     "missing .wav beside a .dvf saved earlier")
     ap.add_argument("--open", action="store_true",
                     help="open the output folder when done (default when the .exe is double-clicked)")

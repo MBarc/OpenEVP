@@ -148,7 +148,8 @@ class AdapterMatchesTodayTests(unittest.TestCase):
         old = today(Device())
         ours = {f["id"]: s.recordings(f["id"]) for f in s.folders()}
         theirs = {l: [today_row(m) for m in old.messages(l)] for l in "ABCDE"}
-        self.assertEqual({l: [{k: r[k] for k in r if k != "recorded_sort"} for r in rows]
+        self.assertEqual([r["play_problem"] for l in "ABCDE" for r in ours[l]], [None] * 7)   # LP: it plays
+        self.assertEqual({l: [{k: r[k] for k in r if k not in ("recorded_sort", "play_problem")} for r in rows]
                           for l, rows in ours.items()}, theirs)
         self.assertEqual(s.owner, old.owner)
         self.assertEqual([len(ours[l]) for l in "ABCDE"], [3, 1, 2, 0, 1])

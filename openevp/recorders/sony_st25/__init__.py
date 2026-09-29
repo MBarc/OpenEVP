@@ -17,7 +17,9 @@ What the app sees:
 - recordings: the folder table's messages, numbered 1.. as on the recorder;
   recorded_label is the date as the app has always shown it ("2029-05-23
   19:54:04", "undated"; stored dates are shown as stored, 31 February too),
-  recorded_sort the same text ("" when undated).
+  recorded_sort the same text ("" when undated); play_problem is why that
+  recording's codec cannot be decoded now (an ICD-ST10 mixes LPEC LP, SP
+  and ST recordings, so this is per recording, not per model), or None.
 - downloads: the .dvf Digital Voice Editor would save, under its file name.
 - model_id: the recorder's own identify string picks the model it is shown as
   (MODEL_IDS: an ICD-ST10 answers to the same USB id and protocol). Any other
@@ -41,6 +43,7 @@ import logging
 
 from openevp import formats, pnp as _pnp
 from openevp.recorders import base
+from st25 import dvf as _dvf
 from st25.folder import TableError
 from st25.protocol import PID, VID, RecorderError as _St25Error
 from st25.session import LETTERS, RecorderSession
@@ -77,8 +80,11 @@ def _recording(m):
     """One recording row; the display matches what the app has always shown."""
     when = m.when() if m.dated else ""          # the stored date as is, e.g. "2029-02-31 ..."
     seconds = m.seconds()                       # None for a mode OpenEVP does not know
+    codec = _dvf.codec_of_mode(m.mode)
+    play = None if m.problem or codec is None else formats.codec_problem(codec)
     return {"number": m.number, "recorded_label": when or "undated", "recorded_sort": when,
-            "seconds": None if seconds is None else round(seconds, 1), "owner": m.owner, "problem": m.problem}
+            "seconds": None if seconds is None else round(seconds, 1), "owner": m.owner, "problem": m.problem,
+            "play_problem": play}
 
 
 class ST25Session(base.Session):

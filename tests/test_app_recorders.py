@@ -148,7 +148,7 @@ class FakeAlphaTests(AppTestBase):
                          [("1", "Voice 1", 2), ("2", "Voice 2", 1), ("3", "Voice 3", 0)])
         first = r["folders"][0]["recordings"][0]
         self.assertEqual(first, {"number": 1, "label": "Voice 1-001", "recorded": "2026-09-01 21:01",
-                                 "seconds": 0.5, "owner": "Test Owner", "problem": None})
+                                 "seconds": 0.5, "owner": "Test Owner", "problem": None, "play_problem": None})
         self.assertEqual(r["formats"], [
             {"value": "fk1", "label": ".fk1 (Fake Alpha original)", "available": True, "reason": None},
             {"value": "wav", "label": "WAV", "available": True, "reason": None}])

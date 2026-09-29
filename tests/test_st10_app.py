@@ -2,10 +2,10 @@
 as an ST10 once opened, its recordings exported as LPEC ST .dvf files, played,
 marked and exported as 44.1 kHz stereo WAV through the LPEC ST decoder.
 
-In a build without the LPEC ST decoder (or its tables) the phase-1 mechanism
-still holds: "can't be played" is said plainly everywhere (recorder list,
-export menu, player, library) with the reason, never as a damaged file, and
-nothing about such a file is cached."""
+In a build without the LPEC ST decoder (or its tables) "can't be played" is
+said plainly, per recording (the recorder's rows, the player, export notes,
+the library) with the reason, never as a damaged file, and nothing about such
+a file is cached. (Mixed LP / SP / ST recordings: test_st10_modes.)"""
 import io
 import os
 import sys
@@ -177,23 +177,26 @@ class St10AppTests(St10Base):
 
 class St10WithoutDecoderTests(St10Base):
     """A build without the LPEC ST decoder: the ST10 is listed and its
-    recordings saved, and "can't be played" is said with the reason."""
+    recordings saved, and "can't be played" is said with the reason, per
+    recording (an ST10 can also hold LP recordings, which still play)."""
     without_decoder = True
 
-    def test_listed_as_an_st10_and_not_playable(self):
+    def test_listed_as_an_st10_its_lpec_st_recordings_not_playable(self):
         r = self.api.recordings(ID)
-        self.assertEqual((r["model_id"], r["playable"], r["play_reason"]), ("sony-icd-st10", False, ST_MISSING))
-        self.assertEqual(r["formats"][1], {"value": "wav", "label": "WAV", "available": False, "reason": ST_MISSING})
+        self.assertEqual((r["model_id"], r["playable"], r["play_reason"]), ("sony-icd-st10", True, None))
+        self.assertEqual([x["play_problem"] for x in r["folders"][0]["recordings"]], [ST_MISSING, ST_MISSING])
+        self.assertEqual(r["formats"][1], {"value": "wav", "label": "WAV", "available": True, "reason": None})
 
     def test_dvf_export_still_works(self):
         self.api.recordings(ID)
         name, p = self.export(ID, [{"folder": "A", "number": 1}], "dvf")
         self.assertEqual((name, p["saved"]), ("export-done", 1))
 
-    def test_wav_export_refused_plainly(self):
+    def test_wav_export_says_why_per_recording(self):
         self.api.recordings(ID)
-        r = self.api.export(ID, [{"folder": "A", "number": 1}], "wav", self.dest, 1)
-        self.assertEqual((r["ok"], r["error"]), (False, f"WAV export: {ST_MISSING}."))
+        name, p = self.export(ID, [{"folder": "A", "number": 1}], "wav")
+        self.assertEqual((name, p["saved"], p["notes"]), ("export-done", 0, [f"A-001: not converted ({ST_MISSING})"]))
+        self.assertEqual(self.files("A"), [])
 
     def test_play_refused_without_a_decode(self):
         self.api.recordings(ID)
@@ -230,7 +233,7 @@ class UnknownIdentityTests(St10Base):
         with without_st_decoder():
             self.api.recordings(ID)
             r = self.api.audio(ID, "A", 1)
-            self.assertEqual((r["ok"], r["error"]), (False, ST_MISSING + "."))     # a sentence, no class name
+            self.assertEqual((r["ok"], r["error"]), (False, f"Playback: {ST_MISSING}."))   # a sentence, no class name
             name, p = self.export(ID, [{"folder": "A", "number": 1}], "wav")
             self.assertEqual((name, p["saved"]), ("export-done", 0))
             self.assertEqual(p["notes"], [f"A-001: not converted ({ST_MISSING})"])

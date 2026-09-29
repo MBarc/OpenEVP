@@ -39,6 +39,12 @@ and `.dvf` files saved by an earlier OpenEVP play without downloading them
 again. Their `.dvf` header is OpenEVP's own for now, since no `.dvf` saved by
 DVE from an ICD-ST10 has been compared yet.
 
+The ICD-ST10 records in one of three modes, per recording. Its ST mode is LPEC
+ST, above. Its LP mode is the ICD-ST25's LPEC LP and plays like an ST25
+recording (a real one decoded byte-identically to Sony's decoder). Its SP mode
+is LPEC SP (16 kHz mono): those recordings are listed and saved as `.dvf`, but
+can't be played or converted to WAV yet, and the app says so on each one.
+
 Nothing on a recorder is changed or deleted. For the ST25 the program can only
 send the exact read commands DVE itself sends to list and download recordings.
 Opcode, frame length and arguments are all checked in `st25/policy.py`.
@@ -242,8 +248,9 @@ can't add, edit or delete marks (it says so) until the first is closed.
   one go, and each restart inside a recording adds about 0.09 s (the decoded
   length, shown in the library, is exact). Its flash size is not known; a
   recording longer than 32 MB (about an hour and a half of LPEC ST) would be
-  reported, not saved. Its other quality modes, and recordings made with its
-  clock set, are untested.
+  reported, not saved. Recordings made with its clock set are untested. Its SP
+  mode's `.dvf` header is OpenEVP's own guess (the LP header with SP's codec,
+  channel and rate fields) until a DVE-saved SP file can be compared.
 - **Long ICD-ST10 recordings are big**: 92 minutes of 44.1 kHz stereo is about
   930 MB of WAV. Playback decodes straight into a disk cache (2 GB, the oldest
   recordings dropped first, room made before a decode and again if the disk

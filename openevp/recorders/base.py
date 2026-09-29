@@ -15,9 +15,10 @@ Model (one per supported model, a registry entry)
                   (default "<name> - WinUSB"); plain ASCII, no quotes or %
     native        its openevp.formats.Format (the file type it downloads);
                   the format must be registered in openevp.formats
-    wav_problem() why its recordings cannot be converted to WAV (played,
-                  marked) now, or None; by default its format's
-                  (openevp.formats.decoder_problem)
+    wav_problem() why none of its recordings can be converted to WAV
+                  (played, marked) now, or None; by default its format's
+                  (openevp.formats.decoder_problem). One recording's own
+                  reason is its row's play_problem (Session.recordings)
     supported     False for a placeholder (a planned model with no code yet:
                   no usb_ids, no driver, never discovered or opened)
     discover()    -> [DiscoveredDevice]: the recorders of this model attached
@@ -35,7 +36,7 @@ Session (one connected recorder; used only on the app's single device thread)
                              default) means the opening model
     folders()                -> [{"id", "label", "safe_name"}]
     recordings(folder_id)    -> [{"number", "recorded_label", "recorded_sort",
-                                  "seconds", "owner", "problem"}]
+                                  "seconds", "owner", "problem"[, "play_problem"]}]
     download(folder_id, number) -> Download
     close()                  release the device (the app calls it exactly once)
 
@@ -55,6 +56,9 @@ model's own text for it (the ST25 shows "undated") or "" to show nothing.
 recorder's own dates are shown as it stores them. ``seconds`` may be None
 (unknown). ``problem`` is None or "" for a recording that can be downloaded,
 otherwise why it cannot (its download then carries the same kind of error).
+``play_problem`` (optional) is None, "" or absent for a recording that can be
+played when its model can (Model.wav_problem), otherwise why this one cannot
+(e.g. its codec has no decoder): it is still downloaded and saved.
 
 Errors and what the app does with them (state_for() is the one mapping):
 
@@ -84,6 +88,7 @@ STATES = (READY, NEEDS_DRIVER, NEEDS_REPLUG)
 
 FOLDER_FIELDS = ("id", "label", "safe_name")
 RECORDING_FIELDS = ("number", "recorded_label", "recorded_sort", "seconds", "owner", "problem")
+OPTIONAL_RECORDING_FIELDS = ("play_problem",)
 
 
 # ---- errors ---------------------------------------------------------------------

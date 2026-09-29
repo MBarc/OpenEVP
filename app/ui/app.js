@@ -1867,10 +1867,13 @@ function renderRows() {
     const item = { device: S.device, folder: folder.id, number: r.number };
     box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.set(k, item) : S.selected.delete(k); updateExport(); };
     const no = typeof r.number === "number" ? String(r.number).padStart(3, "0") : String(r.number);
-    const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), r.problem || ""];
+    // A recording whose own codec can't be played (an ICD-ST10's LPEC SP) is still saved; it says why.
+    const note = r.problem || (S.playable && r.play_problem ? sentence(r.play_problem) : "");
+    const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), note];
     const first = document.createElement("td"); first.appendChild(box); tr.appendChild(first);
     cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 3) td.className = "note"; tr.appendChild(td); });
-    if (S.playable) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
+    if (S.playable && !r.play_problem) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
+    else if (S.playable) { tr.classList.add("unplayable"); tr.title = sentence(r.play_problem); }
     else if (S.playReason) tr.title = sentence(S.playReason);
     rows.appendChild(tr);
   }

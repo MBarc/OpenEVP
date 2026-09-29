@@ -25,14 +25,22 @@ says nothing about the mode), 4..5 valid bytes in the block (0x0400 when
 full), 6..9 time counter.
 DVE fills the unused tail of the last block with 0xFF (the recorder sends 0x00).
 
-Two recording modes, told apart by the low byte of the folder table's
+Three recording modes, told apart by the low byte of the folder table's
 message-list entry (st25.folder) and stored in the header's codec fields:
 
-  mode  recorder   codec (byte 61)  audio
-  0x00  ICD-ST25   0x2C LPEC LP     8 kHz mono, 750 bytes/s (6000 bit/s)
-  0x6C  ICD-ST10   0x24 LPEC ST     44.1 kHz stereo, 283-byte frames (a 16-bit
-                                    counter, a flags byte, 280 codec bytes) of
-                                    2048 samples per channel
+  mode  recorder          codec (byte 61)  audio
+  0x00  ICD-ST25, ST10    0x2C LPEC LP     8 kHz mono, 750 bytes/s (6000 bit/s)
+  0x20  ICD-ST10          0x2A LPEC SP     16 kHz mono, 2000 bytes/s (16000 bit/s),
+                                           frames of 96/128/160 bytes (1024 samples)
+  0x6C  ICD-ST10          0x24 LPEC ST     44.1 kHz stereo, 283-byte frames (a 16-bit
+                                           counter, a flags byte, 280 codec bytes) of
+                                           2048 samples per channel
+
+The mode bytes are the recorder's own codes, not DVE's codec numbers (DVE's
+0x20 is another codec). 0x00 and 0x6C were seen on an ICD-ST10 and 0x00 on an
+ICD-ST25; 0x20 on an ICD-ST10 in its SP mode (Sony's LPEC.dll decodes it at
+16 kHz / 16000 bit/s). OpenEVP cannot decode LPEC SP yet: its files are saved,
+not played.
 
 LP files have been verified against DVE. DVE also rounds two timestamps
 (header byte 58, byte 9 of some blocks) differently; that does not change the
@@ -45,6 +53,11 @@ samples at 44.1 kHz). validate() accepts it for good, so files saved with it
 keep counting as "already saved". Its frames are checked: each block's frame
 offset, whole frames, and counters that go up by one or restart at 0 (the
 recorder starts a segment with a counter-0 frame).
+
+The LPEC SP header is OpenEVP's own too, by analogy with LP (DVE's LPEC SP/LP
+pair is 0x2A/0x2C): the LP template with codec 0x2A, 1 channel, 16000 bit/s
+and 2000 bytes/s. Its blocks are checked like LP's; it has no frame framing
+to check (no per-frame header or counter).
 """
 import re
 import struct
@@ -55,13 +68,14 @@ PAGE, PAGE_DATA = 528, 512
 BLOCK_HEADER = 10
 HEADER_LENGTH_FIELD = struct.pack(">H", BLOCK_HEADER)   # bytes 2..3 of every audio block
 
-MODE_LP, MODE_ST = 0x00, 0x6C       # the folder table's mode byte (st25.folder.Message.mode)
-MODES = {MODE_LP: "LP", MODE_ST: "LPEC ST"}
+MODE_LP, MODE_SP, MODE_ST = 0x00, 0x20, 0x6C   # the folder table's mode byte (st25.folder.Message.mode)
+MODES = {MODE_LP: "LPEC LP", MODE_SP: "LPEC SP", MODE_ST: "LPEC ST"}   # display names
 CODEC_AT = 61                        # header byte: the codec
-CODEC_LP, CODEC_ST = 0x2C, 0x24
-_CODECS = {MODE_LP: CODEC_LP, MODE_ST: CODEC_ST}
+CODEC_LP, CODEC_SP, CODEC_ST = 0x2C, 0x2A, 0x24
+_CODECS = {MODE_LP: CODEC_LP, MODE_SP: CODEC_SP, MODE_ST: CODEC_ST}
 
 LP_BYTES_PER_SECOND = 750
+SP_BYTES_PER_SECOND = 2000
 ST_FRAME, ST_SAMPLES, ST_RATE = 283, 2048, 44100
 
 # DVE 2.31 header for ST-series LPEC (LP) recordings with the per-message fields zeroed.
@@ -78,16 +92,18 @@ _TEMPLATE = bytes.fromhex(
 assert len(_TEMPLATE) == 512
 
 
-def _st_template():
-    """The LP template with the LPEC ST codec fields (see the module docstring)."""
+def _codec_template(codec, channels, bit_rate, bytes_per_second):
+    """The LP template with another codec's fields (see the module docstring)."""
     h = bytearray(_TEMPLATE)
-    h[CODEC_AT] = CODEC_ST
-    h[62:64] = struct.pack(">H", 2)
-    h[64:72] = struct.pack(">II", 48234, 6029)
+    h[CODEC_AT] = codec
+    h[62:64] = struct.pack(">H", channels)
+    h[64:72] = struct.pack(">II", bit_rate, bytes_per_second)
     return bytes(h)
 
 
-_TEMPLATES = {MODE_LP: _TEMPLATE, MODE_ST: _st_template()}
+_TEMPLATES = {MODE_LP: _TEMPLATE,
+              MODE_SP: _codec_template(CODEC_SP, 1, 16000, SP_BYTES_PER_SECOND),
+              MODE_ST: _codec_template(CODEC_ST, 2, 48234, 6029)}
 
 
 class FormatError(ValueError):
@@ -104,9 +120,14 @@ def codec(dvf_bytes):
 
 
 def mode_of(dvf_bytes):
-    """The recording mode (MODE_LP, MODE_ST) a .dvf header names, or None."""
+    """The recording mode (MODE_LP, MODE_SP, MODE_ST) a .dvf header names, or None."""
     c = codec(dvf_bytes)
     return next((m for m, k in _CODECS.items() if k == c), None)
+
+
+def codec_of_mode(mode):
+    """The .dvf codec byte (CODEC_LP...) for a folder-table mode byte, or None."""
+    return _CODECS.get(mode)
 
 
 def seconds(payload_bytes, mode):
@@ -121,6 +142,8 @@ def seconds(payload_bytes, mode):
     decoded WAV's length is exact."""
     if mode == MODE_LP:
         return payload_bytes / float(LP_BYTES_PER_SECOND)
+    if mode == MODE_SP:
+        return payload_bytes / float(SP_BYTES_PER_SECOND)
     if mode == MODE_ST:
         return max(0, payload_bytes // ST_FRAME - 1) * ST_SAMPLES / ST_RATE
     return None
@@ -209,15 +232,15 @@ _PER_MESSAGE = set(range(52, 60)) | set(range(153, 160)) | set(range(434, 468))
 
 def validate(dvf_bytes):
     """Return None if dvf_bytes is a complete, self-consistent ICD-ST .dvf file
-    (LP as written by this tool or by Digital Voice Editor, or LPEC ST as
-    written by this tool), else the reason. codec() says which it is."""
+    (LP as written by this tool or by Digital Voice Editor, or LPEC SP / ST
+    as written by this tool), else the reason. codec() says which it is."""
     n = len(dvf_bytes)
     if n < 1024 + BLOCK or (n - 1024) % BLOCK:
         return "wrong size"
     mode = mode_of(dvf_bytes)
     template = _TEMPLATES.get(mode)
     if template is None or any(dvf_bytes[i] != template[i] for i in range(512) if i not in _PER_MESSAGE):
-        return "header does not match the ICD-ST LP or LPEC ST layout"
+        return "header does not match the ICD-ST LPEC LP, SP or ST layout"
     if dvf_bytes[512:1024] != b"\xff" * 512:
         return "damaged header padding"
     blocks = (n - 1024) // BLOCK

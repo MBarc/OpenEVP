@@ -90,7 +90,8 @@ class RecorderContract:
         for _folder, recs in self.listing(session):
             self.assertIsInstance(recs, list)
             for r in recs:
-                self.assertEqual(set(r), set(base.RECORDING_FIELDS))
+                self.assertEqual(set(r) - set(base.OPTIONAL_RECORDING_FIELDS), set(base.RECORDING_FIELDS))
+                self.assertTrue(r.get("play_problem") is None or isinstance(r["play_problem"], str))
                 self.assertIsInstance(r["number"], (int, str))
                 self.assertNotIsInstance(r["number"], bool)
                 self.assertIsInstance(r["recorded_label"], str)

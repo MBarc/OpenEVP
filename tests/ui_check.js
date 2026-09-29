@@ -130,13 +130,14 @@ const listing = {
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                { number: 1, label: "A-001", recorded: "2029-05-23 19:54:04", seconds: 1.3, owner: "Casey", problem: null }] : [] })) },
   // An ICD-ST10 (discovered as an ST25, relabelled once opened), in a build without the LPEC ST decoder:
-  // its recordings download but can't be played. (With the decoder it is playable: see below.)
-  "2-1@3": { ok: true, model: "Sony ICD-ST10", model_id: "sony-icd-st10", playable: false,
-             play_reason: "LPEC ST (ICD-ST10) playback is not included in this build",
+  // the recorder plays (its LP recordings would), but its LPEC ST recording says why it can't, per row.
+  // (With the decoder it plays: see below.)
+  "2-1@3": { ok: true, model: "Sony ICD-ST10", model_id: "sony-icd-st10", playable: true, play_reason: null,
              formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
-                       { value: "wav", label: "WAV", available: false, reason: "LPEC ST (ICD-ST10) playback is not included in this build" }],
+                       { value: "wav", label: "WAV", available: true, reason: null }],
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
-               { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null }] : [] })) },
+               { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null,
+                 play_problem: "LPEC ST (ICD-ST10) playback is not included in this build" }] : [] })) },
 };
 const api = {
   capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
@@ -232,43 +233,52 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                      { folder: "7", number: "7" }]));
   assert.ok(!calls.some((c) => c[0] === "audio"));
 
-  // An ICD-ST10 in a build without its decoder: its recordings can be selected and exported as .dvf,
-  // not played; the reason is said plainly (status line, row tooltips, the greyed-out WAV entry), never
-  // as an error.
+  // An ICD-ST10 in a build without the LPEC ST decoder: its LPEC ST recording can be selected and
+  // exported, not played; the reason is said plainly on that row (note, tooltip), never as an error.
   vm.runInContext("S.exporting = false;", context);              // the stubbed export above never reports back
   await context.openDevice("2-1@3");
-  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV (unavailable)"]);
-  assert.strictEqual(format.children[1].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
-  assert.strictEqual(format.value, "dvf");
-  assert.ok(!$("device-table").classList.contains("playable"));
-  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) playback is not included in this build. Its recordings can still be saved.");
+  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV"]);
+  assert.ok($("device-table").classList.contains("playable"));
+  assert.strictEqual($("status").textContent, "");
   assert.strictEqual($("banner-text").textContent, "", "not an error");
   assert.strictEqual($("devices").children[3].children[0].textContent, "Sony ICD-ST10 #4 (port 2-1)");  // relabelled at once
   const st10row = $("rows").children[0];
-  assert.deepStrictEqual(texts(st10row).slice(1), ["001", "undated", "0:20", ""]);
+  assert.deepStrictEqual(texts(st10row).slice(1),
+                         ["001", "undated", "0:20", "LPEC ST (ICD-ST10) playback is not included in this build."]);
   assert.ok(!st10row.onclick, "not playable: no click handler");
+  assert.ok(st10row.classList.contains("unplayable"));
   assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
   assert.ok(!calls.some((c) => c[0] === "audio"));
-  $("status").textContent = "";
-  await context.openDevice("2-1@3");                               // already read: shown again, reason again
-  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) playback is not included in this build. Its recordings can still be saved.");
 
-  // The same ICD-ST10 with the LPEC ST decoder: playable, WAV available, a click plays it.
-  listing["2-1@3"] = { ...listing["2-1@3"], playable: true, play_reason: null,
-                       formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
-                                 { value: "wav", label: "WAV", available: true, reason: null }] };
+  // The same ICD-ST10 with the LPEC ST decoder, holding recordings in three modes: LPEC ST and LP
+  // play, LPEC SP says why it can't (per recording, not per recorder), and all three can be exported.
+  const SP = "LPEC SP (16 kHz) audio can't be played yet";
+  listing["2-1@3"] = { ...listing["2-1@3"],
+                       folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
+                         { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null, play_problem: null },
+                         { number: 2, label: "A-002", recorded: "undated", seconds: 9.1, owner: "", problem: null, play_problem: null },
+                         { number: 3, label: "A-003", recorded: "undated", seconds: 8.4, owner: "", problem: null, play_problem: SP },
+                       ] : [] })) };
   vm.runInContext("S.device = null; S.folders = [];", context);
   $("status").textContent = "";
   await context.openDevice("2-1@3");
   assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV"]);
   assert.ok($("device-table").classList.contains("playable"));
   assert.strictEqual($("status").textContent, "");
-  const st10playable = $("rows").children[0];
-  assert.ok(st10playable.onclick, "playable: a click plays it");
-  await st10playable.onclick();
+  const [st10st, st10lp, st10sp] = $("rows").children;
+  assert.ok(st10st.onclick && st10lp.onclick, "LPEC ST and LP: a click plays them");
+  assert.ok(!st10sp.onclick, "LPEC SP: no click handler");
+  assert.strictEqual(st10sp.title, "LPEC SP (16 kHz) audio can't be played yet.");
+  assert.strictEqual(texts(st10sp)[4], "LPEC SP (16 kHz) audio can't be played yet.");
+  assert.strictEqual(texts(st10lp)[4], "");
+  assert.ok(!st10sp.children[0].children[0].disabled, "it can be selected for export");
+  await st10st.onclick();
   await new Promise((r) => setImmediate(r));
-  assert.deepStrictEqual(calls.filter((c) => c[0] === "audio").map((c) => c.slice(1)), [["2-1@3", "A", 1]]);
+  await st10lp.onclick();
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "audio").map((c) => c.slice(1)),
+                         [["2-1@3", "A", 1], ["2-1@3", "A", 2]]);
 
   // The waveform: drawn from the audio itself up to FULL_DETAIL_SAMPLES samples over all channels
   // (30 minutes of 8 kHz mono, about 2.7 minutes of 44.1 kHz stereo), with a zoom down to one

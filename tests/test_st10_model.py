@@ -89,10 +89,14 @@ class ModelTests(unittest.TestCase):
         self.assertIn(m, recorders.supported())
         self.assertEqual(m.discover(), [])
         self.assertIs(recorders.find(VID, PID), recorders.get("sony-icd-st25"))
-        self.assertEqual(m.wav_problem(), formats.codec_problem(formats.CODEC_ST))
+        # Playability is per recording (an ST10 mixes LP, SP and ST): the model's is the .dvf format's.
+        self.assertEqual(m.wav_problem(), formats.decoder_problem(formats.DVF))
         with without_st_decoder():
-            self.assertEqual(m.wav_problem(), ST_MISSING)
-            self.assertIsNone(recorders.get("sony-icd-st25").wav_problem())     # the LP decoder is there
+            self.assertIsNone(m.wav_problem())                                 # the LP decoder is there
+            self.assertIsNone(recorders.get("sony-icd-st25").wav_problem())
+            s = st10_session()
+            self.addCleanup(s.close)
+            self.assertEqual([r["play_problem"] for r in s.recordings("A")], [ST_MISSING, ST_MISSING])
 
     def test_the_st25_keeps_its_wav_problem(self):
         st25 = recorders.get("sony-icd-st25")

@@ -48,10 +48,12 @@ when it has them and fall back to to_wav.
 
 The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25
 and ICD-ST10). A .dvf is decoded by its codec byte, through st25.audio:
-LPEC LP (ICD-ST25) by the Sony LPEC decoder, LPEC ST (ICD-ST10) by the
-Sony LPEC ST decoder. The format-level availability is the LP decoder's;
-header_problem says when an LPEC ST file's own decoder is unavailable (then
-to_wav raises DecoderUnavailable). Tests add their own formats with
+LPEC LP (ICD-ST25, ICD-ST10) by the Sony LPEC decoder, LPEC ST (ICD-ST10) by
+the Sony LPEC ST decoder; LPEC SP (ICD-ST10) cannot be decoded yet. The
+format-level availability is the LP decoder's; header_problem says when an
+LPEC ST or SP file's own decoder is unavailable (then to_wav raises
+DecoderUnavailable). So whether a .dvf plays is decided per file, by its
+codec, not per recorder model. Tests add their own formats with
 register()/unregister().
 """
 import io
@@ -171,26 +173,28 @@ WAV = Format(ext=".wav", label="WAV", decoder=_PcmPassthrough(),
 
 # ---- Sony ICD-ST .dvf ---------------------------------------------------------
 LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # ST25 LP audio
-CODEC_LP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_ST
+CODEC_LP, CODEC_SP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_SP, _dvf.CODEC_ST
 
 
 def codec_problem(codec):
-    """Why .dvf recordings of ``codec`` (CODEC_LP or CODEC_ST) cannot be
-    decoded now (a phrase, e.g. the LPEC ST tables are missing), or None."""
+    """Why .dvf recordings of ``codec`` (CODEC_LP, CODEC_SP or CODEC_ST) cannot
+    be decoded now (a phrase, e.g. the LPEC ST tables are missing, or LPEC SP
+    has no decoder yet), or None."""
     return None if _st25_audio.available(codec) else _st25_audio.status(codec)
 
 
 def _dvf_problem(header):
-    """A .dvf's header_problem: an ICD-ST10 recording (LPEC ST) whose decoder
-    cannot run now. (An LP recording's problem is the format's own.)"""
-    return codec_problem(CODEC_ST) if _dvf.codec(header) == CODEC_ST else None
+    """A .dvf's header_problem: an ICD-ST10 recording (LPEC ST or SP) whose
+    decoder cannot run now. (An LP recording's problem is the format's own.)"""
+    c = _dvf.codec(header)
+    return codec_problem(c) if c in (CODEC_ST, CODEC_SP) else None
 
 
 class _SonyLpec:
     """st25.audio (the Sony LPEC and LPEC ST decoders) behind the Format
     decoder contract. The format-level availability is the LP decoder's; an
-    LPEC ST file whose decoder is unavailable raises DecoderUnavailable (not
-    the file's fault)."""
+    LPEC ST or SP file whose decoder is unavailable raises DecoderUnavailable
+    (not the file's fault)."""
 
     def available(self):
         return _st25_audio.available()
@@ -212,12 +216,15 @@ class _SonyLpec:
 
     def wav_bytes(self, data):
         """The WAV's size from the header's payload field: at most every LPEC ST
-        frame's 2048 stereo samples; LPEC LP's 750 bytes a second become 16000."""
+        frame's 2048 stereo samples; LPEC LP's 750 bytes a second become 16000,
+        LPEC SP's 2000 bytes a second 32000."""
         if len(data) < 468:
             return None
         payload = struct.unpack(">I", bytes(data[464:468]))[0]
         if _dvf.codec(data) == CODEC_ST:
             return 44 + payload // _dvf.ST_FRAME * _dvf.ST_SAMPLES * 4
+        if _dvf.codec(data) == CODEC_SP:
+            return 44 + payload * 16
         return 44 + payload * 64 // 3
 
     def write_wav(self, data, f, should_stop=None):
@@ -261,7 +268,9 @@ def _dvf_seconds(path):
         return None
     if len(header) < 468:
         return None
-    mode = _dvf.MODE_ST if _dvf.mode_of(header) == _dvf.MODE_ST else _dvf.MODE_LP
+    mode = _dvf.mode_of(header)
+    if mode is None:
+        mode = _dvf.MODE_LP
     return round(_dvf.seconds(struct.unpack(">I", header[464:468])[0], mode), 1)
 
 
