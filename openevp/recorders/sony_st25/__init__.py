@@ -19,6 +19,9 @@ What the app sees:
   19:54:04", "undated"; stored dates are shown as stored, 31 February too),
   recorded_sort the same text ("" when undated).
 - downloads: the .dvf Digital Voice Editor would save, under its file name.
+- model_id: the recorder's own identify string picks the model it is shown as
+  (MODEL_IDS: an ICD-ST10 answers to the same USB id and protocol). Any other
+  string is treated as an ST25, as it always was, with a log note.
 
 Errors (st25 -> shared vocabulary, so state_for() gives the app states it has
 always used):
@@ -34,6 +37,8 @@ always used):
 
 Messages are the st25 exception's text unchanged; advice is left to the app.
 """
+import logging
+
 from openevp import formats, pnp as _pnp
 from openevp.recorders import base
 from st25.folder import TableError
@@ -43,6 +48,9 @@ from st25.usb import DriverMissing as _St25DriverMissing
 from st25.usb import UsbError, list_devices
 
 SETUP_PREFIX = _pnp.SETUP_PREFIX
+# The identify strings of the recorders this module reads, and the model each is shown as.
+MODEL_IDS = {"ICD-ST25": "sony-icd-st25", "ICD-ST10": "sony-icd-st10"}
+_log = logging.getLogger(__name__)
 SETUP_MESSAGE = "This recorder's driver is not set up on this PC yet."   # shown in the recorder list
 
 
@@ -68,14 +76,18 @@ def _call(fn, *args):
 def _recording(m):
     """One recording row; the display matches what the app has always shown."""
     when = m.when() if m.dated else ""          # the stored date as is, e.g. "2029-02-31 ..."
+    seconds = m.seconds()                       # None for a mode OpenEVP does not know
     return {"number": m.number, "recorded_label": when or "undated", "recorded_sort": when,
-            "seconds": round(m.seconds(), 1), "owner": m.owner, "problem": m.problem}
+            "seconds": None if seconds is None else round(seconds, 1), "owner": m.owner, "problem": m.problem}
 
 
 class ST25Session(base.Session):
     def __init__(self, session):
         self._session = session         # st25 RecorderSession; private, never handed out
         self._closed = False
+        identity = getattr(session, "model", "")
+        if identity not in MODEL_IDS:
+            _log.info("recorder identifies as %r: read as an ICD-ST25", identity)
 
     def _check(self):
         if self._closed:
@@ -90,6 +102,10 @@ class ST25Session(base.Session):
     @property
     def owner(self):
         return self._session.owner or None
+
+    @property
+    def model_id(self):
+        return MODEL_IDS.get(getattr(self._session, "model", ""), SonyST25.model_id)
 
     def folders(self):
         self._check()
@@ -135,9 +151,15 @@ class SonyST25(base.Model):
         return usable + setup
 
     def open(self, device):
-        if device.model_id != self.model_id:
-            raise ValueError(f"{device.connection_id!r} is not a {self.name}")
-        if device.connection_id.startswith(SETUP_PREFIX) or device.locator is None:
-            raise base.DriverMissing(SETUP_MESSAGE)
-        return ST25Session(_call(RecorderSession.open, device.locator))
+        return open_session(self, device)
+
+
+def open_session(model, device):
+    """Model.open for the recorders this module reads (the ICD-ST10's too):
+    device must be one ``model`` discovered."""
+    if device.model_id != model.model_id:
+        raise ValueError(f"{device.connection_id!r} is not a {model.name}")
+    if device.connection_id.startswith(SETUP_PREFIX) or device.locator is None:
+        raise base.DriverMissing(SETUP_MESSAGE)
+    return ST25Session(_call(RecorderSession.open, device.locator))
 

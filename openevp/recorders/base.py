@@ -15,14 +15,24 @@ Model (one per supported model, a registry entry)
                   (default "<name> - WinUSB"); plain ASCII, no quotes or %
     native        its openevp.formats.Format (the file type it downloads);
                   the format must be registered in openevp.formats
+    wav_problem() why its recordings cannot be converted to WAV (played,
+                  marked) now, or None; by default its format's
+                  (openevp.formats.decoder_problem)
     supported     False for a placeholder (a planned model with no code yet:
                   no usb_ids, no driver, never discovered or opened)
     discover()    -> [DiscoveredDevice]: the recorders of this model attached
                   now, including ones that cannot be used yet (state)
     open(device)  -> Session for a DiscoveredDevice this model returned
 
+Models that share a USB id (the Sony ICD-ST25 and ICD-ST10) are discovered
+and opened by one of them; the session then says what the recorder is
+(Session.model_id) and the app shows and treats it as that model from then on.
+
 Session (one connected recorder; used only on the app's single device thread)
     owner                    owner name the recorder reports, or None
+    model_id                 the registered model the recorder says it is, when
+                             that is not the model that opened it; None (the
+                             default) means the opening model
     folders()                -> [{"id", "label", "safe_name"}]
     recordings(folder_id)    -> [{"number", "recorded_label", "recorded_sort",
                                   "seconds", "owner", "problem"}]
@@ -66,6 +76,7 @@ native bytes first and converts or writes them after the call returns.
 import re
 from dataclasses import dataclass
 
+from openevp import formats
 from openevp.formats import Cancelled  # noqa: F401 - part of the recorder vocabulary
 
 READY, NEEDS_DRIVER, NEEDS_REPLUG = "ready", "needs_driver", "needs_replug"
@@ -185,6 +196,10 @@ class Session:
     def owner(self):
         return None
 
+    @property
+    def model_id(self):
+        return None
+
     def folders(self):
         raise NotImplementedError
 
@@ -215,6 +230,13 @@ class Model:
 
     def open(self, device):
         raise RecorderError(f"{self.name} is not supported yet.")
+
+    def wav_problem(self):
+        """Why this model's recordings cannot be converted to WAV (played,
+        marked) now, as a phrase, or None when they can."""
+        if self.native is None:
+            return f"{self.name} is not supported yet"
+        return formats.decoder_problem(self.native)
 
     def __repr__(self):
         return f"<{type(self).__name__} {self.model_id}>"

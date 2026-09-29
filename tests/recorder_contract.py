@@ -171,6 +171,14 @@ class RecorderContract:
         self.assertTrue(warning is None or isinstance(warning, str))
         session = self.open_session()
         data = self.first_data(session)
+        problem = self.model.wav_problem()
+        self.assertTrue(problem is None or isinstance(problem, str))
+        if problem and available:
+            # The format decodes, but not this model's recordings (yet): said
+            # without blaming the file.
+            with self.assertRaises(formats.DecoderUnavailable):
+                decoder.to_wav(data)
+            return
         if not available:
             self.assertTrue(reason, "an unavailable decoder says why")
             with self.assertRaises(formats.DecoderUnavailable):

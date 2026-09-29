@@ -23,6 +23,11 @@ Subclass `base.Model` and set:
 | `native` | its `openevp.formats.Format`: the file type it downloads (see *Formats*) |
 | `supported` | `True` (only placeholders set `False`) |
 
+`wav_problem()` says why its recordings can't be converted to WAV (played,
+marked) right now, or returns `None`. By default that is its format's
+decoder problem. The ICD-ST10 overrides it: its recordings download, but
+can't be played yet.
+
 `discover()` returns a `DiscoveredDevice` for every recorder of this model
 attached now, including one that can't be used yet (`state=NEEDS_DRIVER`, with a
 `message`). `open(device)` returns a `Session` for one of them.
@@ -32,6 +37,12 @@ attached now, including one that can't be used yet (`state=NEEDS_DRIVER`, with a
 One connected recorder. The app uses it only on its single device thread.
 
 - `owner`: the owner name the recorder reports, or `None`.
+- `model_id` (optional): the registered model the recorder says it is, when that
+  isn't the model that opened it. Recorders that share a USB id are discovered and
+  opened by one model. The ICD-ST25 model opens an ICD-ST10 too, and its
+  session reports `"sony-icd-st10"` from the recorder's identify string. The
+  app then shows and treats it as that model. `None` (the default) means the
+  opening model.
 - `folders()`: `[{"id", "label", "safe_name"}]`.
 - `recordings(folder_id)`: `[{"number", "recorded_label", "recorded_sort", "seconds", "owner", "problem"}]`.
 - `download(folder_id, number)`: a `Download` with the native file's bytes, or its `error`.
@@ -136,7 +147,7 @@ entry.
 
 ## Placeholders
 
-A planned model with no code yet (`sony_st10/`, `panasonic_rrdr60/`) sets only
+A planned model with no code yet (`panasonic_rrdr60/`) sets only
 `model_id`, `name` and `supported = False`. It claims no USB ids and no driver,
 is never discovered or opened, and is not shown in the app. The README lists it
 as planned. To implement one, fill in its module following the steps above and

@@ -217,7 +217,7 @@ class AdapterMatchesTodayTests(unittest.TestCase):
     def test_no_transfer_method_is_exposed(self):
         s, _ = self.adapter()
         self.assertEqual(sorted(a for a in dir(s) if not a.startswith("_")),
-                         ["close", "download", "folders", "owner", "recordings"])
+                         ["close", "download", "folders", "model_id", "owner", "recordings"])
 
 
 class ErrorTests(unittest.TestCase):
@@ -411,17 +411,15 @@ class DiscoveryTests(unittest.TestCase):
 
 
 class PlaceholderTests(unittest.TestCase):
-    def test_st10_and_rrdr60_are_registered_but_not_supported(self):
-        for model_id, name in (("sony-icd-st10", "Sony ICD-ST10"), ("panasonic-rr-dr60", "Panasonic RR-DR60")):
-            with self.subTest(model_id=model_id):
-                m = recorders.get(model_id)
-                self.assertEqual(m.name, name)
-                self.assertIs(m.supported, False)
-                self.assertEqual((tuple(m.usb_ids), m.needs_winusb, m.native), ((), False, None))
-                self.assertNotIn(m, recorders.supported())
-                self.assertEqual(m.discover(), [])
-                with self.assertRaises(base.RecorderError):
-                    m.open(base.DiscoveredDevice("x", model_id, ""))
+    def test_rrdr60_is_registered_but_not_supported(self):
+        m = recorders.get("panasonic-rr-dr60")
+        self.assertEqual(m.name, "Panasonic RR-DR60")
+        self.assertIs(m.supported, False)
+        self.assertEqual((tuple(m.usb_ids), m.needs_winusb, m.native), ((), False, None))
+        self.assertNotIn(m, recorders.supported())
+        self.assertEqual(m.discover(), [])
+        with self.assertRaises(base.RecorderError):
+            m.open(base.DiscoveredDevice("x", "panasonic-rr-dr60", ""))
         self.assertEqual([m.model_id for m in recorders.MODELS],
                          ["sony-icd-st25", "sony-icd-st10", "panasonic-rr-dr60"])
 

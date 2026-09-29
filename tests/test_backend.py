@@ -186,6 +186,7 @@ class BackendTests(unittest.TestCase):
         models = self.api.capabilities()["models"]
         self.assertEqual(models, [m.name for m in recorders.supported()])
         self.assertIn("Sony ICD-ST25", models)
+        self.assertIn("Sony ICD-ST10", models)
         unsupported = [m.name for m in recorders.models() if not m.supported]
         self.assertTrue(unsupported)
         self.assertFalse(set(unsupported) & set(models))
