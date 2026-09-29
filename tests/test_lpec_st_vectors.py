@@ -14,8 +14,8 @@ small vectors, the committed .pcm):
 
 These tests run the pure-Python path (use_core=False); test_lpec_st_core
 checks the C core against the same vectors. all-features-400 takes minutes
-in pure Python, so it runs only with OPENEVP_SLOW_TESTS=1 here (the C core
-test covers it always).
+in pure Python, so its test here exists only with OPENEVP_SLOW_TESTS=1 (the
+C core test covers it always).
 
 Needs the git-ignored table data (openevp/decoders/sony_lpec_st/data/
 lpec_st_tables.json); skipped without it (a failure in the release gate).
@@ -100,9 +100,6 @@ class VectorTests(unittest.TestCase):
     """Pure Python == Sony, float for float and sample for sample."""
 
     def check(self, name):
-        if name in SLOW and not SLOW_TESTS:
-            self.skipTest("set OPENEVP_SLOW_TESTS=1 to run the long vector in pure Python "
-                          "(test_lpec_st_core runs it on the C core)")
         m = meta(name)
         pcm = python_pcm(name)
         self.assertEqual(len(pcm), m["pcm_bytes"])
@@ -128,6 +125,8 @@ def _make(name):
 
 
 for _name in VECTORS:
+    if _name in SLOW and not SLOW_TESTS:
+        continue                        # test_lpec_st_core checks it on the C core
     _t = _make(_name)
     setattr(VectorTests, _t.__name__, _t)
 

@@ -8,15 +8,17 @@ Automated (exits non-zero if any fails):
      intact), and no ResourceWarning may appear; reports how many decoder
      tests ran;
   2. the built command-line tool (dist\\openevp-st25.exe): --version, and
-     --check-wav on the 10-minute test vector (the fast decoder, not slow mode);
+     --check-wav on the 10-minute test vector and on a synthetic ICD-ST10 file
+     (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/ and openevp/ is frozen
-     into it, and the decoder's tables and DLL, libusb, the icon and the driver
+     into it, and both decoders' tables and DLLs, libusb, the icon and the driver
      files (with the manifest) are bundled, identical to the sources; so is every
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
      the favicon, vendor/...), with nothing else in the bundled UI folder;
-  4. the built app starts (OpenEVP.exe --smoke): the backend and the WebView2
-     page in a hidden window, the page loads its scripts and styles and can
-     fetch every bundled UI file, and the JS bridge answers capabilities().
+  4. the built app starts (OpenEVP.exe --smoke): both decoders load with their
+     tables and fast C cores, the backend and the WebView2 page start in a
+     hidden window, the page loads its scripts and styles and can fetch every
+     bundled UI file, and the JS bridge answers capabilities().
 
 Then prints the manual checklist (a real ICD-ST25, the driver, the updater).
 """
@@ -37,25 +39,32 @@ APP_EXE = os.path.join(APP_DIR, "OpenEVP.exe")
 INTERNAL = os.path.join(APP_DIR, "_internal")
 LONG_VECTOR = os.path.join(TESTS, "vectors", "long-mixed-10min.dvf")
 LONG_SECONDS = 600.0                        # 9,375 frames x 512 samples at 8000 Hz
+ST10_SECONDS = 37 * 2048 / 44100            # tests/fixtures.st_audio_frames: 37 frames of 2048 at 44100 Hz
 
-# Test modules whose every test exercises the LPEC decoder, and single decoder
-# tests elsewhere (the marks fingerprint of decoded audio, the real decoder
-# through the app and the library, the release gate's own presence check).
-DECODER_MODULES = ("test_lpec_bitstream", "test_lpec_core", "test_lpec_vectors")
+# Test modules whose every test exercises a Sony decoder (LPEC LP, LPEC ST), and
+# single decoder tests elsewhere (the marks fingerprint of decoded audio, the real
+# decoders through the formats, the CLI, the app and the library, the release
+# gate's own presence check).
+DECODER_MODULES = ("test_lpec_bitstream", "test_lpec_core", "test_lpec_vectors",
+                   "test_lpec_st_bitstream", "test_lpec_st_core", "test_lpec_st_vectors")
 DECODER_TESTS = (
     "test_audio_server.RealDecoderFingerprintTests.test_fp_matches_real_decoded_audio_and_survives_markers",
     "test_wavinfo.GoldenFingerprintTests.test_fingerprint_of_the_decoded_vector",
     "test_library.LibraryTests.test_dvf_and_its_wav_share_fp_real_decoder",
     "test_migration.V072AppDataTests.test_the_dvf_decodes_to_the_same_recording_and_exports_the_same_wav",
     "test_release_gate.DecoderPresentTests.test_tables_and_core_load",
+    "test_st10.St10FormatTests.test_to_wav_decodes_it_as_sony_does",
+    "test_st10_app.St10AppTests.test_play_mark_backup_and_export_marked",
+    "test_st10_app.St10LibraryTests.test_indexed_and_played",
+    "test_cli.St10Tests.test_check_wav_on_an_st10_file",
 )
 # Decoder tests that need research data a release build does not have: they may skip.
-RESEARCH_ONLY = ("test_lpec_real", "test_lpec_tables")
+RESEARCH_ONLY = ("test_lpec_real", "test_lpec_tables", "test_lpec_st_real", "test_lpec_st_tables")
 
 MANUAL = """\
 MANUAL CHECKS (the owner, before publishing)
 
-Real Sony ICD-ST25, in the built app (dist\\OpenEVP\\OpenEVP.exe):
+Real Sony ICD-ST25 (and ICD-ST10), in the built app (dist\\OpenEVP\\OpenEVP.exe):
   [ ] It is listed with its owner name; folders A-E and their recordings list.
   [ ] A recording plays (waveform, audio).
   [ ] Export .dvf and WAV: files and names as before; running it again skips them.
@@ -190,7 +199,29 @@ def check_cli():
         problems.append(f"--check-wav did not decode {LONG_SECONDS:.1f} s of audio")
     if "slow mode" in out:
         problems.append("the built CLI decodes in slow mode: its lpec_core.dll did not load")
+    with tempfile.TemporaryDirectory() as tmp:
+        st10 = os.path.join(tmp, "st10.dvf")
+        with open(st10, "wb") as f:
+            f.write(st10_test_file())
+        code, out = _run([CLI, "--check-wav", st10])
+    for line in out.splitlines():
+        print(f"   {line}")
+    if code != 0 or not out.splitlines() or not out.splitlines()[-1].startswith("OK: decoded"):
+        problems.append(f"--check-wav failed on an ICD-ST10 file (exit {code})")
+    elif f"({ST10_SECONDS:.1f} s of audio)" not in out:
+        problems.append(f"--check-wav did not decode {ST10_SECONDS:.1f} s of ICD-ST10 audio")
+    if "slow mode" in out:
+        problems.append("the built CLI decodes ICD-ST10 files in slow mode: its lpec_st_core.dll did not load")
     return problems
+
+
+def st10_test_file():
+    """A synthetic ICD-ST10 .dvf (generated LPEC ST frames that decode; tests/fixtures)."""
+    sys.path.insert(0, REPO)
+    sys.path.insert(0, TESTS)
+    from fixtures import make_st_raw, st_audio_frames
+    from st25 import dvf
+    return dvf.build(make_st_raw(st_audio_frames()), b"\xff" * 8, "", mode=dvf.MODE_ST)
 
 
 # ---- 3. the built app -------------------------------------------------------------
@@ -231,6 +262,8 @@ def frozen_modules(exe):
 BUNDLED = (   # (file in _internal, its source)
     ("openevp/decoders/sony_lpec/data/lpec_tables.json", "openevp/decoders/sony_lpec/data/lpec_tables.json"),
     ("openevp/decoders/sony_lpec/lpec_core.dll", "openevp/decoders/sony_lpec/lpec_core.dll"),
+    ("openevp/decoders/sony_lpec_st/data/lpec_st_tables.json", "openevp/decoders/sony_lpec_st/data/lpec_st_tables.json"),
+    ("openevp/decoders/sony_lpec_st/lpec_st_core.dll", "openevp/decoders/sony_lpec_st/lpec_st_core.dll"),
     ("libusb-1.0.dll", "vendor/libusb-1.0.30/libusb-1.0.dll"),
     ("assets/st25.ico", "assets/st25.ico"),
     ("driver/install-winusb.ps1", "app/driver/install-winusb.ps1"),
@@ -330,6 +363,9 @@ def check_gui():
     loaded = [k for k in ("app_js", "notes_js", "wavesurfer", "regions", "style_css", "bridge") if page.get(k)]
     print(f"   page: title {page.get('title')!r}, loaded {', '.join(loaded) or 'nothing'}, "
           f"version shown {page.get('version_shown')!r}")
+    for name, d in sorted(report.get("decoders", {}).items()):
+        print(f"   decoder {name}: {'available' if d.get('available') else 'NOT available'}"
+              f"{', ' + d['status'] if d.get('status') else ''}")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
           f"version {report.get('capabilities', {}).get('version')!r}, "
           f"wav {report.get('capabilities', {}).get('wav')!r}")
