@@ -4,3 +4,6 @@ vendor/** -text
 # LPEC ST test vectors: exact bytes (generated frames and Sony's PCM for them).
 tests/vectors/lpec_st/*.bin binary
 tests/vectors/lpec_st/*.pcm binary
+# LPEC SP test vectors: exact bytes (Sony-encoded synthetic frames in .dvf files and Sony's PCM for them).
+tests/vectors/lpec_sp/*.dvf binary
+tests/vectors/lpec_sp/*.pcm binary

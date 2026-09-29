@@ -1,0 +1,15 @@
+{
+ "name": "tone-1000-fullscale",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 20,
+ "frame_sizes": {
+  "96": 1,
+  "128": 18,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 20480,
+ "pcm_sha256": "4ba606e8b484e953205bd359893b1b084f76cdfa3cd3636724fc407a5b09ff99",
+ "pcm_file": "tone-1000-fullscale.pcm"
+}

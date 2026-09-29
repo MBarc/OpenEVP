@@ -1867,7 +1867,7 @@ function renderRows() {
     const item = { device: S.device, folder: folder.id, number: r.number };
     box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.set(k, item) : S.selected.delete(k); updateExport(); };
     const no = typeof r.number === "number" ? String(r.number).padStart(3, "0") : String(r.number);
-    // A recording whose own codec can't be played (an ICD-ST10's LPEC SP) is still saved; it says why.
+    // A recording whose own codec can't be played (e.g. a build without that codec's tables) is still saved; it says why.
     const note = r.problem || (S.playable && r.play_problem ? sentence(r.play_problem) : "");
     const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), note];
     const first = document.createElement("td"); first.appendChild(box); tr.appendChild(first);

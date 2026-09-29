@@ -98,7 +98,7 @@ def recording_wav(manager, key, should_stop=None):
     """WAV bytes for one recording (the AudioServer provider). ``should_stop``
     lets app shutdown interrupt a long decode (formats.Cancelled). Raises
     formats.DecoderUnavailable when the recorder's model, or this recording's
-    codec (an ICD-ST10's LPEC SP), cannot be played (the model is read after
+    codec (e.g. an ICD-ST10's LPEC SP in a build without its table data), cannot be played (the model is read after
     the download: opening the recorder may relabel it)."""
     data = _download(manager, key).data
     model = manager.model(key[0])
@@ -547,7 +547,7 @@ class Api(LibraryOps):
         if found is None:
             return _fail("No such recording.")
         _model, folder, row = found
-        if row.get("play_problem"):          # this recording's codec (e.g. LPEC SP), not the model's
+        if row.get("play_problem"):          # this recording's codec (e.g. LPEC ST without its tables), not the model's
             return _fail(f"Playback: {row['play_problem']}.")
         number = row["number"]
         key = (device_id, folder_id, number)

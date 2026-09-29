@@ -251,9 +251,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
   assert.ok(!calls.some((c) => c[0] === "audio"));
 
-  // The same ICD-ST10 with the LPEC ST decoder, holding recordings in three modes: LPEC ST and LP
-  // play, LPEC SP says why it can't (per recording, not per recorder), and all three can be exported.
-  const SP = "LPEC SP (16 kHz) audio can't be played yet";
+  // The same ICD-ST10 with the LPEC ST decoder, holding recordings in three modes, in a build
+  // without the LPEC SP tables: LPEC ST and LP play, LPEC SP says why it can't (per recording, not
+  // per recorder), and all three can be exported.
+  const SP = "the WAV decoder could not be loaded: this build does not include the LPEC SP table data";
   listing["2-1@3"] = { ...listing["2-1@3"],
                        folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                          { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null, play_problem: null },
@@ -269,8 +270,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const [st10st, st10lp, st10sp] = $("rows").children;
   assert.ok(st10st.onclick && st10lp.onclick, "LPEC ST and LP: a click plays them");
   assert.ok(!st10sp.onclick, "LPEC SP: no click handler");
-  assert.strictEqual(st10sp.title, "LPEC SP (16 kHz) audio can't be played yet.");
-  assert.strictEqual(texts(st10sp)[4], "LPEC SP (16 kHz) audio can't be played yet.");
+  assert.strictEqual(st10sp.title, "The WAV decoder could not be loaded: this build does not include the LPEC SP table data.");
+  assert.strictEqual(texts(st10sp)[4], "The WAV decoder could not be loaded: this build does not include the LPEC SP table data.");
   assert.strictEqual(texts(st10lp)[4], "");
   assert.ok(!st10sp.children[0].children[0].disabled, "it can be selected for export");
   await st10st.onclick();

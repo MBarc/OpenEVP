@@ -10,12 +10,12 @@ then on. That is why this model claims no USB ids and no driver of its own
 
 Its recordings are in one of three modes, per recording (see st25/dvf.py):
 LPEC ST (44.1 kHz stereo, openevp.decoders.sony_lpec_st), LPEC LP (the
-ICD-ST25's codec, openevp.decoders.sony_lpec) and LPEC SP (16 kHz mono, no
-decoder yet). All are downloaded as .dvf files; the .dvf format picks the
-decoder by each file's codec byte. So wav_problem() is the base model's (the
-.dvf format's), and each recording row's play_problem says why that one
-cannot be played (e.g. "LPEC SP (16 kHz) audio can't be played yet", or a
-build without the LPEC ST decoder's table data).
+ICD-ST25's codec, openevp.decoders.sony_lpec) and LPEC SP (16 kHz mono, the
+same LPEC decoder in its 16 kHz configuration). All are downloaded as .dvf
+files; the .dvf format picks the decoder by each file's codec byte. So
+wav_problem() is the base model's (the .dvf format's), and each recording
+row's play_problem says why that one cannot be played (e.g. a build without
+the LPEC ST or SP table data).
 """
 from openevp import formats
 from openevp.recorders import base

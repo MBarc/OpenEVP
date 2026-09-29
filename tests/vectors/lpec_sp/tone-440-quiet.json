@@ -1,0 +1,15 @@
+{
+ "name": "tone-440-quiet",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 20,
+ "frame_sizes": {
+  "96": 1,
+  "128": 18,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 20480,
+ "pcm_sha256": "7e869a54c5904f5f85f74e3527b61aa1dbc706b5c7b8a13cb481aa6397d9cb5d",
+ "pcm_file": "tone-440-quiet.pcm"
+}

@@ -89,12 +89,12 @@ class MainImportTests(unittest.TestCase):
                 self.assertIn("no WebView2", f.read())
 
     def test_smoke_checks_both_decoders(self):
-        """--smoke fails a build whose LPEC LP or LPEC ST decoder does not load, or
-        loads in slow mode; here (from source) both load, or the gate says why not."""
+        """--smoke fails a build whose LPEC LP, SP or ST decoder does not load, or
+        loads in slow mode; here (from source) they load, or the gate says why not."""
         main = self.main()
         report = {"problems": []}
         main._smoke_decoders(report)
-        self.assertEqual(set(report["decoders"]), {"lpec", "lpec_st"})
+        self.assertEqual(set(report["decoders"]), {"lpec", "lpec_sp", "lpec_st"})
         if report["decoders"]["lpec_st"]["available"]:
             self.assertEqual(report["decoders"]["lpec_st"]["decoded"], 0)
         with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec_st": None}):

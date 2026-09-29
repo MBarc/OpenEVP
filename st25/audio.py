@@ -1,10 +1,9 @@
 """WAV from .dvf, through our own Sony decoders, picked by the file's codec byte:
 
-- LPEC LP (ICD-ST25, codec 0x2c): openevp.decoders.sony_lpec, 8 kHz mono;
+- LPEC LP (ICD-ST25 and ICD-ST10, codec 0x2c): openevp.decoders.sony_lpec, 8 kHz mono;
+- LPEC SP (ICD-ST10, codec 0x2a): openevp.decoders.sony_lpec in its 16 kHz
+  configuration (the same decoder, its own table data), 16 kHz mono;
 - LPEC ST (ICD-ST10, codec 0x24): openevp.decoders.sony_lpec_st, 44.1 kHz stereo.
-
-LPEC SP (an ICD-ST10's SP mode, codec 0x2a, 16 kHz mono) has no decoder yet:
-available(CODEC_SP) is False and status(CODEC_SP) says so plainly.
 
 The app greys out WAV export and playback while available() is False and
 shows status() as the reason. status() can also be set while available()
@@ -21,7 +20,6 @@ from st25 import dvf as _dvf
 DECODER = "openevp.decoders.sony_lpec"         # imported on demand: optional in a build
 ST_DECODER = "openevp.decoders.sony_lpec_st"
 CODEC_LP, CODEC_SP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_SP, _dvf.CODEC_ST
-SP_UNPLAYABLE = "LPEC SP (16 kHz) audio can't be played yet"
 
 SLOW_MODE = ("slow mode: the fast decoder could not be loaded, so converting "
              "recordings to WAV takes much longer than usual")
@@ -42,8 +40,6 @@ def _name(codec):
 def _decoder(codec=None):
     """(module, None) when the decoder for ``codec`` (LP by default) can be
     used, else (None, reason)."""
-    if codec == CODEC_SP:
-        return None, SP_UNPLAYABLE
     name = _name(codec)
     what = "the LPEC ST decoder" if name == ST_DECODER else "the WAV decoder"
     try:
@@ -61,7 +57,10 @@ def _decoder(codec=None):
     check = getattr(mod, "check", None)
     if check is not None:
         try:
-            check()
+            if codec == CODEC_SP:           # the LPEC decoder's 16 kHz table data
+                check(codec)
+            else:
+                check()
         except Exception as e:
             return None, f"{what} could not be loaded: {e}"
     return mod, None

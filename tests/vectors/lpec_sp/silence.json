@@ -1,0 +1,14 @@
+{
+ "name": "silence",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 10,
+ "frame_sizes": {
+  "128": 9,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 10240,
+ "pcm_sha256": "83d40e92941888c606ffbca551b7fcfbbd920862177a1205fca1bcc5d47854fa",
+ "pcm_file": "silence.pcm"
+}

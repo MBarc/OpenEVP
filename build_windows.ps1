@@ -1,7 +1,7 @@
 # Build the OpenEVP app (dist\OpenEVP\), the ST25 command-line tool (dist\openevp-st25.exe)
 # and the installer (dist\OpenEVP-Setup-<version>.exe).
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1
-# A build without the LPEC and LPEC ST table data (no WAV conversion) must be asked for:
+# A build without the LPEC (LP, SP) and LPEC ST table data (no WAV conversion) must be asked for:
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1 -NoLpecTables
 param([switch]$NoLpecTables)
 $ErrorActionPreference = "Stop"
@@ -50,9 +50,10 @@ foreach ($core in $lpecCore, $lpecStCore) {
 # imported dynamically (st25/audio.py), so PyInstaller cannot see them: the
 # openevp package is collected explicitly, with the decoders' DLLs, for both
 # builds below, or the frozen app/CLI silently lose WAV support. The extracted
-# table data ($lpecDir\data\lpec_tables.json from tools/import_lpec_tables.py,
-# $lpecStDir\data\lpec_st_tables.json from tools/import_lpec_st_tables.py; both
-# generated locally and never committed) is bundled the same way. Without it the
+# table data ($lpecDir\data\lpec_tables.json and $lpecDir\data\lpec_sp_tables.json
+# from tools/import_lpec_tables.py, $lpecStDir\data\lpec_st_tables.json from
+# tools/import_lpec_st_tables.py; all generated locally and never committed) is
+# bundled the same way. Without it the
 # built app and CLI look fine but can never convert to WAV (ICD-ST25 or ICD-ST10
 # recordings), so its absence fails the build unless -NoLpecTables asks for such
 # a build (for development).
@@ -60,6 +61,8 @@ $decoder = @("--collect-submodules", "openevp", "--collect-binaries", "openevp.d
              "--collect-binaries", "openevp.decoders.sony_lpec_st")
 $tables = @(@{ File = "$lpecDir\data\lpec_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
                What = "ICD-ST25 (LPEC LP)" },
+            @{ File = "$lpecDir\data\lpec_sp_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
+               What = "ICD-ST10 SP mode (LPEC SP)" },
             @{ File = "$lpecStDir\data\lpec_st_tables.json"; Dir = "$lpecStDir\data"; Tool = "tools\import_lpec_st_tables.py";
                What = "ICD-ST10 (LPEC ST)" })
 foreach ($t in $tables) {

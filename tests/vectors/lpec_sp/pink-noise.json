@@ -1,0 +1,15 @@
+{
+ "name": "pink-noise",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 30,
+ "frame_sizes": {
+  "96": 1,
+  "128": 28,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 30720,
+ "pcm_sha256": "9d8c908ff9f5d819bf55819126673b58fe3205f536bd39702e69489d4b06a0b5",
+ "pcm_file": "pink-noise.pcm"
+}

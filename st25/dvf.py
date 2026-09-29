@@ -39,8 +39,8 @@ message-list entry (st25.folder) and stored in the header's codec fields:
 The mode bytes are the recorder's own codes, not DVE's codec numbers (DVE's
 0x20 is another codec). 0x00 and 0x6C were seen on an ICD-ST10 and 0x00 on an
 ICD-ST25; 0x20 on an ICD-ST10 in its SP mode (Sony's LPEC.dll decodes it at
-16 kHz / 16000 bit/s). OpenEVP cannot decode LPEC SP yet: its files are saved,
-not played.
+16 kHz / 16000 bit/s, and so does OpenEVP's LPEC decoder in its SP
+configuration).
 
 LP files have been verified against DVE. DVE also rounds two timestamps
 (header byte 58, byte 9 of some blocks) differently; that does not change the
@@ -57,7 +57,10 @@ recorder starts a segment with a counter-0 frame).
 The LPEC SP header is OpenEVP's own too, by analogy with LP (DVE's LPEC SP/LP
 pair is 0x2A/0x2C): the LP template with codec 0x2A, 1 channel, 16000 bit/s
 and 2000 bytes/s. Its blocks are checked like LP's; it has no frame framing
-to check (no per-frame header or counter).
+to check (no per-frame header or counter). Its frames are 128 bytes (96 or
+160 by the first two bits, like LP's 48 / 36 / 60), 1024 samples each, so
+payload / 2000 is its length only when its 96- and 160-byte frames balance
+out; sp_seconds() counts the frames for the exact length.
 """
 import re
 import struct
@@ -76,6 +79,8 @@ _CODECS = {MODE_LP: CODEC_LP, MODE_SP: CODEC_SP, MODE_ST: CODEC_ST}
 
 LP_BYTES_PER_SECOND = 750
 SP_BYTES_PER_SECOND = 2000
+SP_FRAME_BYTES = (128, 96, 160, 128)   # by the frame's first two bits (its mode)
+SP_SAMPLES, SP_RATE = 1024, 16000
 ST_FRAME, ST_SAMPLES, ST_RATE = 283, 2048, 44100
 
 # DVE 2.31 header for ST-series LPEC (LP) recordings with the per-message fields zeroed.
@@ -139,7 +144,9 @@ def seconds(payload_bytes, mode):
     which the decoder swallows (Sony's start-up delay). That is exact for a
     recording made in one go; each restart inside a recording (a counter-0
     frame, then another swallowed frame) makes it about 0.09 s long. The
-    decoded WAV's length is exact."""
+    decoded WAV's length is exact. For LPEC LP and SP it is exact when the
+    short and long frames balance out (sp_seconds() is exact for SP, from the
+    frames themselves)."""
     if mode == MODE_LP:
         return payload_bytes / float(LP_BYTES_PER_SECOND)
     if mode == MODE_SP:
@@ -147,6 +154,25 @@ def seconds(payload_bytes, mode):
     if mode == MODE_ST:
         return max(0, payload_bytes // ST_FRAME - 1) * ST_SAMPLES / ST_RATE
     return None
+
+
+def sp_frames(payload):
+    """How many LPEC SP frames a decoder makes of ``payload`` (the frame
+    stream, see payload()): DVE's loop, which hands each frame the bytes that
+    are left and moves on by the bytes the frame used; a frame cut short at
+    the end is read round the bytes it has (docs/lpec.md, "Short input")."""
+    pos, n, total = 0, 0, len(payload)
+    while pos < total:
+        want = SP_FRAME_BYTES[payload[pos] >> 6]
+        left = total - pos
+        pos += want if want <= left else (want - 1) % left + 1
+        n += 1
+    return n
+
+
+def sp_seconds(payload):
+    """The exact decoded length of an LPEC SP frame stream, in seconds."""
+    return sp_frames(payload) * SP_SAMPLES / float(SP_RATE)
 
 
 def _st_problem(blocks):

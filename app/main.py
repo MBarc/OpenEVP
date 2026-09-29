@@ -143,8 +143,9 @@ def _own_taskbar_identity():
 
 
 # ---- --smoke: the release check's frozen GUI smoke test -------------------------
-# OpenEVP.exe --smoke [REPORT.json] checks that both Sony decoders (LPEC LP for the
-# ICD-ST25, LPEC ST for the ICD-ST10) load with their tables and fast C cores,
+# OpenEVP.exe --smoke [REPORT.json] checks that both Sony decoders (LPEC LP and SP
+# for the ICD-ST25 and ICD-ST10, LPEC ST for the ICD-ST10) load with their tables
+# and fast C cores,
 # starts the backend and the WebView2 page in a hidden window, checks that the page
 # loaded (its scripts, styles and every bundled UI file served) and that the JS
 # bridge answers, then exits: 0 if all is well, 1 if not, with the details in
@@ -266,7 +267,8 @@ def main(argv=None):
 
 
 # (report name, codec byte, what it plays) for each decoder the smoke test loads.
-SMOKE_DECODERS = (("lpec", 0x2C, "LPEC LP (ICD-ST25)"), ("lpec_st", 0x24, "LPEC ST (ICD-ST10)"))
+SMOKE_DECODERS = (("lpec", 0x2C, "LPEC LP (ICD-ST25)"), ("lpec_sp", 0x2A, "LPEC SP (ICD-ST10)"),
+                  ("lpec_st", 0x24, "LPEC ST (ICD-ST10)"))
 
 
 def _smoke_decoders(report):

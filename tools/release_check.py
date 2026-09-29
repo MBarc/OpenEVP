@@ -8,10 +8,10 @@ Automated (exits non-zero if any fails):
      intact), and no ResourceWarning may appear; reports how many decoder
      tests ran;
   2. the built command-line tool (dist\\openevp-st25.exe): --version, and
-     --check-wav on the 10-minute test vector and on a synthetic ICD-ST10 file
-     (both fast decoders, not slow mode);
+     --check-wav on the 10-minute test vector, the 1-minute LPEC SP vector and a
+     synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/ and openevp/ is frozen
-     into it, and both decoders' tables and DLLs, libusb, the icon and the driver
+     into it, and both decoders' tables (LPEC LP, SP and ST) and DLLs, libusb, the icon and the driver
      files (with the manifest) are bundled, identical to the sources; so is every
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
      the favicon, vendor/...), with nothing else in the bundled UI folder;
@@ -40,12 +40,14 @@ INTERNAL = os.path.join(APP_DIR, "_internal")
 LONG_VECTOR = os.path.join(TESTS, "vectors", "long-mixed-10min.dvf")
 LONG_SECONDS = 600.0                        # 9,375 frames x 512 samples at 8000 Hz
 ST10_SECONDS = 37 * 2048 / 44100            # tests/fixtures.st_audio_frames: 37 frames of 2048 at 44100 Hz
+SP_VECTOR = os.path.join(TESTS, "vectors", "lpec_sp", "long-mixed-1min.dvf")
+SP_SECONDS = 938 * 1024 / 16000             # 938 frames x 1024 samples at 16000 Hz
 
-# Test modules whose every test exercises a Sony decoder (LPEC LP, LPEC ST), and
+# Test modules whose every test exercises a Sony decoder (LPEC LP and SP, LPEC ST), and
 # single decoder tests elsewhere (the marks fingerprint of decoded audio, the real
 # decoders through the formats, the CLI, the app and the library, the release
 # gate's own presence check).
-DECODER_MODULES = ("test_lpec_bitstream", "test_lpec_core", "test_lpec_vectors",
+DECODER_MODULES = ("test_lpec_bitstream", "test_lpec_core", "test_lpec_vectors", "test_lpec_sp_vectors",
                    "test_lpec_st_bitstream", "test_lpec_st_core", "test_lpec_st_vectors")
 DECODER_TESTS = (
     "test_audio_server.RealDecoderFingerprintTests.test_fp_matches_real_decoded_audio_and_survives_markers",
@@ -59,7 +61,8 @@ DECODER_TESTS = (
     "test_cli.St10Tests.test_check_wav_on_an_st10_file",
 )
 # Decoder tests that need research data a release build does not have: they may skip.
-RESEARCH_ONLY = ("test_lpec_real", "test_lpec_tables", "test_lpec_st_real", "test_lpec_st_tables")
+RESEARCH_ONLY = ("test_lpec_real", "test_lpec_tables", "test_lpec_sp_real", "test_lpec_sp_tables",
+                 "test_lpec_st_real", "test_lpec_st_tables")
 
 MANUAL = """\
 MANUAL CHECKS (the owner, before publishing)
@@ -199,6 +202,15 @@ def check_cli():
         problems.append(f"--check-wav did not decode {LONG_SECONDS:.1f} s of audio")
     if "slow mode" in out:
         problems.append("the built CLI decodes in slow mode: its lpec_core.dll did not load")
+    code, out = _run([CLI, "--check-wav", SP_VECTOR])
+    for line in out.splitlines():
+        print(f"   {line}")
+    if code != 0 or not out.splitlines() or not out.splitlines()[-1].startswith("OK: decoded"):
+        problems.append(f"--check-wav failed on an LPEC SP file (exit {code})")
+    elif f"({SP_SECONDS:.1f} s of audio)" not in out:
+        problems.append(f"--check-wav did not decode {SP_SECONDS:.1f} s of LPEC SP audio")
+    if "slow mode" in out:
+        problems.append("the built CLI decodes LPEC SP files in slow mode: its lpec_core.dll did not load")
     with tempfile.TemporaryDirectory() as tmp:
         st10 = os.path.join(tmp, "st10.dvf")
         with open(st10, "wb") as f:
@@ -261,6 +273,7 @@ def frozen_modules(exe):
 
 BUNDLED = (   # (file in _internal, its source)
     ("openevp/decoders/sony_lpec/data/lpec_tables.json", "openevp/decoders/sony_lpec/data/lpec_tables.json"),
+    ("openevp/decoders/sony_lpec/data/lpec_sp_tables.json", "openevp/decoders/sony_lpec/data/lpec_sp_tables.json"),
     ("openevp/decoders/sony_lpec/lpec_core.dll", "openevp/decoders/sony_lpec/lpec_core.dll"),
     ("openevp/decoders/sony_lpec_st/data/lpec_st_tables.json", "openevp/decoders/sony_lpec_st/data/lpec_st_tables.json"),
     ("openevp/decoders/sony_lpec_st/lpec_st_core.dll", "openevp/decoders/sony_lpec_st/lpec_st_core.dll"),

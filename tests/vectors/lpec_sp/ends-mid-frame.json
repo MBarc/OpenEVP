@@ -1,0 +1,15 @@
+{
+ "name": "ends-mid-frame",
+ "note": "the data ends 30 bytes before the end of the last frame (as the decoder sees at the end of real recordings)",
+ "frames": 25,
+ "frame_sizes": {
+  "98": 1,
+  "128": 23,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 27648,
+ "pcm_sha256": "443f8cf3fe7126ec939ca493aa17c1c61de9b32525e4f24b9b5c267cc831b74c",
+ "pcm_file": "ends-mid-frame.pcm"
+}

@@ -4,10 +4,10 @@
     st25-download --check-wav DVF_FILE
 
 --wav also writes a WAV file beside each .dvf, decoded by the built-in LPEC
-decoders (LPEC LP: 8000 Hz mono; LPEC ST: 44.1 kHz stereo); a .wav missing
-beside an already-saved .dvf is filled in. A recording whose codec can't be
-decoded in this build (LPEC SP, an ICD-ST10's SP mode, has no decoder yet) is
-saved as .dvf only, with a note. --check-wav decodes one .dvf file to verify that WAV
+decoders (LPEC LP: 8000 Hz mono; LPEC SP: 16000 Hz mono; LPEC ST: 44.1 kHz
+stereo); a .wav missing beside an already-saved .dvf is filled in. A
+recording whose codec can't be decoded in this build (e.g. its table data is
+missing) is saved as .dvf only, with a note. --check-wav decodes one .dvf file to verify that WAV
 conversion works in this build, and saves nothing.
 
 Nothing on the recorder is changed or deleted. Every recording is downloaded
@@ -231,14 +231,14 @@ def _wav_seconds(wav):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="st25-download", description=__doc__.splitlines()[0],
                                  epilog="WAV conversion is built in: --wav decodes each recording "
-                                 "with OpenEVP's own LPEC decoders (LPEC LP, and LPEC ST from an "
-                                 "ICD-ST10; its LPEC SP recordings can't be converted yet).")
+                                 "with OpenEVP's own LPEC decoders (LPEC LP, and LPEC SP and ST "
+                                 "from an ICD-ST10).")
     ap.add_argument("output", nargs="?", help="output folder (default: Documents\\OpenEVP)")
     ap.add_argument("--list", action="store_true", help="only list the recordings")
     ap.add_argument("--folder", choices=list(LETTERS), help="only this folder")
     ap.add_argument("--raw", action="store_true", help="also save the raw wire data (for debugging)")
     ap.add_argument("--wav", action="store_true", help="also write a WAV file beside each .dvf (16-bit; 8000 Hz mono "
-                    "for LPEC LP, 44100 Hz stereo for LPEC ST); also fills in a "
+                    "for LPEC LP, 16000 Hz mono for LPEC SP, 44100 Hz stereo for LPEC ST); also fills in a "
                     "missing .wav beside a .dvf saved earlier")
     ap.add_argument("--open", action="store_true",
                     help="open the output folder when done (default when the .exe is double-clicked)")

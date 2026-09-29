@@ -48,11 +48,11 @@ when it has them and fall back to to_wav.
 
 The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25
 and ICD-ST10). A .dvf is decoded by its codec byte, through st25.audio:
-LPEC LP (ICD-ST25, ICD-ST10) by the Sony LPEC decoder, LPEC ST (ICD-ST10) by
-the Sony LPEC ST decoder; LPEC SP (ICD-ST10) cannot be decoded yet. The
-format-level availability is the LP decoder's; header_problem says when an
-LPEC ST or SP file's own decoder is unavailable (then to_wav raises
-DecoderUnavailable). So whether a .dvf plays is decided per file, by its
+LPEC LP (ICD-ST25, ICD-ST10) and LPEC SP (ICD-ST10, 16 kHz) by the Sony LPEC
+decoder, LPEC ST (ICD-ST10) by the Sony LPEC ST decoder. The format-level
+availability is the LP decoder's; header_problem says when an LPEC ST or SP
+file's own decoder is unavailable (e.g. a build without that mode's table
+data; then to_wav raises DecoderUnavailable). So whether a .dvf plays is decided per file, by its
 codec, not per recorder model. Tests add their own formats with
 register()/unregister().
 """
@@ -178,8 +178,8 @@ CODEC_LP, CODEC_SP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_SP, _dvf.CODEC_ST
 
 def codec_problem(codec):
     """Why .dvf recordings of ``codec`` (CODEC_LP, CODEC_SP or CODEC_ST) cannot
-    be decoded now (a phrase, e.g. the LPEC ST tables are missing, or LPEC SP
-    has no decoder yet), or None."""
+    be decoded now (a phrase, e.g. the LPEC ST or SP tables are missing), or
+    None."""
     return None if _st25_audio.available(codec) else _st25_audio.status(codec)
 
 
@@ -216,14 +216,17 @@ class _SonyLpec:
 
     def wav_bytes(self, data):
         """The WAV's size from the header's payload field: at most every LPEC ST
-        frame's 2048 stereo samples; LPEC LP's 750 bytes a second become 16000,
-        LPEC SP's 2000 bytes a second 32000."""
+        frame's 2048 stereo samples; LPEC LP's 750 bytes a second become 16000.
+        LPEC SP's is exact (1024 samples a frame, the frames counted) when the
+        whole file is given, else its 2000 bytes a second become 32000."""
         if len(data) < 468:
             return None
         payload = struct.unpack(">I", bytes(data[464:468]))[0]
         if _dvf.codec(data) == CODEC_ST:
             return 44 + payload // _dvf.ST_FRAME * _dvf.ST_SAMPLES * 4
         if _dvf.codec(data) == CODEC_SP:
+            if _dvf.validate(bytes(data)) is None:
+                return 44 + _dvf.sp_frames(_dvf.payload(bytes(data))) * _dvf.SP_SAMPLES * 2
             return 44 + payload * 16
         return 44 + payload * 64 // 3
 
@@ -261,9 +264,16 @@ def _translated(call):
 
 
 def _dvf_seconds(path):
+    """A saved .dvf's length from its header; an LPEC SP file's exactly, from
+    its frames (SP files are small: 2000 bytes a second)."""
     try:
         with open(path, "rb") as f:
             header = f.read(468)
+            if len(header) >= 468 and _dvf.mode_of(header) == _dvf.MODE_SP:
+                f.seek(0)
+                data = f.read(DVF_MAX_BYTES + 1)
+                if len(data) <= DVF_MAX_BYTES and _dvf.validate(data) is None:
+                    return round(_dvf.sp_seconds(_dvf.payload(data)), 1)
     except OSError:
         return None
     if len(header) < 468:
@@ -274,9 +284,12 @@ def _dvf_seconds(path):
     return round(_dvf.seconds(struct.unpack(">I", header[464:468])[0], mode), 1)
 
 
+DVF_MAX_BYTES = 512 << 20       # far beyond any ICD-ST recording (~200 hours of LP audio)
+
+
 DVF = Format(ext=".dvf", label="Sony original", decoder=_SonyLpec(), same=_dvf.same_audio,
              seconds=_dvf_seconds,
-             max_bytes=512 << 20,       # far beyond any ICD-ST recording (~200 hours of LP audio)
+             max_bytes=DVF_MAX_BYTES,
              noun="a Sony ICD-ST recording", header_problem=_dvf_problem)
 
 

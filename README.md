@@ -10,7 +10,7 @@ Windows PC: one installer, no manufacturer software, no old 32-bit computer.
 | Recorder | Status |
 |---|---|
 | Sony ICD-ST25 | ✅ Supported: download, play, WAV export, EVP marks |
-| Sony ICD-ST10 | ✅ Supported (LPEC ST): download, play, WAV export, EVP marks |
+| Sony ICD-ST10 | ✅ Supported (LPEC ST, SP and LP): download, play, WAV export, EVP marks |
 | Panasonic RR-DR60 | 🛠 Planned |
 
 Have a recorder you'd like supported? [Open an issue](https://github.com/MBarc/OpenEVP/issues).
@@ -42,8 +42,10 @@ DVE from an ICD-ST10 has been compared yet.
 The ICD-ST10 records in one of three modes, per recording. Its ST mode is LPEC
 ST, above. Its LP mode is the ICD-ST25's LPEC LP and plays like an ST25
 recording (a real one decoded byte-identically to Sony's decoder). Its SP mode
-is LPEC SP (16 kHz mono): those recordings are listed and saved as `.dvf`, but
-can't be played or converted to WAV yet, and the app says so on each one.
+is LPEC SP (16 kHz mono), the same codec at 16 kHz: OpenEVP's LPEC decoder
+plays it and converts it to 16 kHz mono WAV files whose samples are
+byte-identical to those of Sony's own decoder (checked on one recording and
+on thousands of generated and damaged frames; see [docs/lpec.md](docs/lpec.md)).
 
 Nothing on a recorder is changed or deleted. For the ST25 the program can only
 send the exact read commands DVE itself sends to list and download recordings.
@@ -250,7 +252,10 @@ can't add, edit or delete marks (it says so) until the first is closed.
   recording longer than 32 MB (about an hour and a half of LPEC ST) would be
   reported, not saved. Recordings made with its clock set are untested. Its SP
   mode's `.dvf` header is OpenEVP's own guess (the LP header with SP's codec,
-  channel and rate fields) until a DVE-saved SP file can be compared.
+  channel and rate fields) until a DVE-saved SP file can be compared. An SP
+  recording's length before it is downloaded is its size over 2000 bytes a
+  second, which can be off by a few hundredths of a second; once saved, its
+  length is counted from its frames and is exact.
 - **Long ICD-ST10 recordings are big**: 92 minutes of 44.1 kHz stereo is about
   930 MB of WAV. Playback decodes straight into a disk cache (2 GB, the oldest
   recordings dropped first, room made before a decode and again if the disk
@@ -300,8 +305,8 @@ build. It re-runs the tests in the release gate, checks the built command-line
 tool and app, and prints the manual checklist (a real recorder, the driver,
 the updater).
 
-WAV conversion needs two more things for each of the two Sony decoders (LPEC
-LP for the ICD-ST25, LPEC ST for the ICD-ST10), all kept out of the repository:
+WAV conversion needs two more things for each of the two Sony decoders (LPEC,
+for LP and SP, and LPEC ST), all kept out of the repository:
 
 - their C cores, `openevp\decoders\sony_lpec\lpec_core.dll` and
   `openevp\decoders\sony_lpec_st\lpec_st_core.dll`, which the build script
@@ -310,7 +315,10 @@ LP for the ICD-ST25, LPEC ST for the ICD-ST10), all kept out of the repository:
   Without the DLLs the decoders still work in pure Python, about 60 (LP) and
   15 (LPEC ST) times slower.
 - their table data (see *Legal*), `openevp\decoders\sony_lpec\data\lpec_tables.json`
-  (`python tools\import_lpec_tables.py`) and
+  and `openevp\decoders\sony_lpec\data\lpec_sp_tables.json`
+  (`python tools\import_lpec_tables.py`, from dumps of DVE's `LPEC.dll` in the
+  `--tables-dir` / `OPENEVP_TABLE_DUMPS` folder; the SP file needs the `sp_*`
+  dumps) and
   `openevp\decoders\sony_lpec_st\data\lpec_st_tables.json`
   (`python tools\import_lpec_st_tables.py`, from a copy of DVE's `lcstde.ax` in
   the same `--tables-dir` / `OPENEVP_TABLE_DUMPS` folder, or `--dll`). The build
@@ -330,8 +338,9 @@ GNU General Public License v3.0 or later; see [`LICENSE`](LICENSE).
 
 OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony or Panasonic. "Sony", "ICD-ST25", "ICD-ST10" and "Digital Voice Editor" are trademarks of Sony Corporation. "Panasonic" and "RR-DR60" are trademarks of Panasonic Corporation.
 
-To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio formats (LPEC LP, used by the ICD-ST25, and LPEC ST, used by the ICD-ST10). They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly. The tables ship inside the installer only, as two data files
-(`openevp/decoders/sony_lpec/data/lpec_tables.json` for LPEC LP and
+To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio formats (LPEC LP, used by the ICD-ST25 and ICD-ST10, and LPEC SP and LPEC ST, used by the ICD-ST10). They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly. The tables ship inside the installer only, as three data files
+(`openevp/decoders/sony_lpec/data/lpec_tables.json` for LPEC LP,
+`openevp/decoders/sony_lpec/data/lpec_sp_tables.json` for LPEC SP and
 `openevp/decoders/sony_lpec_st/data/lpec_st_tables.json` for LPEC ST); they are not part of this repository.
 
 OpenEVP is provided "as is", without warranty of any kind.

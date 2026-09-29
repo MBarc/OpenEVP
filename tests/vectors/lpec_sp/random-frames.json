@@ -1,0 +1,15 @@
+{
+ "name": "random-frames",
+ "note": "random bytes in frames of all four modes (every bit pattern is a valid frame); no audio source",
+ "frames": 40,
+ "frame_sizes": {
+  "96": 11,
+  "128": 24,
+  "160": 5
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 40960,
+ "pcm_sha256": "ecf75fe47aa21785371d95c3df41f9f03ecd01588f42cc0505b8e95e4a0ebadb",
+ "pcm_file": "random-frames.pcm"
+}

@@ -2,9 +2,10 @@
 (0x6C), LPEC LP (0x00, the ICD-ST25's codec) and LPEC SP (0x20, 16 kHz mono).
 
 LPEC SP is downloaded and saved (codec 0x2A, the LP header template with SP's
-channel and rate fields), but OpenEVP has no SP decoder yet: it refuses to
-play or convert it with a plain reason, per recording, while the recorder's
-LP and ST recordings still play.
+channel and rate fields) and decoded by the LPEC decoder in its 16 kHz
+configuration (openevp.decoders.sony_lpec, never as LP data). Playability is
+still per recording: a build without SP's table data refuses SP recordings
+with a plain reason while the recorder's LP and ST recordings play.
 """
 import contextlib
 import io
@@ -30,7 +31,7 @@ from st25.folder import parse  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
 from st25.session import RecorderSession  # noqa: E402
 
-SP = "LPEC SP (16 kHz) audio can't be played yet"
+NO_SP = "the WAV decoder could not be loaded: this build does not include the LPEC SP table data"
 UNDATED = b"\xff" * 8
 SP_LENGTH = 16938                       # A-006 of the real ICD-ST10: 17 blocks, 16768 payload bytes
 SP_COUNTER = 0x353D6E4A
@@ -51,18 +52,24 @@ def tiny_wav(rate, channels):
     return buf.getvalue()
 
 
-def fake_decoders():
-    """Fake LP and ST decoder modules, each recording the codec bytes it was given."""
+def fake_decoders(sp_tables=True):
+    """Fake LPEC (LP and SP) and LPEC ST decoder modules, each recording the
+    codec bytes it was given. ``sp_tables=False``: the LPEC decoder's
+    check(CODEC_SP) fails as a build without the SP table data does."""
     calls = []
     mods = {}
-    for name, rate, channels in (("openevp.decoders.sony_lpec", 8000, 1), ("openevp.decoders.sony_lpec_st", 44100, 2)):
+    for name, channels in (("openevp.decoders.sony_lpec", 1), ("openevp.decoders.sony_lpec_st", 2)):
         m = types.ModuleType(name)
-        wav = tiny_wav(rate, channels)
 
-        def to_wav(data, should_stop=None, wav=wav, name=name):
+        def to_wav(data, should_stop=None, name=name, channels=channels):
             calls.append((name.rsplit(".", 1)[1], dvf.codec(data)))
-            return wav
+            return tiny_wav({dvf.CODEC_SP: 16000, dvf.CODEC_ST: 44100}.get(dvf.codec(data), 8000), channels)
         m.dvf_to_wav = to_wav
+        if name.endswith("sony_lpec"):
+            def check(codec=None):
+                if codec == dvf.CODEC_SP and not sp_tables:
+                    raise RuntimeError("this build does not include the LPEC SP table data")
+            m.check = check
         mods[name] = m
     return mods, calls
 
@@ -79,14 +86,31 @@ class SpFileTests(unittest.TestCase):
         self.assertIsNotNone(dvf.audio_fingerprint(sp))
         self.assertEqual(dvf.codec_of_mode(0x20), 0x2A)
 
-    def test_duration_is_payload_over_2000(self):
+    def test_duration(self):
+        # From the folder table (bytes only): payload / 2000. From the data: exact,
+        # 1024 samples per frame, the frames counted by their mode bits.
         payload = SP_LENGTH - 10 * 17
         self.assertEqual(dvf.seconds(payload, dvf.MODE_SP), payload / 2000)
+        sp = sp_dvf()
+        frames = dvf.sp_frames(dvf.payload(sp))
+        self.assertNotEqual(frames * 1024 / 16000, payload / 2000)   # this data's frames do not balance out
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "sp.dvf")
             with open(path, "wb") as f:
-                f.write(sp_dvf())
-            self.assertEqual(formats.DVF.seconds(path), round(payload / 2000, 1))
+                f.write(sp)
+            self.assertEqual(formats.DVF.seconds(path), round(frames * 1024 / 16000, 1))
+        self.assertEqual(formats.DVF.decoder.wav_bytes(sp), 44 + frames * 2048)
+        self.assertEqual(formats.DVF.decoder.wav_bytes(sp[:1024]), 44 + payload * 16)   # the header alone
+
+    def test_frames_are_counted_as_the_decoder_reads_them(self):
+        # Frame lengths by the first two bits: 128, 96, 160, 128 bytes. A frame cut
+        # short at the end is read round the bytes it has, and the loop goes on
+        # from the byte position it reached (docs/lpec.md, "Short input").
+        self.assertEqual(dvf.sp_frames(b""), 0)
+        self.assertEqual(dvf.sp_frames(b"\x00" * 128 + b"\x40" * 96 + b"\x80" * 160 + b"\xc0" * 128), 4)
+        self.assertEqual(dvf.sp_seconds(b"\x00" * 128 + b"\x80" * 160), 0.128)   # 288 bytes, not 0.144 s
+        self.assertEqual(dvf.sp_frames(b"\x00" * 100), 3)                # at 28 of 100, 56 of 72, 16 of 16
+        self.assertEqual(dvf.sp_frames(b"\x00" * 128 + b"\x00" * 50), 4)   # then 28 of 50, 18 of 22, 4 of 4
 
     def test_no_st_frame_check(self):
         # LP-style blocks whose frame-offset fields mean nothing to LPEC ST are fine for SP.
@@ -101,14 +125,28 @@ class SpFileTests(unittest.TestCase):
         self.assertEqual((m.mode, m.problem, m.blocks), (0x20, "", 17))
         self.assertEqual(m.seconds(), (SP_LENGTH - 170) / 2000)
 
-    def test_refused_plainly_never_decoded_as_lp(self):
+    def test_decoded_by_the_lpec_decoder(self):
         sp = sp_dvf()
         mods, calls = fake_decoders()
         with mock.patch.dict(sys.modules, mods):
+            self.assertTrue(audio.available(dvf.CODEC_SP))
+            self.assertIsNone(audio.status(dvf.CODEC_SP))
+            self.assertIsNone(formats.codec_problem(formats.CODEC_SP))
+            self.assertIsNone(formats.DVF.data_problem(sp))
+            with wave.open(io.BytesIO(audio.dvf_to_wav(sp))) as w:
+                self.assertEqual((w.getframerate(), w.getnchannels()), (16000, 1))
+            formats.DVF.decoder.to_wav(sp)
+        self.assertEqual(calls, [("sony_lpec", dvf.CODEC_SP)] * 2)
+
+    def test_refused_plainly_without_its_tables(self):
+        sp = sp_dvf()
+        mods, calls = fake_decoders(sp_tables=False)
+        with mock.patch.dict(sys.modules, mods):
+            self.assertTrue(audio.available(dvf.CODEC_LP))
             self.assertFalse(audio.available(dvf.CODEC_SP))
-            self.assertEqual(audio.status(dvf.CODEC_SP), SP)
-            self.assertEqual(formats.codec_problem(formats.CODEC_SP), SP)
-            self.assertEqual(formats.DVF.data_problem(sp), SP)
+            self.assertEqual(audio.status(dvf.CODEC_SP), NO_SP)
+            self.assertEqual(formats.codec_problem(formats.CODEC_SP), NO_SP)
+            self.assertEqual(formats.DVF.data_problem(sp), NO_SP)
             with self.assertRaises(audio.DecoderUnavailable):
                 audio.dvf_to_wav(sp)
             with self.assertRaises(formats.DecoderUnavailable):
@@ -117,7 +155,6 @@ class SpFileTests(unittest.TestCase):
                 formats.write_wav(formats.DVF, sp, io.BytesIO())
             self.assertIsNone(formats.DVF.data_problem(dvf.build(make_raw(2958, 1), DATE, "X")))
         self.assertEqual(calls, [])
-        self.assertEqual(formats.DVF.decoder.wav_bytes(sp), 44 + (SP_LENGTH - 170) * 16)
 
 
 def mixed_folders():
@@ -131,10 +168,13 @@ def mixed_folders():
 
 
 class MixedModesAppTests(AppTestBase):
-    """Playability is per recording: on one ST10, LP and ST play, SP says why not."""
+    """On one ST10, LP, ST and SP recordings all play, each by its own codec's
+    decoder."""
+
+    sp_tables = True
 
     def setUp(self):
-        mods, self.calls = fake_decoders()
+        mods, self.calls = fake_decoders(self.sp_tables)
         patch = mock.patch.dict(sys.modules, mods)
         patch.start()
         self.addCleanup(patch.stop)
@@ -155,23 +195,20 @@ class MixedModesAppTests(AppTestBase):
         self.assertEqual((r["model_id"], r["playable"], r["play_reason"]), ("sony-icd-st10", True, None))
         rows = r["folders"][0]["recordings"]
         self.assertEqual([(x["label"], x["problem"], x["play_problem"]) for x in rows],
-                         [("A-001", None, None), ("A-002", None, None), ("A-003", None, SP)])
+                         [("A-001", None, None), ("A-002", None, None), ("A-003", None, None)])
         self.assertEqual(rows[2]["seconds"], round((SP_LENGTH - 170) / 2000, 1))
         self.assertEqual(r["formats"][1], {"value": "wav", "label": "WAV", "available": True, "reason": None})
 
-    def test_lp_and_st_play_sp_refused(self):
+    def test_playback(self):
         self.api.recordings(ID)
-        for n in (1, 2):
+        for n in (1, 2, 3):
             r = self.api.audio(ID, "A", n)
             self.assertTrue(r["ok"], r)
-        self.assertEqual(self.calls, [("sony_lpec_st", dvf.CODEC_ST), ("sony_lpec", dvf.CODEC_LP)])
-        r = self.api.audio(ID, "A", 3)
-        self.assertEqual((r["ok"], r["error"]), (False, f"Playback: {SP}."))
-        self.assertEqual(self.server.made, [(ID, "A", 1), (ID, "A", 2)])
-        with self.assertRaises(formats.DecoderUnavailable) as cm:
-            backend.recording_wav(self.m, (ID, "A", 3))
-        self.assertEqual(str(cm.exception), SP)
-        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls, [("sony_lpec_st", dvf.CODEC_ST), ("sony_lpec", dvf.CODEC_LP),
+                                      ("sony_lpec", dvf.CODEC_SP)])
+        self.assertEqual(self.server.made, [(ID, "A", 1), (ID, "A", 2), (ID, "A", 3)])
+        with wave.open(io.BytesIO(backend.recording_wav(self.m, (ID, "A", 3)))) as w:
+            self.assertEqual((w.getframerate(), w.getnchannels()), (16000, 1))
 
     def test_exports(self):
         self.api.recordings(ID)
@@ -182,18 +219,51 @@ class MixedModesAppTests(AppTestBase):
         self.assertEqual((dvf.validate(sp), dvf.codec(sp)), (None, dvf.CODEC_SP))
         self.assertEqual(sp, sp_dvf())
         name, p = self.export(ID, items, "wav")
-        self.assertEqual((name, p["saved"], p["notes"]), ("export-done", 2, [f"A-003: not converted ({SP})"]))
+        self.assertEqual((name, p["saved"], p["notes"]), ("export-done", 3, []))
+        self.assertEqual([f for f in self.files("A") if f.endswith(".wav")],
+                         ["001_A_001_Unknown.wav", "001_A_002_Unknown.wav", "001_A_003_Unknown.wav"])
+
+
+class MixedModesWithoutSpTablesAppTests(MixedModesAppTests):
+    """The same recorder in a build without the LPEC SP table data: LP and ST
+    play, SP says why not (playability is per recording)."""
+
+    sp_tables = False
+
+    def test_listing(self):
+        rows = self.api.recordings(ID)["folders"][0]["recordings"]
+        self.assertEqual([(x["label"], x["play_problem"]) for x in rows],
+                         [("A-001", None), ("A-002", None), ("A-003", NO_SP)])
+
+    def test_playback(self):
+        self.api.recordings(ID)
+        for n in (1, 2):
+            r = self.api.audio(ID, "A", n)
+            self.assertTrue(r["ok"], r)
+        r = self.api.audio(ID, "A", 3)
+        self.assertEqual((r["ok"], r["error"]), (False, f"Playback: {NO_SP}."))
+        self.assertEqual(self.server.made, [(ID, "A", 1), (ID, "A", 2)])
+        with self.assertRaises(formats.DecoderUnavailable) as cm:
+            backend.recording_wav(self.m, (ID, "A", 3))
+        self.assertEqual(str(cm.exception), NO_SP)
+        self.assertEqual(self.calls, [("sony_lpec_st", dvf.CODEC_ST), ("sony_lpec", dvf.CODEC_LP)])
+
+    def test_exports(self):
+        self.api.recordings(ID)
+        items = [{"folder": "A", "number": n} for n in (1, 2, 3)]
+        name, p = self.export(ID, items, "wav")
+        self.assertEqual((name, p["saved"], p["notes"]), ("export-done", 2, [f"A-003: not converted ({NO_SP})"]))
         self.assertEqual([f for f in self.files("A") if f.endswith(".wav")],
                          ["001_A_001_Unknown.wav", "001_A_002_Unknown.wav"])
 
 
 class MixedModesCliTests(unittest.TestCase):
-    def run_cli(self, *argv):
+    def run_cli(self, *argv, sp_tables=True):
         folders, voice = mixed_folders()
         dev = FakeRecorderDevice(folders, voice=voice, identify="ICD-ST10")
         r = Recorder.__new__(Recorder)
         r.dev = dev
-        mods, self.calls = fake_decoders()
+        mods, self.calls = fake_decoders(sp_tables)
         buf = io.StringIO()
         with mock.patch.object(cli, "Recorder", return_value=r), mock.patch.dict(sys.modules, mods), \
                 contextlib.redirect_stdout(buf):
@@ -208,19 +278,32 @@ class MixedModesCliTests(unittest.TestCase):
         self.assertEqual([line.split("  ")[-1] for line in lines], ["LPEC ST", "LPEC LP", "LPEC SP"])
         self.assertIn(f"{(SP_LENGTH - 170) / 2000:7.1f} s", lines[2])
 
-    def test_sp_is_saved_without_a_wav(self):
+    def test_sp_gets_a_16_khz_wav(self):
         with tempfile.TemporaryDirectory() as d:
             code, out = self.run_cli(d, "--folder", "A", "--wav")
             outdir = os.path.join(d, "A")
             self.assertEqual(sorted(os.listdir(outdir)),
                              ["001_A_001_Unknown.dvf", "001_A_001_Unknown.wav", "001_A_002_Unknown.dvf",
-                              "001_A_002_Unknown.wav", "001_A_003_Unknown.dvf"])
+                              "001_A_002_Unknown.wav", "001_A_003_Unknown.dvf", "001_A_003_Unknown.wav"])
             with open(os.path.join(outdir, "001_A_003_Unknown.dvf"), "rb") as f:
                 self.assertEqual(f.read(), sp_dvf())
+            with wave.open(os.path.join(outdir, "001_A_003_Unknown.wav")) as w:
+                self.assertEqual((w.getframerate(), w.getnchannels()), (16000, 1))
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(self.calls), [("sony_lpec", dvf.CODEC_SP), ("sony_lpec", dvf.CODEC_LP),
+                                              ("sony_lpec_st", dvf.CODEC_ST)])
+
+    def test_sp_is_saved_without_a_wav_when_its_tables_are_missing(self):
+        with tempfile.TemporaryDirectory() as d:
+            code, out = self.run_cli(d, "--folder", "A", "--wav", sp_tables=False)
+            outdir = os.path.join(d, "A")
+            self.assertEqual(sorted(os.listdir(outdir)),
+                             ["001_A_001_Unknown.dvf", "001_A_001_Unknown.wav", "001_A_002_Unknown.dvf",
+                              "001_A_002_Unknown.wav", "001_A_003_Unknown.dvf"])
         self.assertEqual(code, 0)
         self.assertEqual(sorted(self.calls), [("sony_lpec", dvf.CODEC_LP), ("sony_lpec_st", dvf.CODEC_ST)])
-        self.assertIn(f"saved 001_A_003_Unknown.dvf  (8 s audio, ", out)
-        self.assertIn(f"; no WAV: {SP}", out)
+        self.assertIn("saved 001_A_003_Unknown.dvf  (8 s audio, ", out)
+        self.assertIn(f"; no WAV: {NO_SP}", out)
 
 
 if __name__ == "__main__":
