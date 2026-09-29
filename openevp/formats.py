@@ -13,9 +13,14 @@ A Format describes one native file type:
   (never decodes); None when unknown.
 - ``max_bytes``: files larger than this are not treated as recordings of this
   format (None: no limit).
-- ``noun``: one file of the format in a sentence ("an ICD-ST25 recording"),
-  e.g. in "x.dvf is too large to be an ICD-ST25 recording."; "" means
-  "a <label> recording".
+- ``noun``: one file of the format in a sentence ("a Sony ICD-ST
+  recording"), e.g. in "x.dvf is too large to be a Sony ICD-ST recording.";
+  "" means "a <label> recording".
+- ``header_problem(header) -> str | None``: optional. Why this particular
+  file cannot be decoded (yet), judged from its first HEADER_BYTES bytes
+  only, or None. Not the file's fault, like DecoderUnavailable: such a file
+  is listed and saved but not played, marked or fingerprinted, and nothing
+  about it is cached. file_problem(path) and data_problem(data) apply it.
 - ``decoder``: None when OpenEVP cannot turn the format into audio (such
   files are still listed, saved and backed up, but not played, marked or
   fingerprinted). Otherwise an object with:
@@ -29,9 +34,13 @@ A Format describes one native file type:
     never cache it as a damaged file), DecodeError when the data is not a
     valid recording. MemoryError and OSError pass through unchanged.
 
-The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25,
-decoded by the Sony LPEC decoder through st25.audio). Tests add their own
-formats with register()/unregister().
+decoder_problem(fmt) is why a format cannot be decoded now at all.
+
+The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25
+and ICD-ST10). A .dvf is decoded by its codec byte: LPEC LP (ICD-ST25) by the
+Sony LPEC decoder through st25.audio; LPEC ST (ICD-ST10) cannot be played yet
+(header_problem says so, and to_wav raises DecoderUnavailable). Tests add
+their own formats with register()/unregister().
 """
 import io
 import re
@@ -57,6 +66,7 @@ class DecoderUnavailable(Exception):
 
 
 _EXT = re.compile(r"\.[a-z0-9_-]+")
+HEADER_BYTES = 512                  # what header_problem() is given of a file
 
 
 @dataclass(frozen=True, eq=False)
@@ -68,14 +78,43 @@ class Format:
     decoder: object = None
     max_bytes: Optional[int] = None
     noun: str = ""
+    header_problem: Optional[Callable[[bytes], Optional[str]]] = None
 
     def __post_init__(self):
         if not isinstance(self.ext, str) or not _EXT.fullmatch(self.ext):
             raise ValueError(f"a format extension is a lowercase '.name', not {self.ext!r}")
 
     def a_recording(self):
-        """The noun for one file of this format ("an ICD-ST25 recording")."""
+        """The noun for one file of this format ("a Sony ICD-ST recording")."""
         return self.noun or f"a {self.label} recording"
+
+    def data_problem(self, data):
+        """Why this file's bytes (its header is enough) cannot be decoded, or None."""
+        if self.header_problem is None:
+            return None
+        return self.header_problem(bytes(data[:HEADER_BYTES]))
+
+    def file_problem(self, path):
+        """data_problem() for a file on disk, reading only its header. None when
+        the header says nothing against it, or it cannot be read (the decode
+        reports that as it always has)."""
+        if self.header_problem is None:
+            return None
+        try:
+            with open(path, "rb") as f:
+                header = f.read(HEADER_BYTES)
+        except OSError:
+            return None
+        return self.header_problem(header)
+
+
+def decoder_problem(fmt):
+    """Why fmt cannot be decoded now (a phrase), or None when it can."""
+    if fmt.decoder is None:
+        return f"OpenEVP cannot convert {fmt.label} ({fmt.ext}) files to WAV"
+    if not fmt.decoder.available():
+        return fmt.decoder.reason() or "the WAV decoder is not available"
+    return None
 
 
 # ---- WAV (built in) -----------------------------------------------------------
@@ -114,12 +153,20 @@ WAV = Format(ext=".wav", label="WAV", decoder=_PcmPassthrough(),
              same=lambda existing, new: existing == new, seconds=_wav_seconds)
 
 
-# ---- Sony ICD-ST25 .dvf -------------------------------------------------------
-LP_BYTES_PER_SECOND = 750           # ST25 LP audio
+# ---- Sony ICD-ST .dvf ---------------------------------------------------------
+LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # ST25 LP audio
+ST10_NOT_YET = "LPEC ST (ICD-ST10) audio can't be played yet"
+
+
+def _dvf_problem(header):
+    """A .dvf's header_problem: an ICD-ST10 recording (LPEC ST) has no decoder yet."""
+    return ST10_NOT_YET if _dvf.codec(header) == _dvf.CODEC_ST else None
 
 
 class _SonyLpec:
-    """st25.audio (the Sony LPEC decoder) behind the Format decoder contract."""
+    """st25.audio (the Sony LPEC decoder) behind the Format decoder contract,
+    for LPEC LP files; an LPEC ST file raises DecoderUnavailable (not the
+    file's fault: it is a valid recording OpenEVP cannot play yet)."""
 
     def available(self):
         return _st25_audio.available()
@@ -131,6 +178,9 @@ class _SonyLpec:
         return _st25_audio.status() if _st25_audio.available() else None
 
     def to_wav(self, data, should_stop=None):
+        problem = _dvf_problem(data[:HEADER_BYTES])
+        if problem:
+            raise DecoderUnavailable(problem)
         try:
             return _st25_audio.dvf_to_wav(data, should_stop=should_stop)
         except _st25_audio.Cancelled as e:
@@ -151,13 +201,14 @@ def _dvf_seconds(path):
         return None
     if len(header) < 468:
         return None
-    return round(struct.unpack(">I", header[464:468])[0] / LP_BYTES_PER_SECOND, 1)
+    mode = _dvf.MODE_ST if _dvf.mode_of(header) == _dvf.MODE_ST else _dvf.MODE_LP
+    return round(_dvf.seconds(struct.unpack(">I", header[464:468])[0], mode), 1)
 
 
 DVF = Format(ext=".dvf", label="Sony original", decoder=_SonyLpec(), same=_dvf.same_audio,
              seconds=_dvf_seconds,
-             max_bytes=512 << 20,       # far beyond any ICD-ST25 recording (~200 hours of LP audio)
-             noun="an ICD-ST25 recording")
+             max_bytes=512 << 20,       # far beyond any ICD-ST recording (~200 hours of LP audio)
+             noun="a Sony ICD-ST recording", header_problem=_dvf_problem)
 
 
 # ---- the registry -------------------------------------------------------------

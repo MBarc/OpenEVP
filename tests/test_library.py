@@ -618,9 +618,9 @@ class LibraryTests(unittest.TestCase):
             again = api.list_library()
         self.assertEqual(fake.calls, 0)
         self.assertEqual(self.events.rows(r["scan_id"])[r["files"][0]["id"]]["error"],
-                         "huge.dvf is too large to be an ICD-ST25 recording.")
+                         "huge.dvf is too large to be a Sony ICD-ST recording.")
         self.assertEqual((again["indexing"], again["files"][0]["error"]),
-                         (False, "huge.dvf is too large to be an ICD-ST25 recording."))
+                         (False, "huge.dvf is too large to be a Sony ICD-ST recording."))
 
     def test_decoder_unavailable_or_out_of_memory_is_not_remembered(self):
         self.write("x.dvf", dvf_bytes())

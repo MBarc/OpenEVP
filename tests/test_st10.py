@@ -8,10 +8,13 @@ make_st_raw reproduces the real wire layout: block headers, frame offsets,
 import os
 import struct
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, ST_FRAME, FakeRecorderDevice, make_raw, make_st_frames, make_st_raw, make_table  # noqa: E402
+from openevp import formats  # noqa: E402
+from openevp.decoders.sony_lpec import decoder as lp_decoder  # noqa: E402
 from st25 import dvf  # noqa: E402
 from st25.folder import parse  # noqa: E402
 from st25.protocol import Recorder, RecorderError  # noqa: E402
@@ -151,6 +154,54 @@ class St10DvfTests(unittest.TestCase):
     def test_codec_of_short_or_foreign_data(self):
         self.assertIsNone(dvf.codec(b"MS_VOICE"))
         self.assertIsNone(dvf.mode_of(b"x" * 600))
+
+
+def st10_dvf(frames=FRAMES):
+    return dvf.build(make_st_raw(frames), UNDATED, "", mode=dvf.MODE_ST)
+
+
+class St10FormatTests(unittest.TestCase):
+    """openevp.formats and the LP decoder with an ICD-ST10 .dvf: listed and
+    saved, never decoded as LP; "can't be played yet" is not the file's fault."""
+
+    def write(self, data):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        path = os.path.join(d.name, "x.dvf")
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    def test_the_lp_decoder_refuses_it(self):
+        with self.assertRaises(dvf.FormatError) as e:
+            lp_decoder.dvf_to_wav(st10_dvf())
+        self.assertIn("0x24", str(e.exception))
+
+    def test_to_wav_says_not_yet_without_blaming_the_file(self):
+        with self.assertRaises(formats.DecoderUnavailable) as e:
+            formats.DVF.decoder.to_wav(st10_dvf())
+        self.assertEqual(str(e.exception), formats.ST10_NOT_YET)
+        self.assertNotIsInstance(e.exception, formats.DecodeError)
+
+    def test_problem_from_the_header_only(self):
+        f = st10_dvf()
+        self.assertEqual(formats.DVF.data_problem(f[:512]), formats.ST10_NOT_YET)
+        self.assertEqual(formats.DVF.file_problem(self.write(f[:600])), formats.ST10_NOT_YET)
+        lp = dvf.build(make_raw(3000, 1), DATE, "X")
+        self.assertIsNone(formats.DVF.data_problem(lp))
+        self.assertIsNone(formats.DVF.file_problem(self.write(lp)))
+        self.assertIsNone(formats.DVF.file_problem(self.write(b"junk")))
+        self.assertIsNone(formats.DVF.file_problem(os.path.join(tempfile.gettempdir(), "no such file.dvf")))
+        self.assertIsNone(formats.WAV.file_problem(self.write(f)))
+
+    def test_seconds_from_the_header(self):
+        self.assertEqual(formats.DVF.seconds(self.write(st10_dvf())), round(st_seconds(len(FRAMES)), 1))
+        lp = dvf.build(make_raw(30010, 1), DATE, "X")
+        self.assertEqual(formats.DVF.seconds(self.write(lp)), round((30010 - 300) / 750, 1))
+
+    def test_same(self):
+        self.assertTrue(formats.DVF.same(st10_dvf(), st10_dvf()))
+        self.assertFalse(formats.DVF.same(st10_dvf(), st10_dvf(make_st_frames(range(2, 40)))))
 
 
 def session(folders, voice, identify="ICD-ST10"):

@@ -285,9 +285,10 @@ def dvf_to_wav(dvf_bytes: bytes, tables=None,
                should_stop: Optional[Callable[[], bool]] = None) -> bytearray:
     """Decode a Sony ICD-ST25 "LP" .dvf recording to a WAV file.
 
-    Validates the file first (st25.dvf.validate), so a non-LP or damaged
-    file raises st25.dvf.FormatError with a clear reason instead of decoding
-    garbage. The result is the canonical 44-byte header (RIFF, a 16-byte
+    Validates the file first (st25.dvf.validate) and checks its codec byte
+    is LPEC LP (0x2c, 6000 bit/s), so a damaged file or another codec (an
+    ICD-ST10's LPEC ST) raises st25.dvf.FormatError with a clear reason
+    instead of decoding garbage. The result is the canonical 44-byte header (RIFF, a 16-byte
     'fmt ' chunk: PCM, mono, 8000 Hz, 16-bit, then 'data') followed by the
     PCM, nothing else -- exactly what Digital Voice Editor writes. It is one bytearray: the PCM is decoded straight into it
     after room for the header, so a long recording's audio is never copied.
@@ -296,6 +297,10 @@ def dvf_to_wav(dvf_bytes: bytes, tables=None,
     reason = dvf_module.validate(dvf_bytes)
     if reason is not None:
         raise dvf_module.FormatError(reason)
+    codec = dvf_module.codec(dvf_bytes)
+    if codec != dvf_module.CODEC_LP:           # e.g. an ICD-ST10's LPEC ST: never decoded as LP
+        raise dvf_module.FormatError(f"this is not an LPEC LP recording (codec 0x{codec:02x}); "
+                                     "the LP decoder cannot convert it")
     wav = _decode(dvf_module.payload(dvf_bytes), tables, None, should_stop, WAV_HEADER_BYTES)
     n = len(wav) - WAV_HEADER_BYTES
     _WAV_HEADER.pack_into(wav, 0, b"RIFF", 36 + n, b"WAVE", b"fmt ", 16,
