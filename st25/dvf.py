@@ -63,7 +63,6 @@ _CODECS = {MODE_LP: CODEC_LP, MODE_ST: CODEC_ST}
 
 LP_BYTES_PER_SECOND = 750
 ST_FRAME, ST_SAMPLES, ST_RATE = 283, 2048, 44100
-ST_NOT_PLAYABLE = "LPEC ST (ICD-ST10) audio can't be played yet"   # no LPEC ST decoder yet
 
 # DVE 2.31 header for ST-series LPEC (LP) recordings with the per-message fields zeroed.
 _TEMPLATE = bytes.fromhex(
@@ -112,13 +111,18 @@ def mode_of(dvf_bytes):
 
 def seconds(payload_bytes, mode):
     """The length of ``payload_bytes`` of audio (the blocks' valid bytes minus
-    their headers) in ``mode``, or None for an unknown mode. For LPEC ST it
-    counts every frame, the counter-0 segment frames too (a slight
-    overstatement)."""
+    their headers) in ``mode``, or None for an unknown mode.
+
+    For LPEC ST this is an estimate from the frame count alone (the folder
+    table and the .dvf header give no more): every whole frame but the first,
+    which the decoder swallows (Sony's start-up delay). That is exact for a
+    recording made in one go; each restart inside a recording (a counter-0
+    frame, then another swallowed frame) makes it about 0.09 s long. The
+    decoded WAV's length is exact."""
     if mode == MODE_LP:
         return payload_bytes / float(LP_BYTES_PER_SECOND)
     if mode == MODE_ST:
-        return payload_bytes / ST_FRAME * ST_SAMPLES / ST_RATE
+        return max(0, payload_bytes // ST_FRAME - 1) * ST_SAMPLES / ST_RATE
     return None
 
 

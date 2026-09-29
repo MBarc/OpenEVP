@@ -1,19 +1,26 @@
 """The Sony ICD-ST10 in the st25 package: its folder tables (message-list mode
-byte 0x6c), its LPEC ST .dvf files and downloads.
+byte 0x6c), its LPEC ST .dvf files and downloads, and the .dvf format
+decoding them (openevp.formats: codec 0x24 -> the LPEC ST decoder).
 
 Synthetic data only, shaped like the real ST10's (tests/fixtures.py
 make_st_raw reproduces the real wire layout: block headers, frame offsets,
-283-byte frames with 16-bit counters, counter-0 segment frames).
+283-byte frames with 16-bit counters, counter-0 segment frames;
+st_audio_frames are generated LPEC ST frames that decode).
 """
+import io
 import os
 import struct
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, ST_FRAME, FakeRecorderDevice, make_raw, make_st_frames, make_st_raw, make_table  # noqa: E402
-from openevp import formats  # noqa: E402
+import release_gate  # noqa: E402
+from fixtures import (DATE, ST_FRAME, FakeRecorderDevice, make_raw, make_st_frames, make_st_raw, make_table,  # noqa: E402
+                      st_audio_frames, st_audio_wav)
+from openevp import formats, wavinfo  # noqa: E402
+from openevp.decoders import sony_lpec_st  # noqa: E402
 from openevp.decoders.sony_lpec import decoder as lp_decoder  # noqa: E402
 from st25 import dvf  # noqa: E402
 from st25.folder import parse  # noqa: E402
@@ -28,7 +35,29 @@ LENGTH = len(FRAMES) + 10 * -(-len(FRAMES) // 1014)       # valid bytes incl. bl
 
 
 def st_seconds(payload_bytes):
-    return payload_bytes / ST_FRAME * 2048 / 44100
+    """The frame-based estimate: every whole frame but the first (which the decoder swallows)."""
+    return (payload_bytes // ST_FRAME - 1) * 2048 / 44100
+
+
+# What the app says for an ICD-ST10 recording when this build has no LPEC ST decoder.
+ST_MISSING = "LPEC ST (ICD-ST10) playback is not included in this build"
+
+
+def without_st_decoder():
+    """A build without the LPEC ST decoder (the LP one is still there)."""
+    return mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec_st": None})
+
+
+def _st_tables():
+    try:
+        sony_lpec_st.check()
+        return True
+    except sony_lpec_st.TablesMissing:
+        return False
+
+
+NO_ST_TABLES = ("openevp/decoders/sony_lpec_st/data/lpec_st_tables.json not found; "
+                "run tools/import_lpec_st_tables.py")
 
 
 class St10FolderTests(unittest.TestCase):
@@ -161,8 +190,9 @@ def st10_dvf(frames=FRAMES):
 
 
 class St10FormatTests(unittest.TestCase):
-    """openevp.formats and the LP decoder with an ICD-ST10 .dvf: listed and
-    saved, never decoded as LP; "can't be played yet" is not the file's fault."""
+    """openevp.formats and the LP decoder with an ICD-ST10 .dvf: decoded by the
+    LPEC ST decoder, never as LP; a missing LPEC ST decoder is not the file's
+    fault (DecoderUnavailable with a plain reason, from the header alone)."""
 
     def write(self, data):
         d = tempfile.TemporaryDirectory()
@@ -177,22 +207,85 @@ class St10FormatTests(unittest.TestCase):
             lp_decoder.dvf_to_wav(st10_dvf())
         self.assertIn("0x24", str(e.exception))
 
-    def test_to_wav_says_not_yet_without_blaming_the_file(self):
-        with self.assertRaises(formats.DecoderUnavailable) as e:
-            formats.DVF.decoder.to_wav(st10_dvf())
-        self.assertEqual(str(e.exception), formats.ST10_NOT_YET)
-        self.assertNotIsInstance(e.exception, formats.DecodeError)
+    @release_gate.require(_st_tables(), NO_ST_TABLES)
+    def test_to_wav_decodes_it_as_sony_does(self):
+        f = st10_dvf(st_audio_frames())
+        want = st_audio_wav()
+        self.assertEqual(bytes(formats.DVF.decoder.to_wav(f)), want)
+        buf = io.BytesIO()
+        self.assertEqual(formats.write_wav(formats.DVF, f, buf), len(want))
+        self.assertEqual(buf.getvalue(), want)
+        fp, seconds = formats.analyze(formats.DVF, f)
+        self.assertEqual(fp, wavinfo.wav_fingerprint(io.BytesIO(want)))
+        self.assertAlmostEqual(seconds, 37 * 2048 / 44100)
+        self.assertEqual(formats.fingerprint(formats.DVF, f), fp)
+        self.assertIsNone(formats.DVF.data_problem(f))
+
+    @release_gate.require(_st_tables(), NO_ST_TABLES)
+    def test_a_damaged_st10_file_is_the_files_fault(self):
+        f = bytearray(st10_dvf(st_audio_frames()))
+        f[1024 + 10:1024 + 12] = b"\x00\x09"      # the first frame's counter: 9 after nothing, then 3
+        for call in (lambda: formats.DVF.decoder.to_wav(bytes(f)),
+                     lambda: formats.write_wav(formats.DVF, bytes(f), io.BytesIO()),
+                     lambda: formats.analyze(formats.DVF, bytes(f))):
+            with self.assertRaisesRegex(formats.DecodeError, "counter"):
+                call()
+
+    @release_gate.require(_st_tables(), NO_ST_TABLES)
+    def test_stopping_a_decode(self):
+        f = st10_dvf(st_audio_frames())
+        with self.assertRaises(formats.Cancelled):
+            formats.DVF.decoder.to_wav(f, should_stop=lambda: True)
+        with self.assertRaises(formats.Cancelled):
+            formats.analyze(formats.DVF, f, should_stop=lambda: True)
+
+    def test_analyze_and_write_wav_without_a_streaming_decoder(self):
+        """A decoder with only to_wav (the WAV passthrough, the LP decoder): the
+        same fingerprint and length, read in place from the WAV it made."""
+        wav = st_audio_wav()
+        self.assertEqual(formats.analyze(formats.WAV, wav), (wavinfo.wav_fingerprint(io.BytesIO(wav)),
+                                                             37 * 2048 / 44100))
+        buf = io.BytesIO()
+        self.assertEqual(formats.write_wav(formats.WAV, wav, buf), len(wav))
+        self.assertEqual(buf.getvalue(), wav)
+
+    def test_without_its_decoder_it_is_not_the_files_fault(self):
+        with without_st_decoder():
+            for call in (lambda: formats.DVF.decoder.to_wav(st10_dvf()),
+                         lambda: formats.write_wav(formats.DVF, st10_dvf(), io.BytesIO()),
+                         lambda: formats.analyze(formats.DVF, st10_dvf())):
+                with self.assertRaises(formats.DecoderUnavailable) as e:
+                    call()
+                self.assertEqual(str(e.exception), ST_MISSING)
+                self.assertNotIsInstance(e.exception, formats.DecodeError)
+            self.assertTrue(formats.DVF.decoder.available())       # the format (LP) still converts
+            self.assertEqual(formats.codec_problem(formats.CODEC_ST), ST_MISSING)
+            self.assertIsNone(formats.codec_problem(formats.CODEC_LP))
+
+    def test_missing_tables_are_said_plainly(self):
+        missing = os.path.join(tempfile.gettempdir(), "no-such-dir", "lpec_st_tables.json")
+        with mock.patch.object(sony_lpec_st, "check", lambda: sony_lpec_st.tables.load(missing)):
+            self.assertEqual(formats.codec_problem(formats.CODEC_ST),
+                             "the LPEC ST decoder could not be loaded: "
+                             "this build does not include the LPEC ST table data")
+            with self.assertRaises(formats.DecoderUnavailable):
+                formats.DVF.decoder.to_wav(st10_dvf())
 
     def test_problem_from_the_header_only(self):
         f = st10_dvf()
-        self.assertEqual(formats.DVF.data_problem(f[:512]), formats.ST10_NOT_YET)
-        self.assertEqual(formats.DVF.file_problem(self.write(f[:600])), formats.ST10_NOT_YET)
+        with without_st_decoder():
+            self.assertEqual(formats.DVF.data_problem(f[:512]), ST_MISSING)
+            self.assertEqual(formats.DVF.file_problem(self.write(f[:600])), ST_MISSING)
+        if _st_tables():
+            self.assertIsNone(formats.DVF.data_problem(f[:512]))
+            self.assertIsNone(formats.DVF.file_problem(self.write(f[:600])))
         lp = dvf.build(make_raw(3000, 1), DATE, "X")
         self.assertIsNone(formats.DVF.data_problem(lp))
         self.assertIsNone(formats.DVF.file_problem(self.write(lp)))
         self.assertIsNone(formats.DVF.file_problem(self.write(b"junk")))
         self.assertIsNone(formats.DVF.file_problem(os.path.join(tempfile.gettempdir(), "no such file.dvf")))
-        self.assertIsNone(formats.WAV.file_problem(self.write(f)))
+        with without_st_decoder():
+            self.assertIsNone(formats.WAV.file_problem(self.write(f)))
 
     def test_seconds_from_the_header(self):
         self.assertEqual(formats.DVF.seconds(self.write(st10_dvf())), round(st_seconds(len(FRAMES)), 1))

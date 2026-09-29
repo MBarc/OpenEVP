@@ -1,6 +1,7 @@
 """The Sony ICD-ST10 as a recorder model: found and opened through the ICD-ST25
 model (same USB id and protocol), shown as an ST10 once its session says so,
-recordings listed and downloaded as LPEC ST .dvf files, not playable yet."""
+recordings listed and downloaded as LPEC ST .dvf files and played through the
+LPEC ST decoder (not playable, with the reason, in a build without it)."""
 import os
 import sys
 import unittest
@@ -8,7 +9,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-from fixtures import DATE, FakeRecorderDevice, make_st_frames, make_st_raw  # noqa: E402
+from fixtures import DATE, ST_FRAME, FakeRecorderDevice, make_st_raw, st_audio_frames  # noqa: E402
 from recorder_contract import RecorderContract  # noqa: E402
 from app.devices import READY, DeviceManager  # noqa: E402
 from openevp import formats, recorders  # noqa: E402
@@ -20,7 +21,20 @@ from st25.session import RecorderSession  # noqa: E402
 
 PORT_ID = "1-4@7"
 UNDATED = b"\xff" * 8
-FRAMES = [make_st_frames(range(2, 60)), make_st_frames(list(range(2, 20)) + list(range(0, 30)))]
+# Two recordings of generated LPEC ST frames that decode (not recorded audio):
+# the second is the first 20 frames of the first (so other audio).
+FRAMES = [st_audio_frames(), st_audio_frames()[:20 * ST_FRAME]]
+ST_MISSING = "LPEC ST (ICD-ST10) playback is not included in this build"
+
+
+def without_st_decoder():
+    """A build without the LPEC ST decoder (the LP one is still there)."""
+    return mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec_st": None})
+
+
+def st_estimate(frames):
+    """The listed length: every whole frame but the first (st25.dvf.seconds)."""
+    return round((len(frames) // ST_FRAME - 1) * 2048 / 44100, 1)
 
 
 def st10_folders():
@@ -75,7 +89,10 @@ class ModelTests(unittest.TestCase):
         self.assertIn(m, recorders.supported())
         self.assertEqual(m.discover(), [])
         self.assertIs(recorders.find(VID, PID), recorders.get("sony-icd-st25"))
-        self.assertEqual(m.wav_problem(), "LPEC ST (ICD-ST10) audio can't be played yet")
+        self.assertEqual(m.wav_problem(), formats.codec_problem(formats.CODEC_ST))
+        with without_st_decoder():
+            self.assertEqual(m.wav_problem(), ST_MISSING)
+            self.assertIsNone(recorders.get("sony-icd-st25").wav_problem())     # the LP decoder is there
 
     def test_the_st25_keeps_its_wav_problem(self):
         st25 = recorders.get("sony-icd-st25")
@@ -88,7 +105,7 @@ class ModelTests(unittest.TestCase):
         rows = s.recordings("A")
         self.assertEqual([(r["number"], r["recorded_label"], r["owner"], r["problem"]) for r in rows],
                          [(1, "undated", "", ""), (2, "undated", "", "")])
-        self.assertEqual(rows[0]["seconds"], round(len(FRAMES[0]) / 283 * 2048 / 44100, 1))
+        self.assertEqual(rows[0]["seconds"], st_estimate(FRAMES[0]))
         dl = s.download("A", 1)
         self.assertEqual(dl.filename, "001_A_001_Unknown.dvf")
         self.assertIsNone(dvf.validate(dl.data))

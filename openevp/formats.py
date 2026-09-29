@@ -33,14 +33,24 @@ A Format describes one native file type:
     DecoderUnavailable when available() is False (not the file's fault:
     never cache it as a damaged file), DecodeError when the data is not a
     valid recording. MemoryError and OSError pass through unchanged.
+  - optional ``write_wav(data, f, should_stop=None) -> int``: to_wav written
+    into a seekable binary file as it decodes (a long recording is never
+    held in memory); the same exceptions. Returns the WAV's size.
+  - optional ``pcm(data, should_stop=None)``: (channels, sample width, rate,
+    PCM chunks) decoded as the chunks are consumed, or None when this data
+    cannot be streamed; for fingerprinting without a WAV in memory.
 
 decoder_problem(fmt) is why a format cannot be decoded now at all.
+write_wav(fmt, ...) and analyze(fmt, ...) use a decoder's streamed forms
+when it has them and fall back to to_wav.
 
 The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25
-and ICD-ST10). A .dvf is decoded by its codec byte: LPEC LP (ICD-ST25) by the
-Sony LPEC decoder through st25.audio; LPEC ST (ICD-ST10) cannot be played yet
-(header_problem says so, and to_wav raises DecoderUnavailable). Tests add
-their own formats with register()/unregister().
+and ICD-ST10). A .dvf is decoded by its codec byte, through st25.audio:
+LPEC LP (ICD-ST25) by the Sony LPEC decoder, LPEC ST (ICD-ST10) by the
+Sony LPEC ST decoder. The format-level availability is the LP decoder's;
+header_problem says when an LPEC ST file's own decoder is unavailable (then
+to_wav raises DecoderUnavailable). Tests add their own formats with
+register()/unregister().
 """
 import io
 import re
@@ -49,6 +59,7 @@ import wave
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+from openevp import wavinfo as _wavinfo
 from st25 import audio as _st25_audio
 from st25 import dvf as _dvf
 
@@ -155,18 +166,26 @@ WAV = Format(ext=".wav", label="WAV", decoder=_PcmPassthrough(),
 
 # ---- Sony ICD-ST .dvf ---------------------------------------------------------
 LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # ST25 LP audio
-ST10_NOT_YET = _dvf.ST_NOT_PLAYABLE
+CODEC_LP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_ST
+
+
+def codec_problem(codec):
+    """Why .dvf recordings of ``codec`` (CODEC_LP or CODEC_ST) cannot be
+    decoded now (a phrase, e.g. the LPEC ST tables are missing), or None."""
+    return None if _st25_audio.available(codec) else _st25_audio.status(codec)
 
 
 def _dvf_problem(header):
-    """A .dvf's header_problem: an ICD-ST10 recording (LPEC ST) has no decoder yet."""
-    return ST10_NOT_YET if _dvf.codec(header) == _dvf.CODEC_ST else None
+    """A .dvf's header_problem: an ICD-ST10 recording (LPEC ST) whose decoder
+    cannot run now. (An LP recording's problem is the format's own.)"""
+    return codec_problem(CODEC_ST) if _dvf.codec(header) == CODEC_ST else None
 
 
 class _SonyLpec:
-    """st25.audio (the Sony LPEC decoder) behind the Format decoder contract,
-    for LPEC LP files; an LPEC ST file raises DecoderUnavailable (not the
-    file's fault: it is a valid recording OpenEVP cannot play yet)."""
+    """st25.audio (the Sony LPEC and LPEC ST decoders) behind the Format
+    decoder contract. The format-level availability is the LP decoder's; an
+    LPEC ST file whose decoder is unavailable raises DecoderUnavailable (not
+    the file's fault)."""
 
     def available(self):
         return _st25_audio.available()
@@ -177,20 +196,46 @@ class _SonyLpec:
     def warning(self):
         return _st25_audio.status() if _st25_audio.available() else None
 
-    def to_wav(self, data, should_stop=None):
+    def _run(self, data, call):
         problem = _dvf_problem(data[:HEADER_BYTES])
         if problem:
             raise DecoderUnavailable(problem)
-        try:
-            return _st25_audio.dvf_to_wav(data, should_stop=should_stop)
-        except _st25_audio.Cancelled as e:
-            raise Cancelled(str(e)) from e
-        except _st25_audio.DecoderUnavailable as e:
-            raise DecoderUnavailable(str(e)) from e
-        except (MemoryError, OSError):     # not the file's fault; OSError may name a path
-            raise
-        except Exception as e:
-            raise DecodeError(str(e) or type(e).__name__) from e
+        return _translated(call)
+
+    def to_wav(self, data, should_stop=None):
+        return self._run(data, lambda: _st25_audio.dvf_to_wav(data, should_stop=should_stop))
+
+    def write_wav(self, data, f, should_stop=None):
+        return self._run(data, lambda: _st25_audio.dvf_write_wav(data, f, should_stop=should_stop))
+
+    def pcm(self, data, should_stop=None):
+        stream = self._run(data, lambda: _st25_audio.dvf_pcm(data, should_stop=should_stop))
+        if stream is None:
+            return None
+        channels, width, rate, chunks = stream
+
+        def translated():
+            it = iter(chunks)
+            while True:
+                chunk = _translated(lambda: next(it, None))
+                if chunk is None:
+                    return
+                yield chunk
+        return channels, width, rate, translated()
+
+
+def _translated(call):
+    """call(), with st25.audio's and the decoder's exceptions in this module's terms."""
+    try:
+        return call()
+    except _st25_audio.Cancelled as e:
+        raise Cancelled(str(e)) from e
+    except _st25_audio.DecoderUnavailable as e:
+        raise DecoderUnavailable(str(e)) from e
+    except (MemoryError, OSError):     # not the file's fault; OSError may name a path
+        raise
+    except Exception as e:
+        raise DecodeError(str(e) or type(e).__name__) from e
 
 
 def _dvf_seconds(path):
@@ -235,3 +280,57 @@ def register(fmt):
 
 def unregister(ext):
     _registry.pop(ext, None)
+
+
+# ---- decoding without holding a whole WAV -------------------------------------
+def _decoder_of(fmt):
+    if fmt.decoder is None:
+        raise DecoderUnavailable(f"OpenEVP cannot convert {fmt.label} ({fmt.ext}) files to WAV")
+    return fmt.decoder
+
+
+def write_wav(fmt, data, f, should_stop=None):
+    """Decode ``data`` (a file of ``fmt``) into ``f``, a seekable binary file
+    open for writing. Streams when the decoder can (write_wav), so a long
+    recording is never held in memory as a WAV; otherwise writes to_wav's
+    result. Returns the WAV's size. Exceptions as Format.decoder.to_wav."""
+    dec = _decoder_of(fmt)
+    write = getattr(dec, "write_wav", None)
+    if write is not None:
+        return write(data, f, should_stop=should_stop)
+    wav = dec.to_wav(data, should_stop=should_stop)
+    f.write(wav)
+    return len(wav)
+
+
+def analyze(fmt, data, should_stop=None):
+    """(audio fingerprint, exact length in seconds or None) of ``data``
+    decoded, the same values openevp.wavinfo.wav_fingerprint and the WAV's
+    header give for the WAV to_wav would make. A decoder that can stream
+    (pcm) is hashed as it decodes, with no WAV in memory. Exceptions as
+    Format.decoder.to_wav, plus ValueError for a WAV that is not PCM."""
+    dec = _decoder_of(fmt)
+    stream = getattr(dec, "pcm", None)
+    stream = stream(data, should_stop=should_stop) if stream is not None else None
+    if stream is not None:
+        channels, width, rate, chunks = stream
+        total = 0
+
+        def counted():
+            nonlocal total
+            for c in chunks:
+                total += len(c)
+                yield c
+        fp = _wavinfo.fingerprint_stream(channels, width, rate, counted())
+        frames = total // (channels * width)
+        return fp, (frames / rate if rate else None)
+    wav = dec.to_wav(data, should_stop=should_stop)
+    with _wavinfo.buffer_file(wav) as f:
+        fp = _wavinfo.wav_fingerprint(f)
+    with _wavinfo.buffer_file(wav) as f, wave.open(f) as w:
+        return fp, (w.getnframes() / w.getframerate() if w.getframerate() else None)
+
+
+def fingerprint(fmt, data, should_stop=None):
+    """analyze()'s fingerprint alone."""
+    return analyze(fmt, data, should_stop)[0]

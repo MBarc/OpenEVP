@@ -72,6 +72,35 @@ def make_st_frames(counters):
     return bytes(out)
 
 
+ST_VECTOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vectors", "lpec_st", "all-features-40")
+
+
+def st_audio_frames():
+    """40 LPEC ST frames that decode: tests/vectors/lpec_st/all-features-40.bin
+    (generated to cover every feature of the codec, not recorded audio), its
+    last frame's counter set to 1 so that, like the recorder's, the stream
+    restarts at 0, 1 (a .dvf accepts no other). The counter is not codec data:
+    Sony's PCM for these frames is st_audio_pcm() (37 frames of 2048 stereo
+    samples: the first frame after each reset gives none)."""
+    with open(ST_VECTOR + ".bin", "rb") as f:
+        frames = bytearray(f.read())
+    frames[39 * ST_FRAME:39 * ST_FRAME + 2] = struct.pack(">H", 1)
+    return bytes(frames)
+
+
+def st_audio_pcm():
+    """Sony's PCM (interleaved int16, 44.1 kHz stereo) for st_audio_frames()."""
+    with open(ST_VECTOR + ".pcm", "rb") as f:
+        return f.read()
+
+
+def st_audio_wav():
+    """The WAV OpenEVP writes for st_audio_frames(): the canonical 44-byte header and Sony's PCM."""
+    pcm = st_audio_pcm()
+    return struct.pack("<4sI4s4sIHHIIHH4sI", b"RIFF", 36 + len(pcm), b"WAVE", b"fmt ", 16, 1, 2, 44100,
+                       176400, 4, 16, b"data", len(pcm)) + pcm
+
+
 def make_st_raw(frames, counter=0xFFFFFFFF):
     """Wire data for one ICD-ST10 message holding the frame stream ``frames``,
     1014 payload bytes per block as the recorder sends them. Block bytes 0..1
@@ -186,3 +215,15 @@ def st25_manager(ids, open_session, **kwargs):
                                                    where="on USB port " + i.split("@")[0]))
         return found, []
     return DeviceManager(discover, lambda model, device: ST25Session(open_session(device.locator)), **kwargs)
+
+
+def made_wav(make=None, write=None):
+    """The WAV bytes a fake AudioServer.prepare(key, make=..., write=...) is
+    handed: make() returns them; write(f) decodes into a file (the real
+    server's streamed form), here an in-memory one."""
+    if write is None:
+        return make()
+    import io
+    f = io.BytesIO()
+    write(f)
+    return f.getvalue()

@@ -14,13 +14,13 @@ Nothing on the recorder is changed or deleted. Every recording is downloaded
 skipped only if a file with identical audio is already there.
 """
 import argparse
-import io
 import os
 import sys
 import time
 import traceback
 import wave
 
+from openevp import wavinfo
 from openevp.paths import default_output, documents_dir, open_folder  # noqa: F401
 
 from . import __version__, audio, dvf
@@ -72,6 +72,7 @@ def run(args, progress=None):
     # tables.load() caches the parsed data in-process, so there's nothing to save
     # by re-checking inside the loop below.
     wav_ok = args.wav and audio.available()
+    st_ok = args.wav and audio.available(dvf.CODEC_ST)      # ICD-ST10 recordings (LPEC ST)
     if args.wav and not args.list and not wav_ok:
         print(f"Note: --wav requested but {audio.status()}; only .dvf files will be saved.")
     elif wav_ok and not args.list and audio.status():
@@ -136,10 +137,11 @@ def run(args, progress=None):
                 path, done = save_dvf(data, outdir, name)
                 wav_note = ""
                 wav_written = False
-                if wav_ok and dvf.codec(data) == dvf.CODEC_ST:
+                is_st = dvf.codec(data) == dvf.CODEC_ST
+                if args.wav and is_st and not st_ok:
                     if not done:
-                        wav_note = f"; no WAV: {dvf.ST_NOT_PLAYABLE}"
-                elif wav_ok:
+                        wav_note = f"; no WAV: {audio.status(dvf.CODEC_ST)}"
+                elif (st_ok if is_st else wav_ok):
                     try:
                         wav_path, wav_done = save_wav(audio.dvf_to_wav(data), outdir, name[:-4] + ".wav")
                         if not wav_done:
@@ -166,11 +168,15 @@ def run(args, progress=None):
     return 1 if problems else 0
 
 
-def _tables_hint():
-    """How to create the LPEC table data, when it is what is missing (a
-    developer hint kept out of the user-facing message)."""
+def _tables_hint(codec=None):
+    """How to create the table data of the decoder for ``codec`` (LPEC LP by
+    default, LPEC ST for CODEC_ST), when it is what is missing (a developer
+    hint kept out of the user-facing message)."""
     try:
-        from openevp.decoders.sony_lpec import tables
+        if codec == dvf.CODEC_ST:
+            from openevp.decoders.sony_lpec_st import tables
+        else:
+            from openevp.decoders.sony_lpec import tables
         tables.load()
     except Exception as e:
         return getattr(e, "hint", None)
@@ -179,8 +185,10 @@ def _tables_hint():
 
 def check_wav(path):
     """Decode a .dvf file to prove WAV conversion actually works on this
-    build (openevp.decoders.sony_lpec plus its bundled table data and DLL), without touching
-    the recorder. Does not save anything. Used to verify a build: e.g.
+    build (the decoder for its codec, openevp.decoders.sony_lpec for an
+    ICD-ST25 file or openevp.decoders.sony_lpec_st for an ICD-ST10 one, plus
+    its bundled table data and DLL), without touching the recorder. Does not
+    save anything. Used to verify a build: e.g.
     `openevp-st25.exe --check-wav some.dvf`."""
     print(f"OpenEVP {__version__} (Sony ICD-ST downloader)")
     try:
@@ -189,17 +197,15 @@ def check_wav(path):
     except OSError as e:
         print(f"Could not read {path}: {e}")
         return 1
-    if not audio.available():
-        print(f"WAV conversion is not available: {audio.status()}")
-        hint = _tables_hint()
+    codec = dvf.codec(data)
+    if not audio.available(codec):
+        print(f"WAV conversion is not available: {audio.status(codec)}")
+        hint = _tables_hint(codec)
         if hint:
             print(f"(Developers: {hint}.)")
         return 1
-    if audio.status():
-        print(f"Note: {audio.status()}.")            # slow mode
-    if dvf.codec(data) == dvf.CODEC_ST:
-        print(f"Could not decode {path}: {dvf.ST_NOT_PLAYABLE}.")
-        return 1
+    if audio.status(codec):
+        print(f"Note: {audio.status(codec)}.")       # slow mode
     try:
         wav = audio.dvf_to_wav(data)
     except Exception as e:
@@ -211,9 +217,9 @@ def check_wav(path):
 
 
 def _wav_seconds(wav):
-    """The length of a WAV from its header (the LP decoder's: 8000 Hz 16-bit mono)."""
+    """The length of a WAV from its header (the LP decoder's when unreadable: 8000 Hz 16-bit mono)."""
     try:
-        with wave.open(io.BytesIO(wav)) as w:
+        with wavinfo.buffer_file(wav) as f, wave.open(f) as w:
             return w.getnframes() / w.getframerate()
     except (wave.Error, EOFError, ZeroDivisionError):
         return max(0, len(wav) - 44) / 2 / 8000
@@ -222,12 +228,14 @@ def _wav_seconds(wav):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="st25-download", description=__doc__.splitlines()[0],
                                  epilog="WAV conversion is built in: --wav decodes each recording "
-                                 "with OpenEVP's own LPEC decoder.")
+                                 "with OpenEVP's own LPEC decoders (LPEC LP for the ICD-ST25, "
+                                 "LPEC ST for the ICD-ST10).")
     ap.add_argument("output", nargs="?", help="output folder (default: Documents\\OpenEVP)")
     ap.add_argument("--list", action="store_true", help="only list the recordings")
     ap.add_argument("--folder", choices=list(LETTERS), help="only this folder")
     ap.add_argument("--raw", action="store_true", help="also save the raw wire data (for debugging)")
-    ap.add_argument("--wav", action="store_true", help="also write a WAV file (8000 Hz, 16-bit mono) beside each .dvf; also fills in a "
+    ap.add_argument("--wav", action="store_true", help="also write a WAV file beside each .dvf (16-bit; 8000 Hz mono "
+                    "for the ICD-ST25, 44100 Hz stereo for the ICD-ST10); also fills in a "
                     "missing .wav beside a .dvf saved earlier")
     ap.add_argument("--open", action="store_true",
                     help="open the output folder when done (default when the .exe is double-clicked)")
