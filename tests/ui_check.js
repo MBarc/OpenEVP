@@ -129,6 +129,13 @@ const listing = {
                        { value: "wav", label: "WAV", available: true, reason: null }],
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                { number: 1, label: "A-001", recorded: "2029-05-23 19:54:04", seconds: 1.3, owner: "Casey", problem: null }] : [] })) },
+  // An ICD-ST10 (discovered as an ST25, relabelled once opened): its recordings download but can't be played yet.
+  "2-1@3": { ok: true, model: "Sony ICD-ST10", model_id: "sony-icd-st10", playable: false,
+             play_reason: "LPEC ST (ICD-ST10) audio can't be played yet",
+             formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
+                       { value: "wav", label: "WAV", available: false, reason: "LPEC ST (ICD-ST10) audio can't be played yet" }],
+             folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
+               { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null }] : [] })) },
 };
 const api = {
   capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
@@ -222,6 +229,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(JSON.stringify(items),               // (the page's objects: compared as JSON)
                      JSON.stringify([{ folder: "a:b|c", number: "rec:1" }, { folder: "a:b|c", number: 7 },
                                      { folder: "7", number: "7" }]));
+  assert.ok(!calls.some((c) => c[0] === "audio"));
+
+  // An ICD-ST10: its recordings can be selected and exported as .dvf, not played; the reason is said
+  // plainly (status line, row tooltips, the greyed-out WAV entry), never as an error.
+  vm.runInContext("S.exporting = false;", context);              // the stubbed export above never reports back
+  await context.openDevice("2-1@3");
+  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV (unavailable)"]);
+  assert.strictEqual(format.children[1].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(format.value, "dvf");
+  assert.ok(!$("device-table").classList.contains("playable"));
+  assert.strictEqual($("status").textContent, "LPEC ST (ICD-ST10) audio can't be played yet. Its recordings can still be saved.");
+  assert.strictEqual($("banner-text").textContent, "", "not an error");
+  const st10row = $("rows").children[0];
+  assert.deepStrictEqual(texts(st10row).slice(1), ["001", "undated", "0:20", ""]);
+  assert.ok(!st10row.onclick, "not playable: no click handler");
+  assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
   assert.ok(!calls.some((c) => c[0] === "audio"));
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });
@@ -570,5 +594,31 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual($("dest").textContent, "C:\\remembered", `staleFirst=${staleFirst}`);
   }
   api.default_destination = dests;
+
+  // An ICD-ST10 .dvf in the library: greyed out with its reason (not the ⚠ of a damaged file),
+  // and a click says why instead of asking the backend to play it.
+  const st10File = { ...libFile("r7", "001_A_001_Unknown.dvf", "root", null), type: "dvf", seconds: 20.1,
+                     error: "001_A_001_Unknown.dvf can't be played or marked: LPEC ST (ICD-ST10) audio can't be played yet.", unplayable: "LPEC ST (ICD-ST10) audio can't be played yet" };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 50, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: libFolders, files: [st10File, libFile("r8", "b.wav", "root", "fp8")] });
+  context.showLibrary();
+  await context.loadLibrary();
+  await settle();
+  const st10lib = recRow("r7");
+  assert.ok(st10lib.classList.contains("unplayable"));
+  assert.strictEqual(st10lib.title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.strictEqual(st10lib.cells[5].textContent, "—");
+  assert.strictEqual(st10lib.cells[5].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.ok(!recRow("r8").classList.contains("unplayable"));
+  ops.length = 0;
+  st10lib.onclick();
+  await settle();
+  assert.strictEqual($("banner-text").textContent, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  assert.deepStrictEqual(ops, [], "never sent to the backend to play");
+  rightClick(st10lib.cells[1]);
+  assert.deepStrictEqual(menu.children[0].textContent, "Play");
+  assert.ok(menu.children[0].disabled);
+  assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) audio can't be played yet.");
+  press("Escape");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

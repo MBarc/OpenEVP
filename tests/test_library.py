@@ -178,7 +178,7 @@ class LibraryTests(unittest.TestCase):
                                ("Old Mill", "y.wav", "wav"), ("Old Mill", "x.dvf", "dvf")])
         for f in r["files"]:
             self.assertEqual(set(f), {"id", "name", "investigation", "type", "seconds", "modified", "fp",
-                                      "marks", "reviewed", "notes", "error", "folder_id"})
+                                      "marks", "reviewed", "notes", "error", "unplayable", "folder_id"})
             self.assertEqual((f["fp"], f["marks"], f["reviewed"], f["notes"], f["error"]),
                              (None, {"A": 0, "B": 0, "C": 0}, False, "", None))
             self.assertRegex(f["id"], "^[0-9a-f]{16}$")
@@ -292,7 +292,7 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(rows[names["y.wav"]["id"]]["seconds"], 1.5)
             for row in rows.values():
                 self.assertEqual(set(row), {"scan_id", "id", "fp", "marks", "reviewed", "notes", "seconds",
-                                            "error"})
+                                            "error", "unplayable"})
             progress = [p for n, p in self.events.items if n == "library-progress"]
             self.assertEqual(progress[-1], {"scan_id": first["scan_id"], "done": 4, "total": 4})
 

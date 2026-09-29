@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id);
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
-            playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
+            playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
@@ -318,9 +318,11 @@ async function openDevice(id) {
   if (!r.ok) { showError(r); S.device = null; renderDevices(); return; }
   S.folders = r.folders;
   S.folder = (r.folders.find((f) => f.recordings.length) || r.folders[0] || {}).id ?? null;
-  S.model = r.model; S.playable = !!r.playable; S.formats = r.formats || [];
+  S.model = r.model; S.playable = !!r.playable; S.playReason = r.play_reason || ""; S.formats = r.formats || [];
   $("device-table").classList.toggle("playable", S.playable);
   setFormats(S.formats);
+  // A recorder whose recordings can't be played here (e.g. an ICD-ST10, not yet): said once, plainly.
+  if (!S.playable && S.playReason) status(`${sentence(S.playReason)} Its recordings can still be saved.`);
   renderDevices(); renderMain();
 }
 
@@ -425,7 +427,7 @@ function libraryEvent(event, p) {
     if (!f) return;
     const fp = p.fp || null;
     setFileFp(f, fp);
-    Object.assign(f, { seconds: p.seconds, error: p.error });
+    Object.assign(f, { seconds: p.seconds, error: p.error, unplayable: p.unplayable || null });
     if (!fp) Object.assign(f, fileSummary(p));
     else {
       // Every copy of the recording shows these marks, whichever file reported them (a WAV's
@@ -880,8 +882,16 @@ function typeReason(type) {                    // why not, as a sentence
   return sentence(t && t.reason);
 }
 
+// A file that can't be played although its type can (its own header says so: an ICD-ST10
+// recording, not yet) has "unplayable", the reason.
+function filePlayable(f) { return typePlayable(f.type) && !f.unplayable; }
+
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
-  return typePlayable(g.main.type) ? g.main : g.files.find((f) => f.type === "wav") || null;
+  return filePlayable(g.main) ? g.main : g.files.find((f) => f.type === "wav") || null;
+}
+
+function whyUnplayable(g) {                    // why a row can't be played, as sentences
+  return g.main.unplayable ? sentence(g.main.unplayable) : `Can't play .${g.main.type} files. ` + typeReason(g.main.type);
 }
 
 function libraryPlaying(g) { return g.files.some((f) => S.playing === `lib|${f.id}`); }
@@ -919,13 +929,13 @@ function libraryRow(g) {
   const total = g.marks.A + g.marks.B + g.marks.C;
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
-  const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type]), g.seconds, g.marks, g.reviewed,
+  const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type, f.unplayable]), g.seconds, g.marks, g.reviewed,
                               g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable]);
   if (tr.sig === sig) return tr;
   tr.sig = sig;
   tr.classList.toggle("playing", libraryPlaying(g));
   tr.classList.toggle("unplayable", !playable);
-  tr.title = playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type);
+  tr.title = playable ? "" : whyUnplayable(g);
   const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
   const toggle = cToggle.lastChild;
   toggle.hidden = !total && !expanded;
@@ -955,6 +965,9 @@ function libraryRow(g) {
   cEvp.title = "";
   if (!S.caps.marks) {
     // no marks store: nothing to show
+  } else if (g.main.unplayable) {              // not an error: it can't be played (or marked) yet
+    cEvp.textContent = "—";
+    cEvp.title = sentence(g.main.unplayable);
   } else if (g.error) {
     const warn = document.createElement("span");
     warn.className = "lib-error";
@@ -1063,7 +1076,7 @@ async function playLibrary(g, mark) {
     return;
   }
   const f = libraryPlayable(g);
-  if (!f) { banner(`Can't play .${g.main.type} files. ` + typeReason(g.main.type) + " WAV files still play."); return; }
+  if (!f) { banner(whyUnplayable(g) + (g.main.unplayable ? "" : " WAV files still play.")); return; }
   const seq = ++S.playSeq;
   banner(""); status(`Loading ${f.name}…`);
   const r = await api().play_library(f.id);
@@ -1697,7 +1710,7 @@ function libraryMenuItems(target) {
     const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
     const n = recordingsIn(ids), playable = !!libraryPlayable(g);
     return [
-      { label: "Play", disabled: !playable, title: playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type),
+      { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
       { label: "Rename…", disabled: !canRenameRecording(g),
@@ -1811,6 +1824,7 @@ function renderRows() {
     const first = document.createElement("td"); first.appendChild(box); tr.appendChild(first);
     cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 3) td.className = "note"; tr.appendChild(td); });
     if (S.playable) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
+    else if (S.playReason) tr.title = sentence(S.playReason);
     rows.appendChild(tr);
   }
   $("all").checked = recs.length > 0 && recs.every((r) => r.problem || S.selected.has(key(S.device, folder.id, r.number)));
