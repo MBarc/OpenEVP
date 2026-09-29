@@ -55,7 +55,7 @@ def pack(frames, counter=100, date=DATE, owner="Test"):
         chunk = stream[k * PAYLOAD:(k + 1) * PAYLOAD]
         block = bytearray(dvf.BLOCK)
         block[0:2] = struct.pack(">H", off)
-        block[2:4] = dvf.LP_MARKER
+        block[2:4] = dvf.HEADER_LENGTH_FIELD
         block[4:6] = struct.pack(">H", dvf.BLOCK_HEADER + len(chunk))
         block[6:10] = struct.pack(">I", counter + k)
         block[10:10 + len(chunk)] = chunk

@@ -19,12 +19,18 @@ def build_dvf(raw, m, label):
 
     Raises RecorderError if the data is not the message the folder table
     describes, and dvf.FormatError if it cannot be converted.
+
+    The first block's time counter must match the table's. On an ICD-ST10
+    whose clock was never set both are 0xFFFFFFFF, so that check proves
+    nothing there; its LPEC ST data is checked instead by dvf.build: the
+    table's length, and whole frames with consecutive counters and each
+    block's frame offset where the frames say it must be.
     """
     first = struct.unpack(">I", raw[6:10])[0]
     if first != m.start_counter:
         raise RecorderError(f"{label}: downloaded data does not match the folder table "
                             f"(counter {first:#x} != {m.start_counter:#x}); stopping")
-    return dvf.build(raw, m.date, m.owner, expected_length=m.length)
+    return dvf.build(raw, m.date, m.owner, expected_length=m.length, mode=m.mode)
 
 
 @dataclass

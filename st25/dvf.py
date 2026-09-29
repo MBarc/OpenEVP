@@ -19,13 +19,32 @@ Per-message header fields (big-endian):
   434..463  owner name from the message entry, NUL padded
   464..467  audio payload bytes (sum of valid bytes minus the 10-byte block headers), u32
 
-Audio block header: bytes 0..1 frame offset, 2..3 0x000A (every LP block seen),
-4..5 valid bytes in the block (0x0400 when full), 6..9 time counter.
+Audio block header: bytes 0..1 offset of the first frame that starts in the
+block, 2..3 the header's own length 0x000A (every block of every mode seen; it
+says nothing about the mode), 4..5 valid bytes in the block (0x0400 when
+full), 6..9 time counter.
 DVE fills the unused tail of the last block with 0xFF (the recorder sends 0x00).
 
-Only LP-mode recordings have been verified. DVE also rounds two timestamps
+Two recording modes, told apart by the low byte of the folder table's
+message-list entry (st25.folder) and stored in the header's codec fields:
+
+  mode  recorder   codec (byte 61)  audio
+  0x00  ICD-ST25   0x2C LPEC LP     8 kHz mono, 750 bytes/s (6000 bit/s)
+  0x6C  ICD-ST10   0x24 LPEC ST     44.1 kHz stereo, 283-byte frames (a 16-bit
+                                    counter, a flags byte, 280 codec bytes) of
+                                    2048 samples per channel
+
+LP files have been verified against DVE. DVE also rounds two timestamps
 (header byte 58, byte 9 of some blocks) differently; that does not change the
 audio: DVE converts these files to WAV byte-identically to its own.
+
+The LPEC ST header is OpenEVP's own until a file DVE saved from an ICD-ST10
+can be compared: the LP template with codec 0x24, 2 channels (bytes 62..63),
+48234 bit/s (64..67) and 6029 bytes/s (68..71, the codec bytes: 280 per 2048
+samples at 44.1 kHz). validate() accepts it for good, so files saved with it
+keep counting as "already saved". Its frames are checked: each block's frame
+offset, whole frames, and counters that go up by one or restart at 0 (the
+recorder starts a segment with a counter-0 frame).
 """
 import re
 import struct
@@ -34,7 +53,16 @@ BLOCK = 1024
 WIRE_BLOCK = 1056
 PAGE, PAGE_DATA = 528, 512
 BLOCK_HEADER = 10
-LP_MARKER = b"\x00\x0a"
+HEADER_LENGTH_FIELD = struct.pack(">H", BLOCK_HEADER)   # bytes 2..3 of every audio block
+
+MODE_LP, MODE_ST = 0x00, 0x6C       # the folder table's mode byte (st25.folder.Message.mode)
+MODES = {MODE_LP: "LP", MODE_ST: "LPEC ST"}
+CODEC_AT = 61                        # header byte: the codec
+CODEC_LP, CODEC_ST = 0x2C, 0x24
+_CODECS = {MODE_LP: CODEC_LP, MODE_ST: CODEC_ST}
+
+LP_BYTES_PER_SECOND = 750
+ST_FRAME, ST_SAMPLES, ST_RATE = 283, 2048, 44100
 
 # DVE 2.31 header for ST-series LPEC (LP) recordings with the per-message fields zeroed.
 _TEMPLATE = bytes.fromhex(
@@ -50,8 +78,71 @@ _TEMPLATE = bytes.fromhex(
 assert len(_TEMPLATE) == 512
 
 
+def _st_template():
+    """The LP template with the LPEC ST codec fields (see the module docstring)."""
+    h = bytearray(_TEMPLATE)
+    h[CODEC_AT] = CODEC_ST
+    h[62:64] = struct.pack(">H", 2)
+    h[64:72] = struct.pack(">II", 48234, 6029)
+    return bytes(h)
+
+
+_TEMPLATES = {MODE_LP: _TEMPLATE, MODE_ST: _st_template()}
+
+
 class FormatError(ValueError):
     pass
+
+
+def codec(dvf_bytes):
+    """The codec byte of a .dvf header (CODEC_LP, CODEC_ST...), or None if the
+    data is too short or is not a Sony voice file. Reads only the header, so
+    the first 512 bytes of a file are enough."""
+    if len(dvf_bytes) <= CODEC_AT or bytes(dvf_bytes[:8]) != b"MS_VOICE":
+        return None
+    return dvf_bytes[CODEC_AT]
+
+
+def mode_of(dvf_bytes):
+    """The recording mode (MODE_LP, MODE_ST) a .dvf header names, or None."""
+    c = codec(dvf_bytes)
+    return next((m for m, k in _CODECS.items() if k == c), None)
+
+
+def seconds(payload_bytes, mode):
+    """The length of ``payload_bytes`` of audio (the blocks' valid bytes minus
+    their headers) in ``mode``, or None for an unknown mode. For LPEC ST it
+    counts every frame, the counter-0 segment frames too (a slight
+    overstatement)."""
+    if mode == MODE_LP:
+        return payload_bytes / float(LP_BYTES_PER_SECOND)
+    if mode == MODE_ST:
+        return payload_bytes / ST_FRAME * ST_SAMPLES / ST_RATE
+    return None
+
+
+def _st_problem(blocks):
+    """Why the audio blocks [(block bytes, valid)] are not an LPEC ST frame
+    stream, or None: each block's frame offset must point at the next frame
+    start, the stream must end on a whole frame, and each frame counter must
+    follow the one before or restart at 0."""
+    at = 0
+    stream = bytearray()
+    for k, (b, v) in enumerate(blocks):
+        want = BLOCK_HEADER + (-at) % ST_FRAME
+        if struct.unpack(">H", b[0:2])[0] != want:
+            return f"block {k} is not LPEC ST data (frame offset {struct.unpack('>H', b[0:2])[0]}, expected {want})"
+        stream += b[BLOCK_HEADER:v]
+        at += v - BLOCK_HEADER
+    if not stream or len(stream) % ST_FRAME:
+        return f"the LPEC ST data ({len(stream)} bytes) is not a whole number of {ST_FRAME}-byte frames"
+    prev = None
+    for i in range(0, len(stream), ST_FRAME):
+        c = struct.unpack(">H", stream[i:i + 2])[0]
+        if prev is not None and c != 0 and c != (prev + 1) & 0xFFFF:
+            return f"LPEC ST frame {i // ST_FRAME} has counter {c} after {prev}"
+        prev = c
+    return None
 
 
 def strip_spare(raw):
@@ -61,20 +152,24 @@ def strip_spare(raw):
     return bytearray(b"".join(raw[i:i + PAGE_DATA] for i in range(0, len(raw), PAGE)))
 
 
-def build(raw, entry_date, owner_name, expected_length=None):
+def build(raw, entry_date, owner_name, expected_length=None, mode=MODE_LP):
     """Return the complete .dvf file for one message's raw wire data.
 
     expected_length (valid bytes from the folder table) is checked against the
-    block headers, so truncated or mismatched data is rejected.
+    block headers, so truncated or mismatched data is rejected. mode is the
+    folder table's mode byte; LPEC ST data must also be whole, consecutive
+    frames (see the module docstring), so a table that names the wrong mode
+    stops the download instead of producing a mislabelled file.
     """
+    if mode not in _TEMPLATES:
+        raise FormatError(f"unknown recording mode 0x{mode:02x}")
     audio = strip_spare(raw)
     blocks = len(audio) // BLOCK
     valid = []
     for k in range(blocks):
         b = audio[k * BLOCK:(k + 1) * BLOCK]
-        if b[2:4] != LP_MARKER:
-            raise FormatError(f"block {k} is not an LP-mode block (marker {b[2:4].hex()}); "
-                              "only LP recordings are supported so far")
+        if b[2:4] != HEADER_LENGTH_FIELD:
+            raise FormatError(f"block {k} has an unknown block header (header length {b[2:4].hex()})")
         v = struct.unpack(">H", b[4:6])[0]
         if not BLOCK_HEADER <= v <= BLOCK:
             raise FormatError(f"block {k}: implausible valid length {v}")
@@ -83,11 +178,15 @@ def build(raw, entry_date, owner_name, expected_length=None):
         valid.append(v)
     if expected_length is not None and sum(valid) != expected_length:
         raise FormatError(f"data holds {sum(valid)} bytes but the folder table says {expected_length}")
+    if mode == MODE_ST:
+        problem = _st_problem([(audio[k * BLOCK:(k + 1) * BLOCK], valid[k]) for k in range(blocks)])
+        if problem:
+            raise FormatError(problem)
     last = valid[-1]
     tail = (blocks - 1) * BLOCK
     audio[tail + last:tail + BLOCK] = b"\xff" * (BLOCK - last)
 
-    h = bytearray(_TEMPLATE)
+    h = bytearray(_TEMPLATES[mode])
     if len(entry_date) != 8:
         raise FormatError("entry date must be 8 bytes")
     h[52:60] = entry_date
@@ -104,13 +203,16 @@ _PER_MESSAGE = set(range(52, 60)) | set(range(153, 160)) | set(range(434, 468))
 
 
 def validate(dvf_bytes):
-    """Return None if dvf_bytes is a complete, self-consistent ST25 LP .dvf file
-    (as written by this tool or by Digital Voice Editor), else the reason."""
+    """Return None if dvf_bytes is a complete, self-consistent ICD-ST .dvf file
+    (LP as written by this tool or by Digital Voice Editor, or LPEC ST as
+    written by this tool), else the reason. codec() says which it is."""
     n = len(dvf_bytes)
     if n < 1024 + BLOCK or (n - 1024) % BLOCK:
         return "wrong size"
-    if any(dvf_bytes[i] != _TEMPLATE[i] for i in range(512) if i not in _PER_MESSAGE):
-        return "header does not match the ST25 LP layout"
+    mode = mode_of(dvf_bytes)
+    template = _TEMPLATES.get(mode)
+    if template is None or any(dvf_bytes[i] != template[i] for i in range(512) if i not in _PER_MESSAGE):
+        return "header does not match the ICD-ST LP or LPEC ST layout"
     if dvf_bytes[512:1024] != b"\xff" * 512:
         return "damaged header padding"
     blocks = (n - 1024) // BLOCK
@@ -120,13 +222,15 @@ def validate(dvf_bytes):
     for k in range(blocks):
         b = dvf_bytes[1024 + k * BLOCK:1024 + (k + 1) * BLOCK]
         v = struct.unpack(">H", b[4:6])[0]
-        if b[2:4] != LP_MARKER or not BLOCK_HEADER <= v <= BLOCK or (k < blocks - 1 and v != BLOCK):
+        if b[2:4] != HEADER_LENGTH_FIELD or not BLOCK_HEADER <= v <= BLOCK or (k < blocks - 1 and v != BLOCK):
             return f"damaged audio block {k}"
         valid.append(v)
     if int.from_bytes(dvf_bytes[153:156], "big") != BLOCK - valid[-1]:
         return "padding field does not match the last block"
     if struct.unpack(">I", dvf_bytes[464:468])[0] != sum(valid) - BLOCK_HEADER * blocks:
         return "payload field does not match the audio blocks"
+    if mode == MODE_ST:
+        return _st_problem([(dvf_bytes[1024 + k * BLOCK:1024 + (k + 1) * BLOCK], valid[k]) for k in range(blocks)])
     return None
 
 
