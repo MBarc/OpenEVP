@@ -2,9 +2,10 @@
 tools/release_check.py) turns "skipped: the decoder's tables or C core are
 missing" into a failure.
 
-The decoder's golden tests (test vectors, the C core against pure Python, the
-marks fingerprint of decoded audio) need the git-ignored table data and the
-built lpec_core.dll. On a dev checkout without them those tests skip; a
+The decoders' golden tests (test vectors, the C cores against pure Python, the
+marks fingerprint of decoded audio) need the git-ignored table data of both
+Sony decoders (LPEC LP and LPEC ST) and the built lpec_core.dll and
+lpec_st_core.dll. On a dev checkout without them those tests skip; a
 release must never be built from such a checkout, nor from one whose tables
 or DLL are damaged (both load as "not available" and would skip as well).
 
@@ -56,9 +57,7 @@ def skip_or_fail(reason):
     raise unittest.SkipTest(reason)
 
 
-def tables_problem():
-    """Why the LPEC table data can't be loaded (missing or damaged), or None."""
-    from openevp.decoders.sony_lpec import tables
+def _load_problem(tables):
     try:
         tables.load()
     except tables.TablesMissing as e:          # TablesInvalid (damaged) is a TablesMissing
@@ -66,17 +65,39 @@ def tables_problem():
     return None
 
 
+def _dll_problem(core, build="python tools/build_lpec_core.py"):
+    if core.available():
+        return None
+    if not os.path.isfile(core.DLL_PATH):
+        return f"{core.DLL_PATH} is not built ({build})"
+    return f"{core.DLL_PATH} could not be loaded or has the wrong interface"
+
+
+def tables_problem():
+    """Why the LPEC (LP) table data can't be loaded (missing or damaged), or None."""
+    from openevp.decoders.sony_lpec import tables
+    return _load_problem(tables)
+
+
 def core_problem():
     """Why lpec_core.dll can't be used (not built, or fails to load), or None."""
     from openevp.decoders.sony_lpec import _core
-    if _core.available():
-        return None
-    if not os.path.isfile(_core.DLL_PATH):
-        return f"{_core.DLL_PATH} is not built (python tools/build_lpec_core.py)"
-    return f"{_core.DLL_PATH} could not be loaded or has the wrong interface"
+    return _dll_problem(_core)
+
+
+def st_tables_problem():
+    """Why the LPEC ST table data can't be loaded (missing or damaged), or None."""
+    from openevp.decoders.sony_lpec_st import tables
+    return _load_problem(tables)
+
+
+def st_core_problem():
+    """Why lpec_st_core.dll can't be used (not built, or fails to load), or None."""
+    from openevp.decoders.sony_lpec_st import _core
+    return _dll_problem(_core)
 
 
 def decoder_problem():
-    """What keeps the decoder's golden tests from running, or None."""
-    problems = [p for p in (tables_problem(), core_problem()) if p]
+    """What keeps the decoders' golden tests (LPEC LP and LPEC ST) from running, or None."""
+    problems = [p for p in (tables_problem(), core_problem(), st_tables_problem(), st_core_problem()) if p]
     return "; ".join(problems) or None

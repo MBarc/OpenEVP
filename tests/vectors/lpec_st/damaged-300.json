@@ -1,0 +1,8 @@
+{
+ "frames": 300,
+ "accepted": 130,
+ "rejected": 165,
+ "pcm_bytes": 1015808,
+ "pcm_sha256": "c215c1f9d664df0cc3c837a5bc9b4476ea9c9ff1134aba33774dadf2bc0cb465",
+ "float_sha256": "4e761cfef06c47bd4d1e294d241505b35f316d8e834aa2731da8ddbf7a672ddc"
+}

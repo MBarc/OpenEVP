@@ -1,3 +1,6 @@
 # Vendored third-party files are pinned by SHA-256: never rewrite their line endings.
 app/ui/vendor/*.js -text
 vendor/** -text
+# LPEC ST test vectors: exact bytes (generated frames and Sony's PCM for them).
+tests/vectors/lpec_st/*.bin binary
+tests/vectors/lpec_st/*.pcm binary
