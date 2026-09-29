@@ -25,8 +25,8 @@ Subclass `base.Model` and set:
 
 `wav_problem()` says why its recordings can't be converted to WAV (played,
 marked) right now, or returns `None`. By default that is its format's
-decoder problem. The ICD-ST10 overrides it: its recordings download, but
-can't be played yet.
+decoder problem. The ICD-ST10 overrides it with its own codec's (LPEC ST)
+decoder problem, since the .dvf format's is the ICD-ST25's (LPEC LP).
 
 `discover()` returns a `DiscoveredDevice` for every recorder of this model
 attached now, including one that can't be used yet (`state=NEEDS_DRIVER`, with a
