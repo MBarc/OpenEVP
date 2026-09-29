@@ -132,9 +132,45 @@ def _expand(tables, name):
     return [value]
 
 
+def _shape(v, depth):
+    """(len, len of each row, ...) of a nested table, or None if ragged."""
+    out = [len(v)]
+    for _ in range(depth - 1):
+        lengths = {len(x) for x in v}
+        if len(lengths) != 1:
+            return None
+        v = v[0]
+        out.append(lengths.pop())
+    return tuple(out)
+
+
+def check_tables(tables) -> None:
+    """Raise ValueError unless every table has the size its configuration
+    needs: the C core indexes the tables by the configuration it is given
+    (order, bands, frame, transform lengths) and cannot see their lengths."""
+    cfg = tables.config
+    want = {
+        "C": (cfg.lsp_stages, 64, cfg.order), "D": (cfg.lsp_stages, 64, cfg.order),
+        "BG1": (64, cfg.bands), "BG2": (64, cfg.bands), "AB": (64, cfg.bands),
+        "PT": (64, 3), "PQ": (64, 3), "SHAPES": (128, 8), "GAIN": (128,),
+        "VQ2": (256, 2), "VQ4": (256, 4), "VQ8": (256, 8), "NA": (1024,), "NB": (1024,),
+        "WIN": (cfg.frame,), "WIN_SQ": (cfg.frame,), "WIN_LONG": (2 * cfg.frame,),
+        "FFT_SIN_2048": (2048,), "FFT_SIN_1536": (1536,), "S2048": (2049,), "S1536": (1537,),
+        "LSP_INIT": (cfg.order + 1,), "DEFAULT_SHAPE": (8,),
+    }
+    for name, dims in want.items():
+        got = _shape(getattr(tables, name), len(dims))
+        if got != dims:
+            raise ValueError(f"LPEC {cfg.name} table {name} has shape {got}; the configuration needs {dims}")
+    posts = _shape(tables.POST, 1)
+    if posts != (4,) or any(len(tables.POST[t]) != n // 2 for t, n in enumerate(cfg.transform_n)):
+        raise ValueError(f"LPEC {cfg.name} post-twiddle tables do not match the transform lengths")
+
+
 def _table_pointers(tables):
     """The ctypes table arrays (kept alive by the caller) and the two
     pointer arrays lpec_decode takes."""
+    check_tables(tables)
     dbufs = [(ctypes.c_double * len(v))(*v)
              for v in (_flat(t) for n in _DOUBLE_TABLES for t in _expand(tables, n))]
     ibufs = [(ctypes.c_int32 * len(v))(*v)

@@ -100,6 +100,11 @@ class SpFileTests(unittest.TestCase):
                 f.write(sp)
             self.assertEqual(formats.DVF.seconds(path), round(frames * 1024 / 16000, 1))
         self.assertEqual(formats.DVF.decoder.wav_bytes(sp), 44 + frames * 2048)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(formats, "SP_SECONDS_MAX_BYTES", len(sp) - 1):
+            path = os.path.join(d, "sp.dvf")
+            with open(path, "wb") as f:
+                f.write(sp)
+            self.assertEqual(formats.DVF.seconds(path), round(payload / 2000, 1))   # over the cap: the header
         self.assertEqual(formats.DVF.decoder.wav_bytes(sp[:1024]), 44 + payload * 16)   # the header alone
 
     def test_frames_are_counted_as_the_decoder_reads_them(self):

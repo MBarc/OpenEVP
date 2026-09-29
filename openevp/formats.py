@@ -265,14 +265,14 @@ def _translated(call):
 
 def _dvf_seconds(path):
     """A saved .dvf's length from its header; an LPEC SP file's exactly, from
-    its frames (SP files are small: 2000 bytes a second)."""
+    its frames, up to SP_SECONDS_MAX_BYTES (longer: from the header)."""
     try:
         with open(path, "rb") as f:
             header = f.read(468)
             if len(header) >= 468 and _dvf.mode_of(header) == _dvf.MODE_SP:
                 f.seek(0)
-                data = f.read(DVF_MAX_BYTES + 1)
-                if len(data) <= DVF_MAX_BYTES and _dvf.validate(data) is None:
+                data = f.read(SP_SECONDS_MAX_BYTES + 1)
+                if len(data) <= SP_SECONDS_MAX_BYTES and _dvf.validate(data) is None:
                     return round(_dvf.sp_seconds(_dvf.payload(data)), 1)
     except OSError:
         return None
@@ -285,6 +285,7 @@ def _dvf_seconds(path):
 
 
 DVF_MAX_BYTES = 512 << 20       # far beyond any ICD-ST recording (~200 hours of LP audio)
+SP_SECONDS_MAX_BYTES = 64 << 20  # SP files read to count frames: about 9 hours at 2000 bytes/s
 
 
 DVF = Format(ext=".dvf", label="Sony original", decoder=_SonyLpec(), same=_dvf.same_audio,

@@ -26,6 +26,7 @@ from openevp.decoders.sony_lpec import x87  # noqa: E402
 from openevp.decoders.sony_lpec import _core  # noqa: E402
 from test_lpec_vectors import _HAVE_TABLES, SHORT_VECTORS, python_pcm  # noqa: E402
 from test_lpec_vectors import vector_payload as _payload  # noqa: E402
+from test_lpec_sp_vectors import HAVE_TABLES as _HAVE_SP_TABLES  # noqa: E402
 
 _NO_CORE = ("openevp/decoders/sony_lpec/lpec_core.dll is not built (or failed to load); run "
             "python tools/build_lpec_core.py")
@@ -181,6 +182,89 @@ class RandomPayloadParityTests(unittest.TestCase):
                 self._check(base[:cut])
 
 
+# SHA-256 of decode_payload(random_payload(seed)), seeds 0..49, recorded from
+# the LP decoder before it took a configuration (branch feature/st10-decoder,
+# C core and pure Python agreeing): the LP output must never change.
+PINNED_LP_SHA256 = (
+    "4ad6403744aa94e3ef8d43a91cedb1f3321d3b93c3279fc24e0845a53487cc8f",
+    "de60ddbb0fd185c43c16a600d9dda8f98b69d8e51afbe02bf1a747f5f2610beb",
+    "959ceba702bddd36025c72ec3f5a214c403c9aec735fbc985b473b6447ee9611",
+    "a6e330b29de5ada87519319718186bed2527f967f8d00d447fd047b5d634ba92",
+    "72975ed3f07d2e510964541cbc37895dfa1bb7b09c50a0e35cf535f44d0e3738",
+    "f771913ff43c0d131cc93feead522c98e7b5c22da6a2654e1f72b4a8a8c3d3e1",
+    "0073774c70b94d3bed720e0886a537ed37c2bca203f2321247a7736f1803a2ee",
+    "13db74cc783d5ddd58d6f6d20877d58fd7c11221f9feaeb89b8286850aaf73ec",
+    "20e5f14c1fc1bf69fca986e97355a811cd319a55b6e76dd5a6dc33eab1895fb3",
+    "dc2ab1f41f2aac0b7c2522caba04ce21d5aa737e291a536a514fe57b68278b79",
+    "3c500e583c37301af1c4e1edcac49e0d2ed7517d252b0e64656604a6914b2e38",
+    "c004798f2bc299e236c64b3892aaa563d669699f0ac8ab975fb3dd933b0576cc",
+    "1b4a1dc67bc1f3c8534465e8086b47535d99fa8571d20073f1781bf6f2888574",
+    "9c1fe31f24db8eaeae0b6b82ed8b4166d79ea619c255a50031ec7c6fc5e79245",
+    "addac6efee758b7e19d7e5120941513e22964c82e8285ff638eb5587c2501069",
+    "4fce80b7aadbbecc67516f32a8761f8bbc84feff1feb1d29b24bd0f819c93da7",
+    "eca88fbbb19c770758101c2f7e0bcee89c33e217479623c172ffeba57c799d57",
+    "f00c9568336f059c20504e10d5cc23f8df3d5bffebfb7dbc78f026936ad92a8e",
+    "dae4a49380e43adbbae7127705a94f6b6484cffaa8e8b5a4c6fb545fa30edd6d",
+    "b1be9df97a79856fd9a3a47c5f41ede6634db0133572e5c85e51a33c82c50e96",
+    "c7bc4fceb81f02b4e4eb45fe22ecab14df45f7a6ec8617d2d7d58b43dd171fc4",
+    "d4717425cce03f69540574c671c98a5369faf1565f2f65eabbb1d64c4cffe83d",
+    "39d55b136ffd6e4b1f0501f672c43519d0e6cbdeb8a3830dd9d1f4e42c2ad784",
+    "4ca897404ce8ecc19b968ba16a5cf17c21b1adc999342bc516168cfa3cd2a41d",
+    "671a07c06a46c1d5adb3d43fa4979b286e443bcea35e69f8e573a7f203f24e1e",
+    "4815dedc7b0b5dd8b178f89b60cf7d180688319b626b1538e11cb90a58cf1216",
+    "70dabc48fd2a28f807b4e34385dc74a5cef6aabe24bb52d70c87ea8db385a02f",
+    "0b3be6e456875069db71b9d7108c16ee9e21c5e84f1db60fa45873461eb4d26f",
+    "444074e298f25adc0275fba0426b702ff5e383ac29419cdd82eff19ed41c49ba",
+    "5df20f2d36e11a6a66324a29e1a541b8e6587ced95f9f7f97dff59111da42215",
+    "ad9564a81ed02956fc1a0841ffd092bf434fcb7a16a13a3bc5b2b16b003ca689",
+    "0707b7a8fab8cc29dc59796e53a12dc9bf0d368a653f67b4e80941d29d72d005",
+    "851d01520fa85978ea3c46dce3859f05774c286fb0a43ea0a46e831e6c7dc523",
+    "22825dc59eb125835d4b632af7b6c11b8ba8a9e472da6ac45166ba9f83bfd473",
+    "4c61e79cda856b835a304f37015c60e0005dfa77460a48cb9ac25e35e4a30305",
+    "445cab3f613f1385c39a5aa6337dba073a4e5c1197b543c27709ed03fe68656b",
+    "e28d6d82f19a425364c3a1e46083b5681da0b823162998415c6694107bbb594f",
+    "59d5d60cc1b154f41afcda19b203fccb838149ea37628a42c72f2f50503399f6",
+    "2f41899d527074eed3d0be08801e61a62247cf1e5e81bae2b8a299047e8ecf27",
+    "40b253272c116bab14222e5807c7b424bf040c8f9a80b77b0f27433a055db7e7",
+    "2f6cd15ea87bf0c8f0cf1cfd35b93b977192fedc29438c5827a4e47f6d783f40",
+    "885520e0786ae5db47c149e748933331087aed1605c74c68a9e4d74bffdcf7fc",
+    "f5b16b8946341113c8deaef2fde1f218a6047ec31717b0366649d57fdd1a1240",
+    "c224e34c5213357c7a7c1eb43e8626c11bd0918d81a53050eb9c279b3b57628b",
+    "51385463f220db18ba4515548b2c51fd3468a214a59318014011b2348688cc7a",
+    "723b47132371a86917099850e638e8145b495b1d5231b62fb5e1cd572e54c607",
+    "cc7941d2637b8ff16e0fe74c2c8c04b546e49a56e6cec54667e16f6d2df0eb3c",
+    "e18a125477ecde23f61ca7e24e5d549a9e324343a0c51b2ccbf73a3920ef6603",
+    "c58dbe474e788953686392578d1c5917ff2f09d80b7a1573c53aaf47ed2f8f7d",
+    "2857570e0960b29be5e94f70ee6946eb612549c393733e83e15a844d577b1d98",
+)
+
+
+def random_payload(seed):
+    rng = random.Random(seed)
+    return bytes(rng.randrange(256) for _ in range(rng.randrange(1, 480)))
+
+
+@release_gate.require(_HAVE_TABLES,
+                      "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
+class PinnedLpOutputTests(unittest.TestCase):
+    """LP output is pinned to the decoder before the SP configuration existed."""
+
+    def _check(self, use_core):
+        import hashlib
+        from openevp.decoders.sony_lpec.decoder import decode_payload
+        for seed, want in enumerate(PINNED_LP_SHA256):
+            with self.subTest(seed=seed):
+                got = decode_payload(random_payload(seed), use_core=use_core)
+                self.assertEqual(hashlib.sha256(got).hexdigest(), want)
+
+    def test_pure_python(self):
+        self._check(False)
+
+    @release_gate.require(_core.available(), _NO_CORE)
+    def test_c_core(self):
+        self._check(True)
+
+
 @release_gate.require(_HAVE_TABLES,
                       "openevp/decoders/sony_lpec/data/lpec_tables.json not found; run tools/import_lpec_tables.py")
 @release_gate.require(_core.available(), _NO_CORE)
@@ -282,6 +366,81 @@ class MalformedRecordTests(unittest.TestCase):
         frame = copy.deepcopy(self.two_block)
         frame.blocks[0].alloc.n2[3] += 4  # sum(n2) no longer matches 4*k1
         self._expect_rejected(frame)
+
+
+@release_gate.require(_HAVE_SP_TABLES, "openevp/decoders/sony_lpec/data/lpec_sp_tables.json not found; "
+                                       "run tools/import_lpec_tables.py")
+@release_gate.require(_core.available(), _NO_CORE)
+class MalformedSpRecordTests(unittest.TestCase):
+    """The same defensive checks with the SP configuration's limits (8-bit
+    lags up to 255, 4 LSP stages, 10 bands up to 96 wide)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from openevp.decoders.sony_lpec import bitstream, config, tables as tables_module
+        from test_lpec_sp_vectors import vector_payload as sp_payload
+        cls.t = tables_module.load(config=config.SP)
+        frames, lsp1 = [], 0
+        for chunk in bitstream.split_frames(sp_payload("random-frames"), config.SP):
+            f = bitstream.parse_frame(chunk, lsp1, cls.t.AB, config.SP)
+            lsp1 = f.lsp1_i1_next
+            frames.append(f)
+        cls.two_block = next(f for f in frames if f.mode == 0 and f.pitch_b[0] and f.blocks[1].vq8)
+        cls.one_block = next(f for f in frames if f.mode == 3)
+
+    def _expect_rejected(self, frame):
+        with self.assertRaises(RuntimeError):
+            _core.decode_frames(self.t, [frame])
+
+    def test_baseline_frames_are_valid(self):
+        _core.decode_frames(self.t, [copy.deepcopy(self.two_block)])
+        _core.decode_frames(self.t, [copy.deepcopy(self.one_block)])
+
+    def test_lag_255_is_valid_and_256_is_not(self):
+        frame = copy.deepcopy(self.two_block)
+        frame.pitch_b[0] = 255                     # the widest 8-bit lag: fine
+        if frame.pitch_b[1] is None:
+            frame.pitch_b[1] = 0
+        _core.decode_frames(self.t, [frame])
+        frame.pitch_b[0] = 256
+        self._expect_rejected(frame)
+
+    def test_lp_packing_is_rejected(self):
+        frame = copy.deepcopy(self.one_block)
+        frame.lsp_b = frame.lsp_b[:3]              # an LP-shaped (3-stage) record
+        self._expect_rejected(frame)
+
+    def test_fourth_lsp_index_out_of_range(self):
+        frame = copy.deepcopy(self.two_block)
+        frame.lsp_b[3] = 64
+        self._expect_rejected(frame)
+
+    def test_band_wider_than_96(self):
+        frame = copy.deepcopy(self.one_block)       # type 3: W = 96, the widest band
+        a = frame.blocks[0].alloc
+        a.ns[9] += 97 - (a.n4[9] + a.n2[9] + a.n1[9] + a.ns[9])
+        a.ks = sum(a.ns)
+        frame.blocks[0].signs = frame.blocks[0].signs + [0] * (a.ks - len(frame.blocks[0].signs))
+        self._expect_rejected(frame)
+
+    def test_band_allocation_overruns_the_band_width(self):
+        frame = copy.deepcopy(self.two_block)       # type 0: W = 48
+        frame.blocks[0].alloc.n4[9] += 50
+        self._expect_rejected(frame)
+
+    def test_vq_index_out_of_range(self):
+        frame = copy.deepcopy(self.two_block)
+        frame.blocks[1].vq8[0] = 256
+        self._expect_rejected(frame)
+
+    def test_tables_that_do_not_match_the_configuration_are_refused(self):
+        import dataclasses
+        short = dataclasses.replace(self.t, C=tuple(tuple(r[:10] for r in c) for c in self.t.C))
+        with self.assertRaises(ValueError):
+            _core.decode_frames(short, [copy.deepcopy(self.one_block)])
+        narrow = dataclasses.replace(self.t, AB=tuple(r[:8] for r in self.t.AB))
+        with self.assertRaises(ValueError):
+            _core.decode_frames(narrow, [copy.deepcopy(self.one_block)])
 
 
 @release_gate.require(_HAVE_TABLES,
