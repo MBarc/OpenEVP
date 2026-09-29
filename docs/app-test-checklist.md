@@ -45,3 +45,6 @@ from the frozen build is caught):
     the current recording. Close the window during one: the app asks first.
 17. A second OpenEVP window: Export clips (player and library) is refused with
     the "another OpenEVP is open" reason.
+18. After exporting clips into the library: the EVP Library shows no `Clips`
+    folder and no clip, "Has EVPs" and the folder counts are unchanged; renaming
+    the investigation folder keeps its `Clips` folder (open it in Explorer).

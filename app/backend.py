@@ -60,9 +60,10 @@ from .updater import UpdateCancelled
 from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
-                          _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem, _kind_format,
+                          _clips_folder, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
+                          _kind_format,
                           _plain)
-from .library_ops import (BACKUP_RECYCLED, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
+from .library_ops import (BACKUP_RECYCLED, CLIPS, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -78,7 +79,6 @@ NO_AUDIO = "This recording has no audio to mark."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
-CLIPS = "Clips"             # the subfolder EVP clips go into
 CLIPS_BUSY = "Wait for the export to finish, then export the clips."
 CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 
@@ -173,7 +173,8 @@ def _scan_library(folder):
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
-    hidden or system (AppData, $RECYCLE.BIN...) are skipped. complete is
+    hidden or system (AppData, $RECYCLE.BIN...) and folders named Clips (any case: EVP
+    clips) are skipped. complete is
     False when a folder could not be read (its files are missing from the
     list). investigation is the first folder under `folder` ("" for files
     directly in it). The folders list holds every subfolder walked (including
@@ -200,7 +201,9 @@ def _scan_library(folder):
                 if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
-                    if not folders.entry_is_hidden(e):  # AppData, System Volume Information...
+                    # AppData, System Volume Information..., and Clips folders (EVP clips: output
+                    # for sharing, never listed, indexed or counted, their markers never imported)
+                    if not folders.entry_is_hidden(e) and not _clips_folder(e.name):
                         subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
@@ -1063,8 +1066,7 @@ class Api(LibraryOps):
             return refused
 
         def work():
-            files = _scan_library(path)[0]
-            files = [f for f in files if not any(part.casefold() == CLIPS.casefold() for part in f[5])]
+            files = _scan_library(path)[0]                 # never inside a Clips folder
             # A folder's WAV copies first: a .dvf with a WAV copy beside it is then never decoded.
             files.sort(key=lambda f: (tuple(p.casefold() for p in f[5]), f[2] != "wav", f[1].casefold()))
             return [(f[3], f[2]) for f in files]

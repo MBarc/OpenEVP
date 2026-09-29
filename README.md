@@ -226,9 +226,11 @@ with **Open folder**.
   the WAV with marks.
 - Nothing is overwritten: a clip already saved with the same bytes counts as
   "already there"; a different one gets a numbered name ("… (2).wav").
-- A folder export leaves out recordings in folders named `Clips`, so clips are
-  never cut from clips. Clips saved inside the library show up in it as
-  recordings of their own, each with its one mark.
+- Clips are for sharing, so the EVP Library ignores every folder named `Clips`
+  (in any case, at any depth): they are not listed, checked or counted, their
+  markers are not read as marks, and clips are never cut from clips. Open them
+  with **Open folder**. Renaming, moving or deleting a folder takes its `Clips`
+  folder along untouched.
 
 ### Where marks live
 

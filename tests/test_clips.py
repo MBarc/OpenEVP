@@ -11,6 +11,7 @@ import wave
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+import test_folders as tf  # noqa: E402
 import test_library as tl  # noqa: E402
 import test_marks_api as tm  # noqa: E402
 from app import backend  # noqa: E402
@@ -355,6 +356,63 @@ class LibraryClipsTests(unittest.TestCase):
         os.makedirs(self.lib)
         self.index(api)
         self.assertEqual(api.export_clips_folder("root", 1)["error"], backend.NO_MARKS)
+
+
+class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
+    """Folders named Clips (any case, any depth) hold output for sharing: the library does
+    not list, index, count or import markers from them; folder operations carry them along."""
+
+    def populate(self):
+        self.real = tm.wav_bytes(b"real", seconds=2.0)
+        self.write("Case/Night/real.wav", wavinfo.with_markers(self.real, [mark(0.5, 0.7, "A", "hi")]))
+        self.clip_a = wavinfo.with_markers(tm.wav_bytes(b"clip a"), [mark(0.5, 0.6, "A", "a clip")])
+        self.clip_b = wavinfo.with_markers(tm.wav_bytes(b"clip b"), [mark(0.5, 0.6, "B", "b clip")])
+        self.write("Case/Clips/a.wav", self.clip_a)
+        self.write("Case/Night/clips/b.wav", self.clip_b)                   # any case, any depth
+        self.write("CLIPS/c.wav", tm.wav_bytes(b"clip c"))
+        self.write("Case/Clips/Deeper/d.wav", tm.wav_bytes(b"clip d"))
+
+    def fp(self, data):
+        return wavinfo.wav_fingerprint(io.BytesIO(data))
+
+    def test_not_listed_indexed_imported_or_counted(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        self.assertEqual([f["name"] for f in r["files"]], ["real.wav"])
+        self.assertEqual(sorted(tuple(d["rel"]) for d in r["folders"]), [(), ("Case",), ("Case", "Night")])
+        self.assertEqual(len(self.store.marks(self.fp(self.real))), 1)          # markers outside Clips: imported
+        for clip in (self.clip_a, self.clip_b):
+            self.assertIsNone(self.store.recording(self.fp(clip)))              # never from a clip
+        self.assertEqual(set(self.store.summary()), {self.fp(self.real)})       # "Has EVPs" and counts: the recording only
+        info = api.folder_info(self.folder(r, "Case"))
+        self.assertEqual({k: info[k] for k in ("recordings", "with_evps", "evps_at_least", "other_files", "subfolders")},
+                         {"recordings": 1, "with_evps": 1, "evps_at_least": False, "other_files": 3, "subfolders": 4})
+        event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_folder("root", 1))
+        self.assertEqual((event, p["recordings"], p["saved"], p["skipped"]), ("clips-done", 1, 1, []))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Clips"))),
+                         ["Deeper", "a.wav", "real_EVP-A_00m00.5s_hi.wav"])
+        self.assertEqual([f["name"] for f in self.index(api)["files"]], ["real.wav"])   # the new clip is not listed
+
+    def test_rename_and_delete_carry_clips_along_untouched(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        self.assertTrue(api.rename_folder(self.folder(r, "Case"), "Case 2")["ok"])
+        with open(os.path.join(self.lib, "Case 2", "Clips", "a.wav"), "rb") as f:
+            self.assertEqual(f.read(), self.clip_a)
+        with open(os.path.join(self.lib, "Case 2", "Night", "clips", "b.wav"), "rb") as f:
+            self.assertEqual(f.read(), self.clip_b)
+        r = self.index(api)
+        self.assertEqual([f["name"] for f in r["files"]], ["real.wav"])
+        with mock.patch.object(backend.Api, "_index_file", side_effect=AssertionError("clips are never read")):
+            self.assertEqual(api.delete_folder(self.folder(r, "Case 2")), {"ok": True, "backups": 0})
+        binned = os.path.join(self.tmp, "bin-1")
+        with open(os.path.join(binned, "Clips", "a.wav"), "rb") as f:
+            self.assertEqual(f.read(), self.clip_a)
+        self.assertTrue(os.path.isfile(os.path.join(binned, "Clips", "Deeper", "d.wav")))
+        self.assertIsNone(self.store.recording(self.fp(self.clip_a)))
+        self.assertEqual(self.names(), ["CLIPS"])
 
 
 if __name__ == "__main__":

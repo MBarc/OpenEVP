@@ -35,6 +35,7 @@ BACKUP_RECYCLED = "The backup was moved to the Recycle Bin."
 BACKUP_UNCHECKED = ("The backup could not be checked before a library folder was deleted "
                     "(it may have been in it); back it up again.")
 ROOT_CHANGED = "The library folder changed. Refresh and try again."
+CLIPS = "Clips"             # the subfolder EVP clips go into; the library leaves it out
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
@@ -46,6 +47,12 @@ def _plain(e):
     if isinstance(e, OSError) and e.filename:
         return f"{e.strerror or type(e).__name__} ({os.path.basename(e.filename)})"
     return str(e) or type(e).__name__
+
+
+def _clips_folder(name):
+    """Is a folder name a Clips folder (any case)? Clips are output for sharing: the
+    library never lists, indexes or counts them, nor imports their markers."""
+    return name.casefold() == CLIPS.casefold()
 
 
 def _kind_format(kind):
@@ -293,7 +300,12 @@ class LibraryOps:
                         continue
                     if e.is_dir():
                         info["subfolders"] += 1
-                        stack.append(e.path)
+                        if _clips_folder(e.name):       # goes along, but its clips are not recordings
+                            files, dirs = self._count_files(e.path)
+                            info["other_files"] += files
+                            info["subfolders"] += dirs
+                        else:
+                            stack.append(e.path)
                         continue
                     st = e.stat()
                 except OSError:
@@ -320,6 +332,29 @@ class LibraryOps:
                     if r is not None and r["marks"]:
                         info["with_evps"] += 1
         return info
+
+    @staticmethod
+    def _count_files(path):
+        """(files, subfolders) in a folder, counted all the way down (links not followed)."""
+        n, dirs, stack = 0, 0, [path]
+        while stack:
+            try:
+                with os.scandir(stack.pop()) as it:
+                    entries = list(it)
+            except OSError:
+                continue
+            for e in entries:
+                try:
+                    if folders.entry_is_link(e):
+                        n += 1
+                    elif e.is_dir():
+                        dirs += 1
+                        stack.append(e.path)
+                    else:
+                        n += 1
+                except OSError:
+                    continue
+        return n, dirs
 
     def _backups_in(self, path, walked, fingerprint=False):
         """{fp: (its backup record, its backup files found in path, the detail to
