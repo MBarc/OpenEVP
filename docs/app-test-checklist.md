@@ -32,3 +32,14 @@ from the frozen build is caught):
     finishes with no "stuck" errors. Repeat three times.
 14. Two recorders at once (when available): both listed; exporting from one while
     browsing the other works.
+
+ICD-ST10 (download only until the LPEC ST decoder exists):
+
+15. Plug it in and click it: it is listed as "Sony ICD-ST10"; its recordings show
+    "undated" (clock not set) and lengths matching `st25-download --list`; the
+    status line says LPEC ST audio can't be played yet, and WAV is greyed out.
+16. Export as .dvf: the files are saved (`001_A_001_Unknown.dvf`...); exporting
+    again says they are already there.
+17. Open the Save-to folder in the EVP Library: the ST10 files are listed greyed
+    out with the reason, not with a damaged-file warning, and clicking one says
+    why instead of trying to play it.

@@ -10,7 +10,7 @@ Windows PC: one installer, no manufacturer software, no old 32-bit computer.
 | Recorder | Status |
 |---|---|
 | Sony ICD-ST25 | ✅ Supported: download, play, WAV export, EVP marks |
-| Sony ICD-ST10 | 🛠 Planned |
+| Sony ICD-ST10 | 🟡 Download only (playback coming) |
 | Panasonic RR-DR60 | 🛠 Planned |
 
 Have a recorder you'd like supported? [Open an issue](https://github.com/MBarc/OpenEVP/issues).
@@ -27,6 +27,15 @@ differently, which do not affect the audio.
 OpenEVP also exports and plays WAV itself, with its own decoder for Sony's LPEC
 format: its WAV files are byte-identical to the ones DVE writes for the same
 recordings (checked on the same 20 recordings), so DVE is no longer needed.
+
+The ICD-ST10 uses the same USB ID, driver and protocol as the ICD-ST25, so it is
+set up and found the same way; the app shows it as an ICD-ST10 once it has read
+it. Its recordings are in another codec, LPEC ST (44.1 kHz stereo), which
+OpenEVP can't play or convert to WAV yet. They are listed and saved as `.dvf`
+files, and the app says plainly that they can't be played yet. Keep those
+files: a later OpenEVP will play them without downloading them again. Their
+`.dvf` header is OpenEVP's own for now, since no `.dvf` saved by DVE from an
+ICD-ST10 has been compared yet.
 
 Nothing on a recorder is changed or deleted. For the ST25 the program can only
 send the exact read commands DVE itself sends to list and download recordings.
@@ -220,10 +229,15 @@ can't add, edit or delete marks (it says so) until the first is closed.
   so recordings in B–E were reported and not saved (never saved wrong). It now
   names the folder, as Digital Voice Editor does; checked on an ICD-ST10
   (folders B and C), not yet on an ICD-ST25.
-- **LP mode only.** Only LP recordings have been checked. A recording whose data
-  does not carry the LP marker is reported and not saved. Whether SP recordings
-  carry a different marker is unknown until an SP sample has been analysed, so
-  record in LP.
+- **ICD-ST25: LP mode only.** Only LP recordings have been checked. The folder
+  table names each recording's mode; a mode OpenEVP doesn't know (SP, perhaps)
+  is reported and not saved, so record in LP.
+- **ICD-ST10: download only**, verified on one recorder with three recordings
+  (2026-09-29). Its recordings have no owner name, and no date while its clock
+  isn't set, so their files are named like `001_A_001_Unknown.dvf`. Lengths
+  include a few short segment frames, so they can read a fraction of a second
+  long. Its flash size is not known; a recording longer than 32 MB (about an
+  hour and a half of LPEC ST) would be reported, not saved.
 - Messages in table slots 64 and above rely on an assumed layout. Each message is
   cross-checked against its downloaded data, so a wrong assumption stops the
   download rather than writing a bad file.
