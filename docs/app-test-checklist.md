@@ -46,3 +46,29 @@ ICD-ST10 (LPEC ST, 44.1 kHz stereo):
     unmarked one as WAV: it matches `st25-download --wav` byte for byte.
 19. Open the Save-to folder in the EVP Library: the ST10 files are listed with
     their length and marks, and play.
+20. ICD-ST10 clips: mark an EVP on an ST recording and one on an SP recording,
+    **Export clips** on each: the clips open as 44.1 kHz stereo and 16 kHz mono
+    respectively, 1 s plus the mark long. In a build without the SP tables, a
+    library folder holding an SP recording lists it as skipped ("can't be
+    played"), and it is still listed normally afterwards.
+
+EVP clips:
+
+21. EVP clips: mark two EVPs on A-001 (one with a note containing `?` and `:`),
+    click **Export clips**: "2 clips saved"; **Open folder** shows
+    `Save to\A\Clips` with two WAVs named `…_EVP-<class>_<MMmSS.s>s[_note].wav`.
+    Each opens in an audio editor (Audacity, say) as 8 kHz mono, with the EVP
+    0.5 s in and its label ("EVP A: …") shown as a marker. Export again: "0 clips
+    saved (2 already there)". **Save clip** on one row saves only that one.
+22. In the EVP Library, right-click a folder holding marked recordings in
+    subfolders, plus a damaged `.dvf` → **Export clips**: progress shows, the
+    summary counts the clips and names the damaged file as skipped with its
+    reason. Start it again on a big folder and click **Cancel**: it stops after
+    the current recording. Close the window during one: the app asks first.
+23. A second OpenEVP window: Export clips (player and library) is refused with
+    the "another OpenEVP is open" reason.
+24. After exporting clips into the library: the EVP Library shows no `Clips`
+    folder and no clip, "Has EVPs" and the folder counts are unchanged; the
+    `Clips` folder holds a hidden `.openevp-clips` file (Explorer: show hidden
+    items). Renaming the investigation folder keeps its `Clips` folder. Delete
+    `.openevp-clips`: the folder and its clips show up in the library again.

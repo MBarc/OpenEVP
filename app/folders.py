@@ -48,6 +48,19 @@ def clean_name(name, what="folder"):
     return name, None
 
 
+def hide(path):
+    """Give a file Windows' hidden attribute (best effort; nothing elsewhere)."""
+    if sys.platform != "win32":
+        return
+    try:
+        full = os.path.abspath(path)
+        attrs = ctypes.windll.kernel32.GetFileAttributesW(full)
+        if attrs != 0xFFFFFFFF:
+            ctypes.windll.kernel32.SetFileAttributesW(full, attrs | 0x2)     # FILE_ATTRIBUTE_HIDDEN
+    except Exception:
+        pass
+
+
 def too_long(path):
     """Is a full path too long to be used safely?"""
     return len(os.path.abspath(path)) >= MAX_PATH_CHARS

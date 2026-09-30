@@ -34,6 +34,10 @@ fingerprinted by one background indexer (also a registered worker), which
 reports "library-row" / "library-progress" / "library-done" events tagged with
 the scan_id of the list_library() call that started it.
 
+EVP clips (one WAV per mark, openevp.clips) go into a Clips subfolder of the
+folder a WAV with marks goes into: export_clips() for the loaded recording (like
+export_marked()), and a background job for library recordings or folders.
+
 Library folders can be created, renamed and deleted (to the Recycle Bin only),
 and recordings moved between them: see app/library_ops.py (mixed into Api) and
 app/folders.py.
@@ -45,7 +49,7 @@ import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, formats, recorders, wavinfo
+from openevp import __version__, clips, formats, recorders, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -55,8 +59,10 @@ from .updater import UpdateCancelled
 from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
-                          _decoder_problem, _decoder_problems, _file_id, _folder_id, _kind_format, _plain)
-from .library_ops import (BACKUP_RECYCLED, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
+                          _clips_folder, _make_clips_folder, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
+                          _kind_format,
+                          _plain)
+from .library_ops import (BACKUP_RECYCLED, CLIPS, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -72,6 +78,8 @@ NO_AUDIO = "This recording has no audio to mark."
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
+CLIPS_BUSY = "Wait for the export to finish, then export the clips."
+CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 
 
 class _BackupRunning(Exception):
@@ -171,7 +179,8 @@ def _scan_library(folder):
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
-    hidden or system (AppData, $RECYCLE.BIN...) are skipped. complete is
+    hidden or system (AppData, $RECYCLE.BIN...) and the Clips folders OpenEVP made
+    (they hold its marker file) are skipped. complete is
     False when a folder could not be read (its files are missing from the
     list). investigation is the first folder under `folder` ("" for files
     directly in it). The folders list holds every subfolder walked (including
@@ -198,7 +207,9 @@ def _scan_library(folder):
                 if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
-                    if not folders.entry_is_hidden(e):  # AppData, System Volume Information...
+                    # AppData, System Volume Information..., and the Clips folders OpenEVP made (EVP
+                    # clips: output for sharing, never listed, indexed or counted, markers never imported)
+                    if not folders.entry_is_hidden(e) and not _clips_folder(e.path):
                         subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
@@ -365,6 +376,7 @@ class Api(LibraryOps):
         self._updating = False
         self._busy = threading.Lock()      # held while an export, export_marked() or an update install runs
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
+        self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -894,6 +906,21 @@ class Api(LibraryOps):
         while it runs. Admission checks _stop under _workers_lock, the lock
         shutdown() takes after setting _stop, so shutdown() either refuses it or
         sees it and waits for it before closing the store."""
+        return self._marked_call(rec, self._export_marked)
+
+    def export_clips(self, rec, mark_id=None):
+        """Save each mark of the loaded recording (or only the mark mark_id) as its
+        own WAV clip into the Clips subfolder of the folder export_marked() would
+        use: see openevp.clips. Never replaces a file (identical bytes count as
+        already saved). Admitted, locked and waited for exactly as export_marked().
+        {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}."""
+        if mark_id is not None and not isinstance(mark_id, str):
+            return _fail("That mark is no longer there.")
+        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id), CLIPS_BUSY, CLIPS_BUSY_UPDATE)
+
+    def _marked_call(self, rec, work, busy=MARKED_BUSY, busy_update=MARKED_BUSY_UPDATE):
+        """Run work(entry) for a loaded recording on the caller's thread, holding
+        _busy (see export_marked())."""
         if self._store is None:
             return _fail(NO_MARKS)
         read_only = self._second_window()
@@ -908,10 +935,10 @@ class Api(LibraryOps):
             if self._stop.is_set():
                 return _fail(CLOSING)
             if not self._busy.acquire(blocking=False):
-                return _fail(MARKED_BUSY_UPDATE if self._updating else MARKED_BUSY)
+                return _fail(busy_update if self._updating else busy)
             done = self._marked_done = threading.Event()
         try:
-            return self._export_marked(entry)
+            return work(entry)
         finally:
             with self._workers_lock:
                 self._marked_done = None
@@ -919,13 +946,14 @@ class Api(LibraryOps):
             done.set()
 
     def saving_marked(self):
-        """True while export_marked() runs (the close prompt says so)."""
+        """True while export_marked() or export_clips() runs (the close prompt says so)."""
         return self._marked_done is not None
 
-    def _export_marked(self, entry):
-        marks = self._store.marks(entry["fp"])
-        if not marks:
-            return _fail("This recording has no marks yet.")
+    def _entry_audio(self, entry, doing):
+        """(wav, the folder export_marked() saves into, the file stem) for a loaded
+        recording, decoded afresh and checked to be the audio that was loaded; or
+        the _fail() saying why not. doing: what could not be done, for messages
+        ("add the marks to")."""
         src = entry["source"]
         try:
             if src["kind"] == "device":
@@ -943,33 +971,28 @@ class Api(LibraryOps):
                     return _fail(f"The recorder gave {src['label']} a file name OpenEVP cannot use.")
                 if wav is None:
                     wav = _decoder(src["format"]).to_wav(data, should_stop=self._stop.is_set)
-                outdir = os.path.join(self._dest, src["safe_name"])
-                out_name = os.path.splitext(native_name)[0] + ".wav"
+                return wav, os.path.join(self._dest, src["safe_name"]), os.path.splitext(native_name)[0]
+            path = src["path"]
+            name = os.path.basename(path)
+            with open(path, "rb") as f:
+                raw = f.read()
+            fmt = formats.by_ext(os.path.splitext(name)[1])
+            if fmt is not None and fmt is not formats.WAV:
+                problem = _decoder_problem(fmt) or fmt.data_problem(raw)
+                if problem:
+                    return _fail(f"WAV export: {problem}.")
+                wav = _decoder(fmt).to_wav(raw, should_stop=self._stop.is_set)
             else:
-                path = src["path"]
-                name = os.path.basename(path)
-                with open(path, "rb") as f:
-                    raw = f.read()
-                fmt = formats.by_ext(os.path.splitext(name)[1])
-                if fmt is not None and fmt is not formats.WAV:
-                    problem = _decoder_problem(fmt) or fmt.data_problem(raw)
-                    if problem:
-                        return _fail(f"WAV export: {problem}.")
-                    wav = _decoder(fmt).to_wav(raw, should_stop=self._stop.is_set)
-                else:
-                    wav = raw
-                del raw
-                try:
-                    with wavinfo.buffer_file(wav) as f:
-                        same = wavinfo.wav_fingerprint(f) == entry["fp"]
-                except ValueError:
-                    same = False
-                if not same:
-                    return _fail(f"{name} has changed since it was loaded. Load it again.")
-                investigation = _investigation(path, self._library_path())
-                outdir = os.path.join(self._dest, investigation) if investigation else self._dest
-                out_name = os.path.splitext(name)[0] + ".wav"
-            marked = wavinfo.marked_parts(wav, marks)
+                wav = raw
+            del raw
+            try:
+                with wavinfo.buffer_file(wav) as f:
+                    same = wavinfo.wav_fingerprint(f) == entry["fp"]
+            except ValueError:
+                same = False
+            if not same:
+                return _fail(f"{name} has changed since it was loaded. Load it again.")
+            return wav, self._marked_folder(path), os.path.splitext(name)[0]
         except formats.Cancelled:
             return _fail(CLOSING)
         except OSError as e:
@@ -977,8 +1000,33 @@ class Api(LibraryOps):
         except formats.DecodeError as e:                 # as the decoder's own error was before
             cause = _unwrapped(e)
             if isinstance(cause, ValueError):
-                return _fail(f"Could not add the marks to {entry['name']}: {cause}")
+                return _fail(f"Could not {doing} {entry['name']}: {cause}")
             return _error(cause)
+        except ValueError as e:
+            return _fail(f"Could not {doing} {entry['name']}: {e}")
+        except Exception as e:
+            return _error(e)
+
+    def _marked_folder(self, path, dest=None, library=None):
+        """Where export_marked() saves a file's WAV: the Save-to folder's folder named
+        like the file's investigation, or the Save-to folder itself. dest and library:
+        the Save-to and library folders to use (default: the current ones)."""
+        dest = self._dest if dest is None else dest
+        investigation = _investigation(path, self._library_path() if library is None else library)
+        return os.path.join(dest, investigation) if investigation else dest
+
+    def _export_marked(self, entry):
+        marks = self._store.marks(entry["fp"])
+        if not marks:
+            return _fail("This recording has no marks yet.")
+        got = self._entry_audio(entry, "add the marks to")
+        if isinstance(got, dict):
+            return got
+        wav, outdir, stem = got
+        del got
+        out_name = stem + ".wav"
+        try:
+            marked = wavinfo.marked_parts(wav, marks)
         except ValueError as e:
             return _fail(f"Could not add the marks to {entry['name']}: {e}")
         except Exception as e:
@@ -992,6 +1040,263 @@ class Api(LibraryOps):
         folder_name = os.path.basename(outdir) if outdir != self._dest else ""   # the subfolder's name, never a path
         return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path),
                 "folder_name": folder_name}
+
+    # ---- EVP clips: one WAV per mark (openevp.clips) ----------------------------------
+    def _export_clips(self, entry, mark_id):
+        marks = self._store.marks(entry["fp"])
+        if mark_id is not None:
+            marks = [m for m in marks if m.get("id") == mark_id]
+            if not marks:
+                return _fail("That mark is no longer there.")
+        if not marks:
+            return _fail("This recording has no marks yet.")
+        got = self._entry_audio(entry, "cut clips from")
+        if isinstance(got, dict):
+            return got
+        wav, outdir, stem = got
+        del got
+        outdir = os.path.join(outdir, CLIPS)
+        try:
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem)
+        except OSError as e:
+            return _fail(f"The clips were not saved: {_plain(e)}", DISK)
+        return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
+                "folder": outdir if saved or already else None}
+
+    def _save_clips(self, wav, marks, outdir, stem):
+        """Cut and save one clip per mark into outdir: (saved, already there, file
+        names, notes on clips not made). Raises OSError when a clip cannot be written."""
+        saved = already = 0
+        names, notes = [], []
+        for m in marks:
+            try:
+                clip = clips.cut(wav, m)
+            except ValueError as e:
+                notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
+                continue
+            name = clips.name(stem, m)
+            if folders.too_long(os.path.join(outdir, name)):
+                name = clips.name(stem, m, with_note=False)          # the note is what can go
+                if folders.too_long(os.path.join(outdir, name)):
+                    notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
+                                 "(the path would be too long for Windows)")
+                    continue
+            _make_clips_folder(outdir)
+            path, done = save_wav(clip, outdir, name)
+            names.append(os.path.basename(path))
+            if done:
+                already += 1
+            else:
+                saved += 1
+        return saved, already, names, notes
+
+    def export_clips_files(self, file_ids, job):
+        """Export the clips of library recordings (by file id: the copies of one
+        recording, say) as a background job; see _clips_job."""
+        refused = self._clips_refused()
+        if refused:
+            return refused
+        if not isinstance(file_ids, list) or not file_ids or not all(isinstance(i, str) for i in file_ids):
+            return _fail("Nothing valid is selected.")
+        paths = []
+        for fid in file_ids:
+            path = self._library_file(fid)
+            if path is None:
+                return _fail(LIB_CHANGED)
+            if path not in paths:
+                paths.append(path)
+        return self._start_clips(lambda: [(p, "") for p in paths], None, job)
+
+    def export_clips_folder(self, folder_id, job):
+        """Export the clips of every marked recording in a library folder and all its
+        subfolders as a background job (the Clips folders OpenEVP made are left out,
+        as the library leaves them out); see _clips_job."""
+        refused = self._clips_refused()
+        if refused:
+            return refused
+        found = self._lib_paths(folder_id)
+        if found is None:
+            return _fail(LIB_CHANGED)
+        root, path = found
+        refused = self._usable(root, path, allow_root=True)
+        if refused:
+            return refused
+
+        def work():
+            files = _scan_library(path)[0]                 # never inside a Clips folder of OpenEVP's
+            # A folder's WAV copies first: a .dvf with a WAV copy beside it is then never decoded.
+            files.sort(key=lambda f: (tuple(p.casefold() for p in f[5]), f[2] != "wav", f[1].casefold()))
+            return [(f[3], f[2]) for f in files]
+        return self._start_clips(work, os.path.basename(os.path.normpath(path)) or "the library", job)
+
+    def cancel_clips(self, job):
+        """Stop a clips job after the recording it is on (a long decode stops at once)."""
+        with self._workers_lock:
+            running = self._clips_running
+        if running is not None and running[0] == job:
+            running[1].set()
+        return {"ok": True}
+
+    def _clips_refused(self):
+        """Why no clips job can start now (checked again when it starts), or None."""
+        if self._store is None:
+            return _fail(NO_MARKS)
+        read_only = self._second_window()
+        if read_only:
+            return _fail(read_only)
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        return None
+
+    def _start_clips(self, work, where, job):
+        refused = self._clips_refused()
+        if refused:
+            return refused
+        cancel = threading.Event()
+        # Save-to and the library folder as they are now: a change during the job never splits its clips.
+        with self._dest_lock:
+            dest = self._dest
+        library = self._library_path()
+        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library),
+                                  name="clips")
+        with self._workers_lock:              # admitted, started and registered in one step against shutdown()
+            if self._stop.is_set():
+                return _fail(CLOSING)
+            if not self._busy.acquire(blocking=False):
+                return _fail(CLIPS_BUSY_UPDATE if self._updating else CLIPS_BUSY)
+            try:
+                thread.start()
+            except Exception as e:
+                self._busy.release()
+                return _fail(f"Could not start the export: {e}")
+            self._clips_running = (job, cancel)
+            self._workers = [t for t in self._workers if t.is_alive()] + [thread]
+        return {"ok": True, "job": job}
+
+    def clips_running(self):
+        """True while a library clips job runs (the close prompt says so)."""
+        return self._clips_running is not None
+
+    def _clips_job(self, work, where, job, cancel, dest, library):
+        """Cut the clips of each marked recording in work() ([(path, kind)]): copies
+        of one recording (the same fingerprint) are exported once per destination.
+        Unmarked recordings are passed over; ones that cannot be read or decoded are
+        skipped and reported. Events: "clips-progress", then "clips-done" (also when
+        cancelled or closing) or "clips-failed" (a clip could not be written), sent
+        once _busy is free again. dest, library: the Save-to and library folders
+        when the job started."""
+        saved = already = recordings = 0
+        skipped, notes, outdirs, done_keys = [], [], [], set()
+        outcome = []
+
+        def stopped():
+            return self._stop.is_set() or cancel.is_set()
+
+        def finish(event, **extra):
+            folder = outdirs[0] if len(outdirs) == 1 else (dest if outdirs else None)
+            outcome.append((event, {"job": job, "saved": saved, "already": already, "recordings": recordings,
+                                    "skipped": skipped, "notes": notes, "folder": folder, "where": where,
+                                    **extra}))
+        try:
+            try:
+                items = work()
+            except Exception as e:
+                finish("clips-failed", error=f"The folder could not be read: {_plain(e)}", advice="")
+                return
+            problems = _decoder_problems(os.path.splitext(p)[1].lower()[1:] for p, _ in items)
+            for i, (path, _kind) in enumerate(items, 1):
+                if stopped():
+                    finish("clips-done", cancelled=True, closing=self._stop.is_set())
+                    return
+                name = os.path.basename(path)
+                try:
+                    got = self._file_clips_audio(path, problems, stopped)
+                except formats.Cancelled:
+                    finish("clips-done", cancelled=True, closing=self._stop.is_set())
+                    return
+                if isinstance(got, str):
+                    skipped.append(f"{name} ({got})")
+                elif got is not None:
+                    wav, fp, marks = got
+                    outdir = os.path.join(self._marked_folder(path, dest, library), CLIPS)
+                    key = (fp, os.path.normcase(os.path.abspath(outdir)))
+                    if key not in done_keys:
+                        done_keys.add(key)
+                        try:
+                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0])
+                        except OSError as e:
+                            finish("clips-failed", error=f"Could not save the clips of {name}: {_plain(e)}",
+                                   advice=DISK)
+                            return
+                        saved, already, recordings = saved + s, already + a, recordings + 1
+                        notes.extend(n)
+                        if (s or a) and outdir not in outdirs:
+                            outdirs.append(outdir)
+                    del wav, got
+                self._emit("clips-progress", {"job": job, "done": i, "total": len(items), "name": name})
+            finish("clips-done", cancelled=False, closing=False)
+        except Exception as e:                   # never leave the page waiting
+            finish("clips-failed", error=f"The clips export stopped: {_plain(e)}", advice="")
+        finally:
+            with self._workers_lock:
+                if self._clips_running is not None and self._clips_running[0] == job:
+                    self._clips_running = None
+            self._busy.release()                 # before the page hears it is over: it may start another
+            for event, payload in outcome[:1]:
+                self._emit(event, payload)
+
+    def _file_clips_audio(self, path, problems, stopped):
+        """(wav, fp, marks) of a library file with marks; None when it has none; or
+        why it cannot be read, in a few words. A fingerprint cached for this very
+        version of the file saves decoding an unmarked one. A file that cannot be
+        played (no decoder for its format, or its own header says so: an ICD-ST10
+        codec without its tables) is reported as skipped; nothing is cached here, so
+        it is never remembered as damaged. The WAV is decoded as export_marked()
+        decodes it. Raises formats.Cancelled."""
+        kind = os.path.splitext(path)[1].lower()[1:]
+        fmt = _kind_format(kind)
+        if fmt is None:
+            return None
+        try:
+            st = os.stat(path)
+        except OSError as e:
+            return _fs_problem(e)
+        cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
+        if cached and cached.get("fp") and not self._store.marks(cached["fp"]):
+            return None                          # known, and not marked
+        if fmt is not formats.WAV:
+            if kind in problems:
+                return problems[kind]
+            unplayable = self._file_problem(fmt, path, st)     # header only, read once per version
+            if unplayable:
+                return f"can't be played: {unplayable}"
+            if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
+                return f"too large to be {fmt.a_recording()}"
+        try:
+            with open(path, "rb") as f:
+                raw = f.read()
+            if fmt is formats.WAV:
+                wav = raw
+            else:
+                unplayable = fmt.data_problem(raw)            # the file changed since its header was read
+                if unplayable:
+                    return f"can't be played: {unplayable}"
+                wav = _decoder(fmt).to_wav(raw, should_stop=stopped)
+            del raw
+            with wavinfo.buffer_file(wav) as f:
+                fp = wavinfo.wav_fingerprint(f)
+        except formats.Cancelled:
+            raise
+        except formats.DecoderUnavailable as e:              # not the file's fault
+            return f"can't be played: {_plain(e)}"
+        except OSError as e:
+            return _fs_problem(e)
+        except MemoryError:
+            return "not enough memory to decode it"
+        except Exception as e:
+            return f"its audio could not be decoded: {_plain(_unwrapped(e))}"
+        marks = self._store.marks(fp)
+        return (wav, fp, marks) if marks else None
 
     def _import_markers(self, path, info, name, stat):
         """Import a WAV's embedded markers, once per recording (the store decides:
@@ -1595,8 +1900,10 @@ class Api(LibraryOps):
             self._workers = [t for t in self._workers if t.is_alive()] + [thread]
 
     def exporting(self):
-        """True while an export of recorder recordings runs (export_marked(): saving_marked())."""
-        return self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
+        """True while an export of recorder recordings runs (export_marked(): saving_marked();
+        a clips job: clips_running())."""
+        return (self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
+                and self._clips_running is None)
 
     def stopping(self):
         """True once the app is closing: long decodes poll this to stop early."""

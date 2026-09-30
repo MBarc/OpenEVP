@@ -9,8 +9,8 @@ Windows PC: one installer, no manufacturer software, no old 32-bit computer.
 
 | Recorder | Status |
 |---|---|
-| Sony ICD-ST25 | ✅ Supported: download, play, WAV export, EVP marks |
-| Sony ICD-ST10 | ✅ Supported (LPEC ST, SP and LP): download, play, WAV export, EVP marks |
+| Sony ICD-ST25 | ✅ Supported: download, play, WAV export, EVP marks, EVP clips |
+| Sony ICD-ST10 | ✅ Supported (LPEC ST, SP and LP): download, play, WAV export, EVP marks, EVP clips |
 | Panasonic RR-DR60 | 🛠 Planned |
 
 Have a recorder you'd like supported? [Open an issue](https://github.com/MBarc/OpenEVP/issues).
@@ -190,8 +190,9 @@ could be recycled is, the rest stays where it was, and OpenEVP says so.
 
 Right-click in the library for the same tools: on an empty part of the list,
 **New folder**; on a folder, **Open**, **Rename** or **Delete**; on a recording,
-**Play**, **Rename…** or **Move to…** (all the ticked recordings, if you right-click a
-ticked one).
+**Play**, **Rename…**, **Move to…** (all the ticked recordings, if you right-click a
+ticked one) or **Export clips**. A folder's **Export clips** does every marked recording
+in it and in its subfolders (see *EVP clips* below).
 
 **Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that folder get the new name,
 each keeping its extension; a name that's already taken is refused, and marks stay with it.
@@ -220,6 +221,40 @@ marks written in, to the Save-to folder (into the recorder folder's letter,
 or the investigation's folder for a file in the library). Those marks are standard RIFF
 `cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
 read (none has been verified with OpenEVP yet).
+
+### EVP clips
+
+**Export clips** (next to Export WAV with marks) saves every mark of the loaded
+recording as its own short WAV; **Save clip** in a mark's row saves just that one.
+In the library, right-click a recording, or a folder (every marked recording in
+it and its subfolders), and choose **Export clips**. A folder runs in the
+background with a progress bar and **Cancel**; recordings that can't be decoded
+(no decoder, an ICD-ST10 mode this build can't play, or damaged) are skipped
+and listed with the reason. When it's done
+the banner says how many clips were saved (and how many were already there),
+with **Open folder**.
+
+- Each clip is the mark plus **0.5 s** on each side (less at the very start or
+  end of the recording), cut from the decoded audio in its own format — an ST25
+  recording stays 8 kHz mono, an ICD-ST10 one 44.1 kHz stereo (ST) or 16 kHz
+  mono (SP); nothing is resampled.
+- Clips go into a **`Clips`** folder inside the folder Export WAV with marks
+  uses (for example `Save to\A\Clips` or `Save to\Old Mill\Clips`), named
+  `<recording>_EVP-<class>_<MMmSS.s>s[_<note>].wav`, e.g.
+  `001_A_003_EVP-A_00m12.4s.wav`. The note is shortened and characters Windows
+  doesn't allow in file names are left out.
+- The mark's class and note are written into the clip as a WAV marker, like in
+  the WAV with marks.
+- Nothing is overwritten: a clip already saved with the same bytes counts as
+  "already there"; a different one gets a numbered name ("… (2).wav").
+- Clips are for sharing, so the EVP Library ignores the `Clips` folders OpenEVP
+  creates: they are not listed, checked or counted, their markers are not read
+  as marks, and clips are never cut from clips. Open them with **Open folder**.
+  OpenEVP recognises its own `Clips` folders by a small hidden file inside,
+  `.openevp-clips`; delete that file and the folder shows up in the library
+  again. A folder you named `Clips` yourself is an ordinary folder (clips saved
+  into it show up in the library). Renaming, moving or deleting a folder takes
+  its `Clips` folder along untouched.
 
 ### Where marks live
 

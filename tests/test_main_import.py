@@ -66,6 +66,13 @@ class MainImportTests(unittest.TestCase):
         self.assertIn("WAV with its EVP marks", text)
         self.assertIn("backup of a marked recording", main._close_question(False, True, True)[1])
 
+    def test_close_question_has_its_own_words_for_a_clips_job(self):
+        main = self.main()
+        title, text = main._close_question(False, False, False, True)
+        self.assertEqual((title, text), ("Export in progress",
+                                         "Clips are still being exported. Stop after the current recording and close?"))
+        self.assertIn("backup of a marked recording", main._close_question(False, True, False, True)[1])
+
     def test_only_an_explicit_smoke_flag_starts_the_smoke_test(self):
         """--smoke is for tools/release_check.py; any other command line runs the app as before."""
         main = self.main()
