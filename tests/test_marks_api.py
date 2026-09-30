@@ -12,7 +12,7 @@ import wave
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
+from fixtures import DATE, FakeRecorderDevice, made_wav, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
 from app.store import AppData, _acquire_lock  # noqa: E402
 from openevp import wavinfo  # noqa: E402
@@ -51,9 +51,9 @@ class FakeServer:
         self.cache = {}
         self.made = 0
 
-    def prepare(self, key, make=None):
+    def prepare(self, key, make=None, write=None):
         if key not in self.cache:
-            wav = make()
+            wav = made_wav(make, write)
             self.made += 1
             with wave.open(io.BytesIO(wav)) as w:
                 duration = w.getnframes() / w.getframerate()

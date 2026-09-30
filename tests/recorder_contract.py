@@ -90,7 +90,8 @@ class RecorderContract:
         for _folder, recs in self.listing(session):
             self.assertIsInstance(recs, list)
             for r in recs:
-                self.assertEqual(set(r), set(base.RECORDING_FIELDS))
+                self.assertEqual(set(r) - set(base.OPTIONAL_RECORDING_FIELDS), set(base.RECORDING_FIELDS))
+                self.assertTrue(r.get("play_problem") is None or isinstance(r["play_problem"], str))
                 self.assertIsInstance(r["number"], (int, str))
                 self.assertNotIsInstance(r["number"], bool)
                 self.assertIsInstance(r["recorded_label"], str)
@@ -171,6 +172,14 @@ class RecorderContract:
         self.assertTrue(warning is None or isinstance(warning, str))
         session = self.open_session()
         data = self.first_data(session)
+        problem = self.model.wav_problem()
+        self.assertTrue(problem is None or isinstance(problem, str))
+        if problem and available:
+            # The format decodes, but not this model's recordings (yet): said
+            # without blaming the file.
+            with self.assertRaises(formats.DecoderUnavailable):
+                decoder.to_wav(data)
+            return
         if not available:
             self.assertTrue(reason, "an unavailable decoder says why")
             with self.assertRaises(formats.DecoderUnavailable):

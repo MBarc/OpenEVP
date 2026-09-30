@@ -1,3 +1,4 @@
+import io
 import os
 import sys
 import types
@@ -103,6 +104,92 @@ class AudioTests(unittest.TestCase):
         self.assertEqual(msg, "the WAV decoder could not be loaded: "
                               "this build does not include the LPEC table data")
 
+
+
+def st10_header():
+    """The first bytes of an ICD-ST10 .dvf: enough for st25.dvf.codec() (0x24)."""
+    from st25 import dvf
+    h = bytearray(dvf._TEMPLATES[dvf.MODE_ST])
+    return bytes(h)
+
+
+class St10DispatchTests(unittest.TestCase):
+    """A .dvf is decoded by the decoder for its codec byte: LPEC ST (0x24) by
+    openevp.decoders.sony_lpec_st, anything else by the LP decoder."""
+
+    def fakes(self):
+        class FakeCancelled(Exception):
+            pass
+        lp = types.ModuleType("openevp.decoders.sony_lpec")
+        lp.dvf_to_wav = lambda data, should_stop=None: b"LP" + bytes(data[:2])
+        st = types.ModuleType("openevp.decoders.sony_lpec_st")
+        st.Cancelled = FakeCancelled
+        st.dvf_to_wav = lambda data, should_stop=None: b"ST"
+
+        def write(data, f, should_stop=None):
+            f.write(b"ST-streamed")
+            return 11
+        st.dvf_write_wav = write
+
+        def pcm(data, should_stop=None):
+            def chunks():
+                yield b"\x01\x00\x02\x00"
+                if should_stop is not None and should_stop():
+                    raise FakeCancelled("stopped")
+                yield b"\x03\x00\x04\x00"
+            return 2, 2, 44100, chunks()
+        st.dvf_pcm = pcm
+        return lp, st
+
+    def test_dispatch_by_codec(self):
+        lp, st = self.fakes()
+        with mock.patch.dict(sys.modules, {lp.__name__: lp, st.__name__: st}):
+            self.assertEqual(audio.dvf_to_wav(b"MS_VOICE-not-a-header"), b"LPMS")
+            self.assertEqual(audio.dvf_to_wav(st10_header()), b"ST")
+            self.assertTrue(audio.available(audio.CODEC_ST))
+            self.assertIsNone(audio.status(audio.CODEC_ST))
+
+    def test_streamed_forms(self):
+        lp, st = self.fakes()
+        with mock.patch.dict(sys.modules, {lp.__name__: lp, st.__name__: st}):
+            f = io.BytesIO()
+            self.assertEqual(audio.dvf_write_wav(st10_header(), f), 11)
+            self.assertEqual(f.getvalue(), b"ST-streamed")
+            f = io.BytesIO()
+            self.assertEqual(audio.dvf_write_wav(b"x", f), 3)           # LP: made, then written
+            self.assertEqual(f.getvalue(), b"LPx")
+            self.assertIsNone(audio.dvf_pcm(b"x"))                      # LP cannot stream
+            channels, width, rate, chunks = audio.dvf_pcm(st10_header())
+            self.assertEqual((channels, width, rate, b"".join(chunks)), (2, 2, 44100, b"\x01\x00\x02\x00\x03\x00\x04\x00"))
+            with self.assertRaises(audio.Cancelled):
+                b"".join(audio.dvf_pcm(st10_header(), should_stop=lambda: True)[3])
+
+    def test_a_build_without_the_st_decoder(self):
+        lp, _st = self.fakes()
+        with mock.patch.dict(sys.modules, {lp.__name__: lp, "openevp.decoders.sony_lpec_st": None}):
+            self.assertTrue(audio.available())                          # LP still converts
+            self.assertFalse(audio.available(audio.CODEC_ST))
+            self.assertEqual(audio.status(audio.CODEC_ST), "LPEC ST (ICD-ST10) playback is not included in this build")
+            with self.assertRaises(audio.DecoderUnavailable):
+                audio.dvf_to_wav(st10_header())
+            with self.assertRaises(audio.DecoderUnavailable):
+                audio.dvf_write_wav(st10_header(), io.BytesIO())
+            self.assertEqual(audio.dvf_to_wav(b"x"), b"LPx")
+
+    def test_st_tables_missing_message_is_plain(self):
+        from openevp.decoders import sony_lpec_st
+        missing = os.path.join(os.path.dirname(__file__), "no-such-dir", "lpec_st_tables.json")
+        with mock.patch.object(sony_lpec_st, "check", lambda: sony_lpec_st.tables.load(missing)):
+            self.assertEqual(audio.status(audio.CODEC_ST), "the LPEC ST decoder could not be loaded: "
+                                                           "this build does not include the LPEC ST table data")
+
+    def test_slow_mode_for_the_st_decoder(self):
+        lp, st = self.fakes()
+        st.fast_decoder_available = lambda: False
+        with mock.patch.dict(sys.modules, {lp.__name__: lp, st.__name__: st}),                 mock.patch.object(sys, "frozen", True, create=True):
+            self.assertTrue(audio.available(audio.CODEC_ST))
+            self.assertEqual(audio.status(audio.CODEC_ST), audio.SLOW_MODE)
+            self.assertIsNone(audio.status())                           # the LP fake has no C core flag
 
 if __name__ == "__main__":
     unittest.main()

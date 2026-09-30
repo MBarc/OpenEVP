@@ -13,7 +13,7 @@ import wave
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, make_raw  # noqa: E402
+from fixtures import DATE, made_wav, make_raw  # noqa: E402
 import release_gate  # noqa: E402
 from app import backend  # noqa: E402
 from app.store import AppData  # noqa: E402
@@ -93,8 +93,8 @@ class FakeServer:
         return {"url": "http://x/f.wav", "peaks": [0.1], "duration": duration,
                 "fp": wavinfo.wav_fingerprint(path), "stat": (os.stat(path).st_size, os.stat(path).st_mtime_ns)}
 
-    def prepare(self, key, make=None):
-        wav = make()
+    def prepare(self, key, make=None, write=None):
+        wav = made_wav(make, write)
         self.made.append(key)
         return {"url": "http://x/d.wav", "peaks": [0.2], "duration": 2.0,
                 "fp": wavinfo.wav_fingerprint(io.BytesIO(wav))}
@@ -178,7 +178,7 @@ class LibraryTests(unittest.TestCase):
                                ("Old Mill", "y.wav", "wav"), ("Old Mill", "x.dvf", "dvf")])
         for f in r["files"]:
             self.assertEqual(set(f), {"id", "name", "investigation", "type", "seconds", "modified", "fp",
-                                      "marks", "reviewed", "notes", "error", "folder_id"})
+                                      "marks", "reviewed", "notes", "error", "unplayable", "folder_id"})
             self.assertEqual((f["fp"], f["marks"], f["reviewed"], f["notes"], f["error"]),
                              (None, {"A": 0, "B": 0, "C": 0}, False, "", None))
             self.assertRegex(f["id"], "^[0-9a-f]{16}$")
@@ -292,7 +292,7 @@ class LibraryTests(unittest.TestCase):
             self.assertEqual(rows[names["y.wav"]["id"]]["seconds"], 1.5)
             for row in rows.values():
                 self.assertEqual(set(row), {"scan_id", "id", "fp", "marks", "reviewed", "notes", "seconds",
-                                            "error"})
+                                            "error", "unplayable"})
             progress = [p for n, p in self.events.items if n == "library-progress"]
             self.assertEqual(progress[-1], {"scan_id": first["scan_id"], "done": 4, "total": 4})
 
@@ -618,9 +618,9 @@ class LibraryTests(unittest.TestCase):
             again = api.list_library()
         self.assertEqual(fake.calls, 0)
         self.assertEqual(self.events.rows(r["scan_id"])[r["files"][0]["id"]]["error"],
-                         "huge.dvf is too large to be an ICD-ST25 recording.")
+                         "huge.dvf is too large to be a Sony ICD-ST recording.")
         self.assertEqual((again["indexing"], again["files"][0]["error"]),
-                         (False, "huge.dvf is too large to be an ICD-ST25 recording."))
+                         (False, "huge.dvf is too large to be a Sony ICD-ST recording."))
 
     def test_decoder_unavailable_or_out_of_memory_is_not_remembered(self):
         self.write("x.dvf", dvf_bytes())

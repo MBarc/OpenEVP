@@ -15,11 +15,15 @@ out*/
 openevp/decoders/sony_lpec/data/
 # LPEC C core, built by tools/build_lpec_core.py
 openevp/decoders/sony_lpec/lpec_core.dll
+# extracted LPEC ST tables (tools/import_lpec_st_tables.py) and its C core, the same way
+openevp/decoders/sony_lpec_st/data/
+openevp/decoders/sony_lpec_st/lpec_st_core.dll
 # their locations before v0.8 (a local copy may still be there)
 st25/lpec/data/
 st25/lpec/lpec_core.dll
-# decoder test vectors: synthetic audio only (see tests/vectors/*.json)
+# decoder test vectors: synthetic audio only (see tests/vectors/*.json, tests/vectors/lpec_sp/*.json)
 !tests/vectors/*.dvf
+!tests/vectors/lpec_sp/*.dvf
 driver-setup/
 # driver manifest, generated at build time (tools/make_driver_manifest.py)
 app/driver/models.json

@@ -1,0 +1,14 @@
+{
+ "name": "impulses",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 20,
+ "frame_sizes": {
+  "128": 19,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 20480,
+ "pcm_sha256": "bec1b48658c0d8115ab4d9d20efc1bd2c83c345a13f89626ff107143cd6dc8fa",
+ "pcm_file": "impulses.pcm"
+}

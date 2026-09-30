@@ -1,0 +1,14 @@
+{
+ "name": "white-noise",
+ "note": "synthetic PCM encoded with Sony's LPEC encoder (InitEncoder(16000, 16000, 0))",
+ "frames": 30,
+ "frame_sizes": {
+  "128": 29,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 30720,
+ "pcm_sha256": "6328289173cba4d7b2162fa378ddf47d4095ca3239ed95b2381f1130fe453d4f",
+ "pcm_file": "white-noise.pcm"
+}

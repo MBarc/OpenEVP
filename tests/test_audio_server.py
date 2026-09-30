@@ -103,6 +103,114 @@ class AudioServerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.s.prepare(("1-4@7", "A", 99))
 
+    def test_a_streamed_decode_is_written_into_the_cache_file(self):
+        """write(f) decodes into the cache file itself (a long ICD-ST10 recording is
+        never held in memory); peaks, duration and fingerprint come from the file."""
+        seen = []
+
+        def write(f):
+            seen.append(f.name)
+            for at in range(0, len(WAV), 1000):     # as a decoder would: frame by frame
+                f.write(WAV[at:at + 1000])
+        info = self.s.prepare(("1-4@7", "A", 5), write=write)
+        self.assertEqual(os.path.dirname(seen[0]), self.dir.name)
+        self.assertEqual(info["fp"], wavinfo.wav_fingerprint(io.BytesIO(WAV)))
+        self.assertAlmostEqual(info["duration"], 1.0)
+        self.assertEqual((info["rate"], info["channels"]), (8000, 1))    # the page sizes its detail by them
+        self.assertEqual(self.get(info["url"]).read(), WAV)
+        self.assertEqual(self.calls, [])                          # the provider is not asked
+        self.assertEqual(self.s.prepare(("1-4@7", "A", 5), write=write)["url"], info["url"])
+        self.assertEqual(len(seen), 1)                            # cached: decoded once
+
+    def test_a_failed_or_bad_decode_leaves_no_file(self):
+        def broken(f):
+            f.write(b"RIFF half a")
+            raise ValueError("the decoder stopped")
+        with self.assertRaisesRegex(ValueError, "the decoder stopped"):
+            self.s.prepare(("1-4@7", "A", 6), write=broken)
+        with self.assertRaises(ValueError):                       # not a PCM WAV
+            self.s.prepare(("1-4@7", "A", 7), write=lambda f: f.write(b"not a wav at all"))
+        with self.assertRaises(ValueError):
+            self.s.prepare(("1-4@7", "A", 8), make=lambda: b"not a wav either")
+        self.assertEqual(os.listdir(self.dir.name), [])
+        self.assertEqual(self.s._inflight, {})
+
+    def test_room_is_made_before_writing(self):
+        """With the expected size known, older decodes are evicted down to the
+        budget minus it before the new one is written (not only afterwards)."""
+        urls = [self.s.prepare(("1-4@7", "A", n))["url"] for n in (1, 2, 3)]      # budget: 3 x len(WAV)
+        seen = []
+
+        def write(f):
+            seen.append(sorted(os.listdir(self.dir.name)))
+            f.write(WAV)
+        self.s.prepare(("1-4@7", "A", 5), write=write, expected=2 * len(WAV))
+        self.assertEqual(len(seen[0]), 2)                         # two evicted before the write (+ the new file)
+        self.assertEqual(self.get(urls[2]).read(), WAV)            # the newest one kept
+        for url in urls[:2]:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.get(url)
+        self.s.reserve(3 * len(WAV))                               # write() can ask once it knows
+        self.assertEqual(len(os.listdir(self.dir.name)), 0)
+
+    def test_a_full_disk_evicts_everything_else_and_retries_once(self):
+        import errno
+        self.s.prepare(("1-4@7", "A", 1))
+        tries = []
+
+        def write(f):
+            tries.append(len(os.listdir(self.dir.name)))
+            if len(tries) == 1:
+                f.write(WAV[:100])
+                raise OSError(errno.ENOSPC, "No space left on device")
+            f.write(WAV)
+        info = self.s.prepare(("1-4@7", "A", 6), write=write)
+        self.assertEqual(tries, [2, 1])                            # then only the new file: the first entry gone
+        self.assertEqual(self.get(info["url"]).read(), WAV)
+
+        def full(f):
+            raise OSError(errno.ENOSPC, "No space left on device")
+        with self.assertRaises(OSError):                           # only once more
+            self.s.prepare(("1-4@7", "A", 7), write=full)
+        self.assertEqual(os.listdir(self.dir.name), [])           # everything else evicted, nothing left behind
+
+    def test_stale_cache_folders_are_removed_but_not_one_in_use(self):
+        from app import audio_server
+        with tempfile.TemporaryDirectory() as parent:
+            def folder(name, age=3600):
+                path = os.path.join(parent, name)
+                os.makedirs(path)
+                with open(os.path.join(path, "x.wav"), "wb") as f:
+                    f.write(b"x")
+                old = os.path.getmtime(path) - age
+                os.utime(path, (old, old))
+                return path
+            crashed = folder(audio_server.CACHE_PREFIX + "crashed")
+            marked = folder(audio_server.CACHE_PREFIX + "marked")
+            open(os.path.join(marked, audio_server.IN_USE), "wb").close()     # its app is gone
+            running = folder(audio_server.CACHE_PREFIX + "running")
+            held = audio_server.hold_cache(running)                  # another OpenEVP, still open
+            starting = folder(audio_server.CACHE_PREFIX + "starting", age=0)
+            other = folder("something-else")
+            mine = folder(audio_server.CACHE_PREFIX + "mine")
+            try:
+                removed = audio_server.clean_stale_caches(parent, keep=mine)
+                if sys.platform == "win32":                          # an open file can't be deleted there
+                    self.assertTrue(os.path.isdir(running))
+                self.assertEqual(sorted(removed), sorted([crashed, marked] +
+                                                         ([] if sys.platform == "win32" else [running])))
+                for path in (starting, other, mine):
+                    self.assertTrue(os.path.isdir(path))
+            finally:
+                held.close()
+            self.assertIn(running, audio_server.clean_stale_caches(parent))
+
+    def test_the_cache_holds_two_of_the_longest_st10_recordings(self):
+        from app import audio_server
+        longest_st10_wav = 44 + 92 * 60 * 44100 * 2 * 2            # 92 minutes, 44.1 kHz stereo 16-bit
+        self.assertGreaterEqual(audio_server.CACHE_BYTES, 2 * longest_st10_wav)
+        self.assertEqual(AudioServer(None, self.dir.name)._max, audio_server.CACHE_BYTES)
+
     def test_inflight_cleared_after_provider_failure(self):
         with self.assertRaises(ValueError):
             self.s.prepare(("1-4@7", "A", 99))

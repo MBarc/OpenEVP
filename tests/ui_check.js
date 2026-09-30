@@ -129,6 +129,15 @@ const listing = {
                        { value: "wav", label: "WAV", available: true, reason: null }],
              folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
                { number: 1, label: "A-001", recorded: "2029-05-23 19:54:04", seconds: 1.3, owner: "Casey", problem: null }] : [] })) },
+  // An ICD-ST10 (discovered as an ST25, relabelled once opened), in a build without the LPEC ST decoder:
+  // the recorder plays (its LP recordings would), but its LPEC ST recording says why it can't, per row.
+  // (With the decoder it plays: see below.)
+  "2-1@3": { ok: true, model: "Sony ICD-ST10", model_id: "sony-icd-st10", playable: true, play_reason: null,
+             formats: [{ value: "dvf", label: ".dvf (Sony original)", available: true, reason: null },
+                       { value: "wav", label: "WAV", available: true, reason: null }],
+             folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
+               { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null,
+                 play_problem: "LPEC ST (ICD-ST10) playback is not included in this build" }] : [] })) },
 };
 const api = {
   capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
@@ -223,6 +232,88 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                      JSON.stringify([{ folder: "a:b|c", number: "rec:1" }, { folder: "a:b|c", number: 7 },
                                      { folder: "7", number: "7" }]));
   assert.ok(!calls.some((c) => c[0] === "audio"));
+
+  // An ICD-ST10 in a build without the LPEC ST decoder: its LPEC ST recording can be selected and
+  // exported, not played; the reason is said plainly on that row (note, tooltip), never as an error.
+  vm.runInContext("S.exporting = false;", context);              // the stubbed export above never reports back
+  await context.openDevice("2-1@3");
+  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV"]);
+  assert.ok($("device-table").classList.contains("playable"));
+  assert.strictEqual($("status").textContent, "");
+  assert.strictEqual($("banner-text").textContent, "", "not an error");
+  assert.strictEqual($("devices").children[3].children[0].textContent, "Sony ICD-ST10 #4 (port 2-1)");  // relabelled at once
+  const st10row = $("rows").children[0];
+  assert.deepStrictEqual(texts(st10row).slice(1),
+                         ["001", "undated", "0:20", "LPEC ST (ICD-ST10) playback is not included in this build."]);
+  assert.ok(!st10row.onclick, "not playable: no click handler");
+  assert.ok(st10row.classList.contains("unplayable"));
+  assert.strictEqual(st10row.title, "LPEC ST (ICD-ST10) playback is not included in this build.");
+  assert.ok(!st10row.children[0].children[0].disabled, "it can be selected for export");
+  assert.ok(!calls.some((c) => c[0] === "audio"));
+
+  // The same ICD-ST10 with the LPEC ST decoder, holding recordings in three modes, in a build
+  // without the LPEC SP tables: LPEC ST and LP play, LPEC SP says why it can't (per recording, not
+  // per recorder), and all three can be exported.
+  const SP = "the WAV decoder could not be loaded: this build does not include the LPEC SP table data";
+  listing["2-1@3"] = { ...listing["2-1@3"],
+                       folders: "ABCDE".split("").map((l) => ({ id: l, label: `Folder ${l}`, recordings: l === "A" ? [
+                         { number: 1, label: "A-001", recorded: "undated", seconds: 20.1, owner: "", problem: null, play_problem: null },
+                         { number: 2, label: "A-002", recorded: "undated", seconds: 9.1, owner: "", problem: null, play_problem: null },
+                         { number: 3, label: "A-003", recorded: "undated", seconds: 8.4, owner: "", problem: null, play_problem: SP },
+                       ] : [] })) };
+  vm.runInContext("S.device = null; S.folders = [];", context);
+  $("status").textContent = "";
+  await context.openDevice("2-1@3");
+  assert.deepStrictEqual(texts(format), [".dvf (Sony original)", "WAV"]);
+  assert.ok($("device-table").classList.contains("playable"));
+  assert.strictEqual($("status").textContent, "");
+  const [st10st, st10lp, st10sp] = $("rows").children;
+  assert.ok(st10st.onclick && st10lp.onclick, "LPEC ST and LP: a click plays them");
+  assert.ok(!st10sp.onclick, "LPEC SP: no click handler");
+  assert.strictEqual(st10sp.title, "The WAV decoder could not be loaded: this build does not include the LPEC SP table data.");
+  assert.strictEqual(texts(st10sp)[4], "The WAV decoder could not be loaded: this build does not include the LPEC SP table data.");
+  assert.strictEqual(texts(st10lp)[4], "");
+  assert.ok(!st10sp.children[0].children[0].disabled, "it can be selected for export");
+  await st10st.onclick();
+  await new Promise((r) => setImmediate(r));
+  await st10lp.onclick();
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(calls.filter((c) => c[0] === "audio").map((c) => c.slice(1)),
+                         [["2-1@3", "A", 1], ["2-1@3", "A", 2]]);
+
+  // The waveform: drawn from the audio itself up to FULL_DETAIL_SAMPLES samples over all channels
+  // (30 minutes of 8 kHz mono, about 2.7 minutes of 44.1 kHz stereo), with a zoom down to one
+  // pixel per sample at the file's own rate; longer files are drawn from the server's peaks.
+  const load = async (r) => {
+    const seq = vm.runInContext("++S.playSeq", context);
+    await context.loadIntoPlayer(seq, "x", { url: "http://x/a.wav", peaks: [0.5], ...r }, false);
+    return vm.runInContext("S.zoomMax", context);
+  };
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000, channels: 1 }), 8000);     // ICD-ST25: as before
+  assert.strictEqual(await load({ duration: 30 * 60 + 1, rate: 8000, channels: 1 }), 400);
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000 }), 8000);                  // channels unknown: mono
+  assert.strictEqual(await load({ duration: 160, rate: 44100, channels: 2 }), 44100);       // ICD-ST10, short
+  assert.strictEqual(await load({ duration: 170, rate: 44100, channels: 2 }), 400);         // 3 minutes: peaks
+  assert.strictEqual(await load({ duration: 320, rate: 44100, channels: 1 }), 44100);       // the same samples in mono
+  assert.strictEqual(await load({ duration: 92 * 60, rate: 44100, channels: 2 }), 400);     // the longest ST10 file
+  assert.ok(context.fullDetail({ duration: 160, rate: 44100, channels: 2 }));
+  assert.ok(!context.fullDetail({ duration: 160, rate: 44100, channels: 3 }));
+  // The slider is logarithmic: its ends are "fit" and one pixel per sample, every step the same factor,
+  // at 8000 px/s as at 44100; slider and zoom convert back and forth exactly.
+  const near = (a, b) => Math.abs(a - b) <= 1e-6 * Math.max(1, Math.abs(b));
+  for (const max of [400, 8000, 44100]) {
+    assert.strictEqual(context.zoomPx(0, max), 0);
+    assert.ok(near(context.zoomPx(1000, max), max));
+    assert.ok(near(context.zoomPx(500, max) / context.zoomPx(250, max), context.zoomPx(750, max) / context.zoomPx(500, max)));
+    for (const px of [11, 57, 400, max]) assert.ok(near(context.zoomPx(context.zoomSlider(px, max), max), px), `${px} at ${max}`);
+  }
+  // A deeper zoom than the next file allows becomes that file's deepest; the slider follows.
+  vm.runInContext("S.zoomPx = 20000;", context);
+  assert.strictEqual(await load({ duration: 30 * 60, rate: 8000, channels: 1 }), 8000);
+  assert.strictEqual(vm.runInContext("S.zoomPx", context), 8000);
+  assert.strictEqual(Number($("zoom").value), 1000);
+  vm.runInContext("S.zoomPx = 0;", context);
+  context.unloadPlayer();                                          // the checks below start with an empty player
   // ---- no recorder: the prompt names the supported models from capabilities(), not a fixed one ----
   api.devices = async () => ({ ok: true, problems: [], devices: [] });
   await context.poll();
@@ -570,5 +661,31 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual($("dest").textContent, "C:\\remembered", `staleFirst=${staleFirst}`);
   }
   api.default_destination = dests;
+
+  // An ICD-ST10 .dvf in the library, in a build without the LPEC ST decoder: greyed out with its
+  // reason (not the ⚠ of a damaged file), and a click says why instead of asking the backend to play it.
+  const st10File = { ...libFile("r7", "001_A_001_Unknown.dvf", "root", null), type: "dvf", seconds: 20.1,
+                     error: "001_A_001_Unknown.dvf can't be played or marked: LPEC ST (ICD-ST10) playback is not included in this build.", unplayable: "LPEC ST (ICD-ST10) playback is not included in this build" };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 50, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: libFolders, files: [st10File, libFile("r8", "b.wav", "root", "fp8")] });
+  context.showLibrary();
+  await context.loadLibrary();
+  await settle();
+  const st10lib = recRow("r7");
+  assert.ok(st10lib.classList.contains("unplayable"));
+  assert.strictEqual(st10lib.title, "LPEC ST (ICD-ST10) playback is not included in this build.");
+  assert.strictEqual(st10lib.cells[5].textContent, "—");
+  assert.strictEqual(st10lib.cells[5].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
+  assert.ok(!recRow("r8").classList.contains("unplayable"));
+  ops.length = 0;
+  st10lib.onclick();
+  await settle();
+  assert.strictEqual($("banner-text").textContent, "LPEC ST (ICD-ST10) playback is not included in this build.");
+  assert.deepStrictEqual(ops, [], "never sent to the backend to play");
+  rightClick(st10lib.cells[1]);
+  assert.deepStrictEqual(menu.children[0].textContent, "Play");
+  assert.ok(menu.children[0].disabled);
+  assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
+  press("Escape");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

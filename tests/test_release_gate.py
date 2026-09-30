@@ -77,18 +77,22 @@ class GateTests(unittest.TestCase):
 
     def test_damaged_tables_are_a_problem(self):
         from openevp.decoders.sony_lpec import tables
-        # tables_problem() calls tables.load() with no path, so its default (bound
-        # at def time, not a live read of tables.DEFAULT_DATA_FILE) is patched
-        # directly via the function's __defaults__ tuple.
-        with mock.patch.object(tables.load, "__defaults__", (Path(__file__),)):   # not JSON
-            problem = release_gate.tables_problem()
-        self.assertIn("damaged", problem)
+        # tables_problem() calls tables.load() with no path: it reads the
+        # configuration's file in tables.DATA_DIR.
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("lpec_tables.json", "lpec_sp_tables.json"):
+                Path(d, name).write_text("not JSON", encoding="utf-8")
+            with mock.patch.object(tables, "DATA_DIR", Path(d)):
+                self.assertIn("damaged", release_gate.tables_problem())
+                self.assertIn("damaged", release_gate.sp_tables_problem())
+                self.assertIn("damaged", release_gate.decoder_problem())
 
     def test_missing_tables_and_core_are_problems(self):
         from openevp.decoders.sony_lpec import _core, tables
         missing = Path(__file__).with_name("no-such-tables.json")
-        with mock.patch.object(tables.load, "__defaults__", (missing,)):         # see above
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(tables, "DATA_DIR", Path(d)):
             self.assertIn("does not include the LPEC table data", release_gate.tables_problem())
+            self.assertIn("does not include the LPEC SP table data", release_gate.sp_tables_problem())
         with mock.patch.object(_core, "available", return_value=False), \
                 mock.patch.object(_core, "DLL_PATH", missing):
             self.assertIn("is not built", release_gate.core_problem())

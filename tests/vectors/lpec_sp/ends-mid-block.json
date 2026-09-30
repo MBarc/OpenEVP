@@ -1,0 +1,14 @@
+{
+ "name": "ends-mid-block",
+ "note": "21 frames; the last block is partly filled",
+ "frames": 21,
+ "frame_sizes": {
+  "128": 20,
+  "160": 1
+ },
+ "decoder_init": "LPECDecoder::InitDecoder(16000, 16000); no ResetDecoder",
+ "reference": "Sony LPEC.dll (sha256 ed3fd84a...356df) through the local harness, DVE's frame loop",
+ "pcm_samples": 21504,
+ "pcm_sha256": "acb888abd82ccb5be474ce59a1010e038d9424bf0ed539e586ce7a6e7f960f1d",
+ "pcm_file": "ends-mid-block.pcm"
+}

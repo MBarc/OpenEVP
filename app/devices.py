@@ -12,6 +12,12 @@ connection id; a replug gets a new id, and on_removed lets caches drop the
 old one. What an error does to a recorder's state and session is
 base.state_for()'s table: the manager applies it and re-raises.
 
+A recorder is shown as the model its open session says it is
+(Session.model_id: an ICD-ST10 is discovered and opened by the ICD-ST25
+model, which shares its USB id), and as the discovering model until then. The
+discovering model still opens it again and decides, when its discovery fails,
+that it is kept.
+
 Two errors are sticky beyond that table:
 - base.NotReady says the session is invalid until the recorder is replugged,
   so that connection is latched in NEEDS_REPLUG: no new session is opened on
@@ -43,11 +49,16 @@ class DeviceGone(Exception):
 @dataclass
 class _Entry:
     device: base.DiscoveredDevice
-    model: base.Model
+    model: base.Model             # what the recorder is shown and treated as (see _relabel)
     state: str = READY
     message: str = ""
     session: object = None
     latched: bool = False         # a NotReady: unusable until this connection disappears
+    opener: base.Model = None     # the model that discovered it: it opens the recorder
+
+    def __post_init__(self):
+        if self.opener is None:
+            self.opener = self.model
 
 
 def _where(device):
@@ -120,7 +131,7 @@ class DeviceManager:
         # as when the whole listing failed, and only the problem is reported.
         failed = {model_id for model_id, exc in problems if not isinstance(exc, base.RejectedConnection)}
         kept = [i for i, e in self._devices.items()
-                if i not in present and i not in rejected and e.model.model_id in failed]
+                if i not in present and i not in rejected and e.opener.model_id in failed]
         for device_id in list(self._devices):
             if device_id not in present and device_id not in kept:
                 e = self._devices.pop(device_id)
@@ -170,7 +181,8 @@ class DeviceManager:
             if e.latched:                    # a NotReady: only a replug (a new connection) helps
                 raise base.NotReady(e.message or "This recorder must be plugged in again.")
             if e.session is None:
-                e.session = self._open(e.model, e.device)
+                e.session = self._open(e.opener, e.device)
+                self._relabel(e)
             result = fn(e.session)
         except Exception as ex:
             state, close = base.state_for(ex)
@@ -183,6 +195,14 @@ class DeviceManager:
             raise
         e.state, e.message = READY, ""
         return result
+
+    @staticmethod
+    def _relabel(e):
+        """Show the recorder as the supported model its new session says it is
+        (Session.model_id), else as the model that discovered it."""
+        model_id = getattr(e.session, "model_id", None)
+        model = recorders.get(model_id) if isinstance(model_id, str) and model_id else None
+        e.model = model if model is not None and model.supported else e.opener
 
     def _close(self, e):
         if e.session is not None:

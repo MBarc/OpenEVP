@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from fixtures import DATE, FakeRecorderDevice, st25_manager  # noqa: E402
+from fixtures import DATE, FakeRecorderDevice, made_wav, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
 from app.devices import NEEDS_REPLUG, DeviceManager  # noqa: E402
 from st25.protocol import Recorder  # noqa: E402
@@ -22,10 +22,10 @@ class FakeAudioServer:
     def __init__(self):
         self.prepared = []
 
-    def prepare(self, key, make=None):
+    def prepare(self, key, make=None, write=None):
         self.prepared.append(key)
-        if make is not None:
-            make()
+        if make is not None or write is not None:
+            made_wav(make, write)
         return {"url": f"http://x/{key[1]}{key[2]}.wav", "peaks": [0.5], "duration": 1.0}
 
 
@@ -186,6 +186,7 @@ class BackendTests(unittest.TestCase):
         models = self.api.capabilities()["models"]
         self.assertEqual(models, [m.name for m in recorders.supported()])
         self.assertIn("Sony ICD-ST25", models)
+        self.assertIn("Sony ICD-ST10", models)
         unsupported = [m.name for m in recorders.models() if not m.supported]
         self.assertTrue(unsupported)
         self.assertFalse(set(unsupported) & set(models))

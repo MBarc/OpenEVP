@@ -114,6 +114,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); }
 th { position: sticky; top: 0; background: var(--bg); font-weight: 600; }
 table.playable tbody tr { cursor: pointer; }
+table.playable tbody tr.unplayable { cursor: default; }
 tbody tr.playing { background: var(--accent-soft); }
 td.note { color: var(--warn); }
 .muted { color: var(--muted); padding: 8px 12px; }

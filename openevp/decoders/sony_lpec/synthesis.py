@@ -19,7 +19,8 @@ PI_C = 3.14159265359  # the DLL's per-frame truncated pi (docs/lpec.md)
 
 
 # --------------------------------------------------------------------------
-# FFT (docs/lpec.md, "FFT, size n = 256 or 512 (radix 2)" and "size 384")
+# FFT (docs/lpec.md, "FFT, size n = 256 or 512 (radix 2)" and "size 384";
+# LPEC SP adds sizes 1024 and 768, the same two algorithms)
 # --------------------------------------------------------------------------
 
 
@@ -73,14 +74,22 @@ _S3 = math.sqrt(3.0) * 0.5
 
 
 def _fft384(re: List[float], im: List[float], S: Sequence[float], U: Sequence[float]) -> None:
-    """In-place FFT of size 384: one radix-3 stage, three radix-2 FFTs of
-    128 (scaled by 1/384), then the interleaving reorder."""
-    m = 128
+    """In-place FFT of size 384 (see _fft_radix3)."""
+    _fft_radix3(re, im, 384, S, U)
+
+
+def _fft_radix3(re: List[float], im: List[float], n: int, S: Sequence[float],
+                U: Sequence[float]) -> None:
+    """In-place FFT of size n = 3m (384 or 768): one radix-3 stage (twiddle
+    step 1536/n in the period-1536 table), three radix-2 FFTs of m (scaled by
+    1/n), then the interleaving reorder."""
+    m = n // 3
+    step = 1536 // n
     s3 = _S3
     for j in range(m):
         x0, x1, x2 = re[j], re[j + m], re[j + 2 * m]
         y0, y1, y2 = im[j], im[j + m], im[j + 2 * m]
-        k = 4 * j
+        k = step * j
         re[j] = x0 + (x2 + x1)
         im[j] = y0 + (y2 + y1)
         alpha = x0 - (0.5 * (x2 + x1))
@@ -96,7 +105,7 @@ def _fft384(re: List[float], im: List[float], S: Sequence[float], U: Sequence[fl
         re[j + 2 * m] = (U[2 * k] * v2) + (U[2 * k + 384] * u2)
         im[j + 2 * m] = (u2 * U[2 * k]) - (v2 * U[2 * k + 384])
 
-    c = 1.0 / 384
+    c = 1.0 / n
     thirds = []
     for off in (0, m, 2 * m):
         tr = re[off:off + m]
@@ -115,15 +124,15 @@ def _fft384(re: List[float], im: List[float], S: Sequence[float], U: Sequence[fl
 
 
 def inverse_transform(tables, X: Sequence[float], N: int, overlap: int) -> List[float]:
-    """N outputs Y[0..N-1] from the M = N/2 coefficients X, overlap Λ."""
+    """N outputs Y[0..N-1] from the M = N/2 coefficients X, overlap Λ.
+    N is one of the configuration's transform lengths (LP 512 / 768 / 1024,
+    SP 1024 / 1536 / 2048)."""
     h = N // 2
     q = N // 4
-    if N == 768:
-        T, sigma = tables.FFT_SIN_1536, 2
-    elif N == 512:
-        T, sigma = tables.FFT_SIN_2048, 4
-    else:  # 1024
-        T, sigma = tables.FFT_SIN_2048, 2
+    if N % 3 == 0:
+        T, sigma = tables.FFT_SIN_1536, 1536 // N
+    else:
+        T, sigma = tables.FFT_SIN_2048, 2048 // N
 
     re = [0.0] * h
     im = [0.0] * h
@@ -136,12 +145,12 @@ def inverse_transform(tables, X: Sequence[float], N: int, overlap: int) -> List[
         re[i] = x * T[(i - q) * sigma]
         im[i] = x * T[(N - i) * sigma]
 
-    if h == 384:
-        _fft384(re, im, tables.FFT_SIN_2048, tables.FFT_SIN_1536)
+    if h % 3 == 0:
+        _fft_radix3(re, im, h, tables.FFT_SIN_2048, tables.FFT_SIN_1536)
     else:
         _fft_radix2(re, im, h, 1.0 / h, tables.FFT_SIN_2048)
 
-    w = {512: tables.POST256, 768: tables.POST384, 1024: tables.POST512}[N]
+    w = tables.POST[tables.config.transform_n.index(N)]
     Y = [0.0] * N
     half_lambda = overlap // 2
     top = N - half_lambda - 1
@@ -171,20 +180,23 @@ def overlap_add_plain(O: List[float], Y: Sequence[float], length: int, carry: in
 def overlap_add_shaped(O: List[float], Y: Sequence[float], fp: int, Ap: Sequence[float],
                        fc: int, Ac: Sequence[float], v: Sequence[float],
                        v2: Sequence[float]) -> List[float]:
-    """The mode-0 half overlap-add with temporal shaping (256 outputs)."""
+    """The mode-0 half overlap-add with temporal shaping (F/2 outputs: 256
+    for LP, 512 for SP; Y and the windows have F points)."""
+    half = len(Y) // 2
+    part = half // 4
     if fp == 0 and fc == 0:
-        out = [(O[j] * v[256 + j]) + (v[j] * Y[j]) for j in range(256)]
+        out = [(O[j] * v[half + j]) + (v[j] * Y[j]) for j in range(half)]
     else:
-        out = [0.0] * 256
+        out = [0.0] * half
         for r in range(4):
             ap = Ap[7 - r]
             ac = Ac[3 - r]
             rho1 = ap / Ap[4 + r]
             rho2 = ac / Ac[r]
-            for j in range(64 * r, 64 * r + 64):
-                out[j] = ((O[j] * (ap * v[256 + j])) + ((ac * v[j]) * Y[j])) / (
-                    (v2[256 + j] * rho1) + (v2[j] * rho2))
-    O[0:256] = Y[256:512]
+            for j in range(part * r, part * r + part):
+                out[j] = ((O[j] * (ap * v[half + j])) + ((ac * v[j]) * Y[j])) / (
+                    (v2[half + j] * rho1) + (v2[j] * rho2))
+    O[0:half] = Y[half:2 * half]
     return out
 
 
@@ -236,19 +248,22 @@ def pitch_section(H: List[float], x: Sequence[float], start: int, length: int,
 
 
 def lsp_to_lpc(l: Sequence[float]) -> List[float]:
-    """a[0..10] from the double LSPs l[0..10] (fcos is the x87 emulation)."""
-    C = [0.0] * 12
-    for j in range(1, 12):
+    """a[0..order] from the double LSPs l[0..order] (fcos is the x87
+    emulation)."""
+    n = len(l)
+    order = n - 1
+    C = [0.0] * (n + 1)
+    for j in range(1, n + 1):
         C[j] = x87.fcos((l[j - 1] * PI_C) * 2.0)
-    P = [0.0] * 11
-    Q = [0.0] * 11
+    P = [0.0] * n
+    Q = [0.0] * n
     P[0] = -1.0
     P[1] = -1.0
     Q[0] = -1.0
     Q[1] = 1.0
-    TQ = [0.0] * 11
-    TP = [0.0] * 11
-    for i in (2, 4, 6, 8, 10):
+    TQ = [0.0] * n
+    TP = [0.0] * n
+    for i in range(2, order + 1, 2):
         u = C[i]
         v = C[i + 1]
         TQ[1] = (v * 2.0) * Q[0]
@@ -261,18 +276,27 @@ def lsp_to_lpc(l: Sequence[float]) -> List[float]:
             Q[i + 1 - m] = -Q[m]
             P[m] = P[m] - TP[m]
             P[i + 1 - m] = P[m]
-    return [(Q[m] + P[m]) * (-0.5) for m in range(11)]
+    return [(Q[m] + P[m]) * (-0.5) for m in range(n)]
 
 
 def interpolate_lsp(lA: Sequence[float], lB: Sequence[float], t: float) -> List[float]:
     """l[j] = (lA[j]*(1.0 - t)) + (lB[j]*t)."""
-    return [(lA[j] * (1.0 - t)) + (lB[j] * t) for j in range(11)]
+    return [(lA[j] * (1.0 - t)) + (lB[j] * t) for j in range(len(lA))]
 
 
 def lpc_filter(e: Sequence[float], start: int, length: int, a: Sequence[float],
                y: List[float]) -> None:
     """All-pole filter 1/A(z) over e[start..start+length-1], appending the
-    outputs to y (whose last 10 entries are the filter memory)."""
+    outputs to y (whose last ``order`` entries are the filter memory)."""
+    if len(a) != 11:
+        order = len(a) - 1
+        for n in range(start, start + length):
+            k = len(y)
+            v = e[n]
+            for m in range(1, order + 1):
+                v = v - (y[k - m] * a[m])
+            y.append(v)
+        return
     a1, a2, a3, a4, a5, a6, a7, a8, a9, a10 = a[1:11]
     for n in range(start, start + length):
         k = len(y)

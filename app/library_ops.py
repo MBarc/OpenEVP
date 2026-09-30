@@ -55,11 +55,7 @@ def _kind_format(kind):
 
 def _decoder_problem(fmt):
     """Why fmt cannot be decoded now (a phrase), or None when it can."""
-    if fmt.decoder is None:
-        return f"OpenEVP cannot convert {fmt.label} ({fmt.ext}) files to WAV"
-    if not fmt.decoder.available():
-        return fmt.decoder.reason() or "the WAV decoder is not available"
-    return None
+    return formats.decoder_problem(fmt)
 
 
 def _decoder_problems(kinds):

@@ -1,10 +1,12 @@
-# LPEC decoder, 8000 Hz / 6000 bit/s (ICD-ST25 "LP")
+# LPEC decoder, 8000 Hz / 6000 bit/s (ICD-ST25 "LP") and 16000 Hz / 16000 bit/s (ICD-ST10 "SP")
 
 Written 2026-09-25 from a static map of Sony's `LPEC.dll` (sha256
 `ed3fd84a709bf0ece623b50c58d15f66dc2c02c37b4e2f568095ec91e3c356df`) and confirmed
 dynamically against it. This document describes the algorithm in prose,
 formulas and field tables for an independent reimplementation. It contains no
-Sony code and no extracted table data.
+Sony code and no extracted table data. The sections up to
+[Open points](#open-points) describe the 8000 Hz mode;
+[LPEC SP (16000 Hz)](#lpec-sp-16000-hz) lists what differs at 16000 Hz.
 
 ## Status
 
@@ -37,7 +39,8 @@ What remains unverified is listed under [Open points](#open-points).
 8. [State between frames](#state-between-frames)
 9. [Arithmetic](#arithmetic)
 10. [Tables](#tables)
-11. [Open points](#open-points)
+11. [LPEC SP (16000 Hz)](#lpec-sp-16000-hz)
+12. [Open points](#open-points)
 
 ## Conventions
 
@@ -612,6 +615,19 @@ The reader's byte buffer holds only the current frame; nothing else carries over
     all vectors**. So the exact emulation is only needed for strict
     double-level identity; build it anyway (double-double arithmetic is enough)
     and let the vectors decide.
+  - **The emulation is a model, not the hardware.** Measured later (an Intel
+    Core i5-9600K, 2026-09-29): against a quad-precision cosine with the same
+    66-bit-π reduction, the CPU's 64-bit `fcos` result is off by up to 0.69 of
+    a 64-bit ulp (2.8% of arguments are not the correctly rounded 64-bit
+    value). After the store to a double that changes about **9 in 1,000,000**
+    arguments in [0, π]; the LPEC SP work met one in A-006 (argument
+    0.9881057607923576: the CPU gives 0x1.19bd5177382d8p-1, the emulation one
+    ulp less). Such a difference stays in the decoder state for a while but is
+    around 1e-10 of a sample: no PCM sample differed in any SP or LP test.
+    With the CPU's own `fcos` swapped in, every double matched the DLL. Since
+    the DLL uses whatever CPU it runs on, its exact doubles can differ between
+    CPUs; OpenEVP keeps the deterministic emulation so its output (and the
+    marks keyed by it) is the same on every machine.
 - **Rounding to integers.** The decoder calls `floor` (not `__ftol`, no
   rounding-mode changes):
   - output samples: `floor(y + 0.5)`, then clamped;
@@ -687,6 +703,142 @@ In each formula the products are evaluated left to right with 53-bit rounding;
 `1 − fcos(…)` uses the 64-bit `fcos` value before rounding (that is where plain
 double code differs).
 
+## LPEC SP (16000 Hz)
+
+The ICD-ST10's SP mode (folder-table mode byte 0x20, .dvf codec 0x2A) is the
+same decoder after `InitDecoder(16000, 16000)` (DVE's `lpecde.ax` calls
+`LPEC::InitCodec(16000, 16000, 0)`, which gives identical PCM). Everything
+above applies with the constants below; this section lists every place where
+the value, the loop bound or the table differs from LP. Written 2026-09-29
+from the same DLL and confirmed against it (`openevp.decoders.sony_lpec` with
+`config.SP` is the implementation).
+
+### Status (SP)
+
+| Test | Result |
+|---|---|
+| real ICD-ST10 SP recording A-006 (131 frames, 8.384 s) | PCM byte-identical to Sony's decode (100% of samples), pure Python and C core |
+| `tests/vectors/lpec_sp/*` (12 short synthetic vectors, Sony-encoded, plus random frames) | byte-identical to the DLL's PCM |
+| `tests/vectors/lpec_sp/long-mixed-1min` (938 frames) | SHA-256 of the DLL's PCM |
+| 6,000 random frames of all four modes (with truncated frames and `ResetDecoder` calls), 6,000 damaged real frames (bit flips, random bytes, changed mode bits, truncation, resets), 1,121 encoder frames | every sample and the reader's byte count identical, frame by frame, pure Python and C core |
+| A-006, the encoder frames, 3,000 random and 3,000 damaged frames with the host CPU's own `fcos` in place of the emulation (research only) | every double of the pre-rounding output bit-identical in every frame |
+
+With the emulated `fcos` the PCM is identical everywhere; a few doubles differ
+wherever this CPU's `fcos` is not correctly rounded (see
+[Arithmetic](#arithmetic)).
+
+### Configuration constants (both modes)
+
+`InitDecoder(rate, bitrate)` derives:
+
+| Name | LP (8000, 6000) | SP (16000, 16000) | Rule |
+|---|---|---|---|
+| frame F | 512 | 1024 | 1024 if rate ≥ 11026 else 512 (4096 above 22050, unused) |
+| order | 10 | 16 | 16 if rate > 8000 |
+| bands | 8 | 10 | 10 if rate > 8000 |
+| LSP stages × bits | 3 × 6 | 4 × 6 | 4 stages if rate > 8000 |
+| pitch lag bits | 7 | 8 | 7, +1 if (rate div 8000)·120 > 128 |
+| budget X | 384 | 1024 | `32·((F·bitrate + 31) div (rate·32))`; by mode `X·{1, 3/4, 5/4, 1}`: SP frames are 128, 96, 160, 128 bytes |
+| N by type t | 512, 768, 768, 1024 | 1024, 1536, 1536, 2048 | `F, 3F/2, 3F/2, 2F` |
+| overlap Λ by type | 256, 256, 512, 512 | 512, 512, 1024, 1024 | `F/2, F/2, F, F` |
+| coded band top | 3500 Hz | 7500 Hz | 3500 if rate ≤ 8000 and 0 < bitrate ≤ 6000, else `rate·15 div 32` |
+| unit | 14 | 12 | `floor(128 / (bands·(rate/2)) · top)` |
+| W[t] | 28, 42, 42, 56 | 48, 72, 72, 96 | `(M div 128)·unit` |
+| s[t] | 2, 3, 3, 4 | 2, 3, 3, 4 | `rhu(c·M / (rate/2))`, at least 1; c = 32 in the narrow (LP) case, else 30 |
+| e[t] | 226, 339, 339, 452 | 482, 723, 723, 964 | `s + bands·W` |
+| R | 128 | 432 | a table constant (0x10038cb0 / 0x100388a0) |
+| ref[t] | 128, 192, 192, 256 | 432, 648, 648, 864 | `R·{1, 1.5, 1.5, 2}` |
+| sc[t] | 18725, 12483, 12483, 9362 | 8738, 5825, 5825, 4369 | `rhu(2^22 / (bands·W))` |
+
+The global gain (7 bits, 128 entries), band-gain indices (6 + 6 bits), shape
+index (7 bits, 128 × 8 shapes), pgidx (6 bits, 64 × 3 taps), VQ indices (8
+bits; 2-, 4- and 8-dimensional codebooks), the 19 gain bits, the noise tables
+and the pitch history (256 samples) are the same shape in both modes.
+
+### What changes with the constants
+
+- **Frame layout.** `Decode` outputs F = 1024 samples. Mode 0 halves are
+  F/2 = 512 samples; mode 2's first block covers F/2. The field order is
+  LP's, with 4-index LSP sets (24 bits), 8-bit lags and SP's budgets: mode 0's
+  `r = 1024 − used`, mode 1 `768 − used`, mode 2 `(1024 − used) div 2`, then
+  `1280 − used`, mode 3 `1024 − used`.
+- **LSP decoding, double path.** `l[j+1] = ((C3[i3][j] + C4[i4][j]) + C2[i2][j]) + C1[i1][j]`,
+  j = 0..15. The upper-half limit runs j = 16 down to 9, the lower-half limit
+  j = 1 up to 8 (in general: order down to order/2 + 1, and 1 up to order/2);
+  the sorting and spacing passes run j = 1..16. The constants (0.5, 0.49,
+  0.01) are unchanged.
+- **LSP decoding, Q16 path.** `q[j+1] = s16(((D2[i2][j] + D3[i3][j] + D4[i4][j]) >> 3) + D1[i1][j])`
+  (a sum of three, an arithmetic shift, then D1 added; the whole stored to an
+  int16), with `D1 = rhu(C1·65536)` (Q16) and `D2..D4 = rhu(Ck·524288)` (Q19),
+  verified against the DLL's copies. Limits, sort and spacing as in the double
+  path, bounds by order; constants (32112, 655, 656, 654) unchanged.
+- **Interpolated slot 1** (both paths) and the end-of-frame copies run over
+  the 17 values.
+- **Spectral envelope.** Step 1 runs i = 1..8 (order/2) over 17 cosines;
+  step 2 sums 17 squares and lags m = 1..16; step 3 sums m = 1..16. The
+  int16 sine tables are LP's: period 1536 for N = 1536 (step 1), period 2048
+  for N = 1024 and 2048 (steps 2 and 1).
+- **Ranking and allocation** run over 10 bands with SP's W, s, e, ref, sc.
+  All allocation steps are unchanged (step 4 still takes the last band with
+  `n4 > 0`, from band 9 down).
+- **Filling.** Unchanged, over 10 bands; the noise position still wraps at 1024.
+- **Inverse transform.** The sine table and stride follow N: period 1536 with
+  `σ = 1536/N` when N mod 3 = 0 (N = 1536: σ = 1), else period 2048 with
+  `σ = 2048/N` (N = 1024: 2, N = 2048: 1). FFT sizes are h = N/2 = 512, 768,
+  1024. Sizes 512 and 1024 use the radix-2 FFT as written (stage stride
+  `2048/n`). Size 768 uses the radix-3 algorithm with `m = n/3 = 256` and
+  twiddle index `k = (1536/n)·j = 2j` (384 in LP: 4j); the three radix-2 FFTs
+  of 256 use stride 8, and the last-stage scale is `1.0 / 768`. The
+  post-twiddle `w` is the table for N (N/2 entries).
+- **Overlap-add.** `v` is the **1024-point** sine window (LP's long window)
+  and `v2` its square; the long window is 2048 points. Shaped (mode 0):
+  outputs j < 512 with `v[512 + j]`, `v2[512 + j]`, quarter-blocks r of 128
+  samples (j = 128r .. 128r + 127). Plain: mode 1 ℓ = 1024, κ = 512,
+  2048-point window; mode 2 (512, 512, 1024-point) then (512, 1024,
+  1024-point); mode 3 (1024, 1024, 2048-point). `O` holds 1024 samples.
+- **Long-term predictor.** `H` = 256 history samples + 1024; sections are F/4,
+  F/2, F/4 (256, 512, 256: slots 0, 1, 2) for modes 0 and 2 and F/2, F/2 (512,
+  512: slots 0, 2) for modes 1 and 3; `x[n − 256]` as before. Lags reach 255
+  (8 bits; the encoder's range is 240), which the 256-sample history still
+  covers. End of frame: `H[0..255] = H[1024..1279]`.
+- **LPC synthesis.** Order 16 (`y = y − y[n−m]·a_m`, m = 1..16 in order;
+  memory of 16 outputs). Interpolation: 16 steps over 1024 samples, blocks of
+  32 (k = 0 and 16) and 64; or, mode 0 with F = 1, two runs of 8 steps over
+  512 samples (32, 64, …, 64, 32). LSP → LPC: `C[j] = fcos((l[j−1]·π_c)·2.0)`
+  for j = 1..17, the recursion for i = 2, 4, …, 16, `a_m` for m = 0..16.
+- **State.** Initial LSPs `i·(0.48/17)`, i = 0..16 (run-time table
+  0x100628a0); Q16 copy as in LP. Everything else as in LP, with SP's sizes.
+
+### Tables (SP)
+
+Selected by `InitDecoder` for rate 16000 (FUN_1000df10); none are in this
+repository (`tools/import_lpec_tables.py` imports dumps named `sp_*.json` into
+`data/lpec_sp_tables.json`).
+
+| Name | Address | Size × type | Derivable? |
+|---|---|---|---|
+| LSP codebooks `C1..C4` | 0x1001b040, 0x1001d040, 0x1001f040, 0x10021040 | 64 × 16 double each | no, extract |
+| int16 LSP codebooks `D1..D4` | 0x10019040, 0x10019840, 0x1001a040, 0x1001a840 | 64 × 16 int16 each | **yes**: `rhu(C1·2^16)`, `rhu(Ck·2^19)` (0 differences) |
+| pitch taps `PT` | 0x100375e8 | 64 × 3 double | no, extract |
+| pitch taps Q15 `PQ` | 0x10037446 | 64 × 3 int16 | **yes**: `rhu(PT·32768)` |
+| temporal shapes | 0x1003e910 | 128 × 8 double | no, extract |
+| global gain `GAIN` | 0x100390d0 | 128 double | no, extract |
+| band gains `BG1`, `BG2` | 0x100398d0, 0x1003acd0 | 64 × 10 double each | no, extract |
+| VQ 2-, 4-, 8-dim | 0x10029440, 0x1002a440, 0x1002c440 | 256 × 2 / 4 / 8 double | no, extract |
+| allocation base `AB` | 0x100383a0 | 64 × 10 int16 | no, extract |
+| allocation reference R | 0x100388a0 | 1 int16 (= 432) | a constant |
+| noise A, B | LP's (0x10044970, 0x10042970) | 1024 double each | no, extract (shared) |
+| int16 sine tables, FFT sine tables | LP's | | as in LP |
+
+Run-time tables (all verified bit-exact against the DLL's memory with the
+x87 emulation): the 1024-point window and its square (0x1004f8a0, 0x100558a0,
+LP's formula with 1/1024), the 2048-point window (0x100518a0, the same formula
+with 1/2048, computed without storing the square), post-twiddles for N = 1024
+(LP's 0x100598a0), 1536 (0x1005b8a0) and 2048 (0x1005e8a0), and the 17
+initial LSPs (0x100628a0). The encoder-side tables the SP decoder object also
+points at (0x1003e0d0, 0x1003e2d0, the window at 0x100578a0) are not read by
+`Decode`.
+
 ## Open points
 
 - **Uninitialised state.** The stage-1 LSP index of slot 1 and `H[256..767]`
@@ -697,7 +849,13 @@ double code differs).
   (a block whose budget is smaller than its VQ bits) and a negative envelope
   value (the "underflow" message). The description follows the code there, but
   nothing confirmed it dynamically.
-- **Other modes** (16 kHz, other bitrates, `InitDecoder` rates above 8000) are
-  out of scope; `InitDecoder(8000, b)` with b ≠ 6000 selects a different
-  allocation table (0x10038cc0) and budgets.
+- **Other modes.** 16000 Hz / 16000 bit/s is described in
+  [LPEC SP (16000 Hz)](#lpec-sp-16000-hz). Other bitrates and rates (22050 Hz
+  and up) are out of scope; `InitDecoder(8000, b)` with b ≠ 6000 selects a
+  different allocation table (0x10038cc0) and budgets.
+- **LPEC SP:** only one real recording (A-006, mostly mode-0 and mode-3
+  frames) was available; modes 1 and 2, short lags and unstable pitch filters
+  are covered by random and damaged frames against the DLL, and by the
+  encoder's own output. DVE's own SP `.dvf` export was not compared (the
+  reference is `LPEC.dll` driven the way `lpecde.ax` drives it).
 - **Encoder:** not mapped.

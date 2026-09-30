@@ -1,8 +1,11 @@
 """Serve decoded recordings to the player over http://127.0.0.1.
 
 Only this machine can connect, and every URL carries a random per-run token.
-Decoded WAVs live in a disk cache bounded by total size and are served from
-disk with Range support, so long recordings stream. prepare() returns
+Decoded WAVs live in a disk cache bounded by total size (CACHE_BYTES) and are
+served from disk with Range support, so long recordings stream. A decoder that
+can stream writes straight into the cache file, and peaks are computed from
+the file, so even a 90-minute ICD-ST10 recording (about 930 MB of WAV) is never
+held in memory for playback. prepare() returns
 waveform peaks and the duration, so the player never has to download and
 decode a whole file just to draw it.
 
@@ -17,8 +20,8 @@ so that they can still be moved, renamed or recycled while they are being read
 (Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
 new place, and its URL keeps working.
 """
+import errno
 import hashlib
-import io
 import os
 import re
 import secrets
@@ -89,6 +92,13 @@ def _analyze(f):
         return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
 
 
+def _channels(f):
+    """The channel count of an analyzed (so readable) PCM WAV file, from its header."""
+    f.seek(0)
+    with wave.open(f) as w:
+        return w.getnchannels()
+
+
 def _open_shared(path):
     """Open a file for reading (binary) without stopping anyone from reading,
     writing, renaming or deleting it meanwhile. Python's own open() on Windows
@@ -123,13 +133,72 @@ def _stat_of(st):
     return st.st_size, st.st_mtime_ns
 
 
+# The decoded-WAV cache's budget on disk. The longest ICD-ST10 recording (its
+# 32 MB of flash, about 92 minutes of 44.1 kHz stereo) decodes to about 930 MB,
+# so this holds two of those, or many hours of ICD-ST25 audio (8 kHz mono). The
+# entry just prepared is always kept, so the cache can exceed the budget by at
+# most that one file; older entries are evicted first.
+CACHE_BYTES = 2 << 30
+CACHE_PREFIX = "st25-audio-"           # the app's cache folder in the temp folder: <prefix><random>
+
+
+IN_USE = ".in-use"                     # held open by the app that owns a cache folder
+STALE_AFTER = 60                       # seconds: an unmarked folder younger than this may be starting up
+
+
+def hold_cache(folder):
+    """Mark a cache folder as in use for as long as the returned file stays open:
+    Windows refuses to delete an open file, so clean_stale_caches() in another
+    OpenEVP leaves this folder alone. Close it before removing the folder."""
+    return open(os.path.join(folder, IN_USE), "wb")
+
+
+def clean_stale_caches(parent, keep=None):
+    """Delete cache folders (CACHE_PREFIX*) that earlier runs left in ``parent``
+    (the temp folder) after a crash or a power cut: they can hold gigabytes of
+    decoded audio. Two OpenEVP windows can run at once, so a folder whose
+    IN_USE file cannot be deleted (another running app holds it open) is kept,
+    and so is one without it that is younger than STALE_AFTER (an app just
+    starting). ``keep``: a folder to leave alone. Returns the folders removed."""
+    import shutil
+    import time
+    removed = []
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return removed
+    for name in names:
+        path = os.path.join(parent, name)
+        if not name.startswith(CACHE_PREFIX) or (keep and os.path.normcase(path) == os.path.normcase(keep)):
+            continue
+        if not os.path.isdir(path) or os.path.islink(path):
+            continue
+        marker = os.path.join(path, IN_USE)
+        try:
+            if os.path.exists(marker):
+                os.remove(marker)              # fails while its app runs (the file is open)
+            elif time.time() - os.path.getmtime(path) < STALE_AFTER:
+                continue
+        except OSError:
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+        if not os.path.exists(path):
+            removed.append(path)
+    return removed
+
+
+def _disk_full(e):
+    """Whether an OSError says the disk is full."""
+    return e.errno == errno.ENOSPC or getattr(e, "winerror", None) in (39, 112)   # HANDLE_DISK_FULL, DISK_FULL
+
+
 class AudioServer:
-    def __init__(self, provider, cache_dir, max_bytes=1 << 30):
+    def __init__(self, provider, cache_dir, max_bytes=CACHE_BYTES):
         self._provider = provider            # (device_id, folder id, number) -> WAV bytes
         self._dir = cache_dir
         self._max = max_bytes
         self._token = secrets.token_urlsafe(16)
-        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration", "rate", "fp"}; LRU order
+        self._entries = OrderedDict()        # key -> {"file", "size", "peaks", "duration", "rate", "channels", "fp"}; LRU order
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
@@ -157,7 +226,19 @@ class AudioServer:
     def _url(self, file_id):
         return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.wav"
 
-    def prepare(self, key, make=None):
+    def prepare(self, key, make=None, write=None, expected=None):
+        """Decode a recording into the cache (once per key) and return _info().
+        ``write(f)``, when given, decodes straight into the cache file ``f`` (a
+        seekable binary file), so a long recording is never held in memory;
+        otherwise ``make()`` (or the provider) returns the WAV bytes. Either
+        way the peaks and fingerprint are then read back from the file in
+        chunks. A WAV that is not playable PCM raises ValueError and leaves
+        nothing behind.
+
+        Room is made first: older entries are evicted down to the budget minus
+        ``expected`` (the WAV's expected size, when known; ``write`` can also
+        call reserve() once it knows). If the disk fills up anyway, every other
+        entry is evicted and the decode is tried once more."""
         with self._lock:
             gate = self._inflight.setdefault(key, threading.Lock())
         with gate:                                   # concurrent requests wait for one decode
@@ -167,20 +248,60 @@ class AudioServer:
                     self._entries.move_to_end(key)
                     return self._info(e)
             try:
-                wav = make() if make else self._provider(key)
-                peaks, duration, rate, fp = _analyze(io.BytesIO(wav))
                 file_id = secrets.token_hex(8)
-                with open(os.path.join(self._dir, file_id + ".wav"), "wb") as f:
-                    f.write(wav)
+                path = os.path.join(self._dir, file_id + ".wav")
+                if expected:
+                    self.reserve(expected)
+                try:
+                    try:
+                        self._produce(key, path, make, write)
+                    except OSError as e:
+                        if not _disk_full(e):
+                            raise
+                        self._remove(path)
+                        with self._lock:
+                            self._evict(keep=None, limit=0)      # everything else goes; then once more
+                        self._produce(key, path, make, write)
+                    with open(path, "rb") as f:
+                        peaks, duration, rate, fp = _analyze(f)
+                        channels = _channels(f)
+                        size = os.fstat(f.fileno()).st_size
+                except BaseException:
+                    self._remove(path)
+                    raise
                 with self._lock:
-                    self._entries[key] = {"file": file_id, "size": len(wav), "peaks": peaks, "duration": duration,
-                                          "rate": rate, "fp": fp}
+                    self._entries[key] = {"file": file_id, "size": size, "peaks": peaks, "duration": duration,
+                                          "rate": rate, "channels": channels, "fp": fp}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
                 return self._info(self._entries[key])
             finally:
                 with self._lock:
                     self._inflight.pop(key, None)
+
+    def _produce(self, key, path, make, write):
+        """Write the decoded WAV to path (see prepare)."""
+        if write is not None:
+            with open(path, "wb") as f:
+                write(f)
+            return
+        wav = make() if make else self._provider(key)
+        with open(path, "wb") as f:
+            f.write(wav)
+
+    @staticmethod
+    def _remove(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+    def reserve(self, nbytes):
+        """Make room for a WAV of about ``nbytes`` about to be written: evict
+        the oldest entries down to the budget minus that (never below 0)."""
+        if nbytes:
+            with self._lock:
+                self._evict(keep=None, limit=max(0, self._max - int(nbytes)))
 
     def prepare_file(self, path):
         """Register a WAV file the user picked; returns {"url", "peaks", "duration",
@@ -198,23 +319,25 @@ class AudioServer:
                     self._entries.move_to_end(key)
                     return {**self._info(e), "stat": e["stat"]}
             peaks, duration, rate, fp = _analyze(f)
+            channels = _channels(f)
             if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
                 raise ValueError("the file changed while it was being read; try again")
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "fp": fp, "path": path, "stat": stat}
+                                  "channels": channels, "fp": fp, "path": path, "stat": stat}
             self._by_file[file_id] = key
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
-        duration, the sample rate (short files are then drawn from the audio itself),
-        and the audio fingerprint (openevp.wavinfo) of the decoded samples."""
+        duration, the sample rate and channel count (short files are then drawn
+        from the audio itself), and the audio fingerprint (openevp.wavinfo) of
+        the decoded samples."""
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
-                "fp": e["fp"]}
+                "channels": e["channels"], "fp": e["fp"]}
 
     def retarget_prefix(self, old, new):
         """A file or folder moved from `old` to `new` (same volume, so the same
@@ -243,10 +366,13 @@ class AudioServer:
             for key in [k for k in self._entries if k[0] == device_id]:
                 self._drop(key)
 
-    def _evict(self, keep):
+    def _evict(self, keep, limit=None):
+        """Drop the oldest decoded entries (never ``keep``, never picked files)
+        until the cache holds at most ``limit`` bytes (default: the budget)."""
+        limit = self._max if limit is None else limit
         total = sum(e["size"] for e in self._entries.values())
         for key in list(self._entries):
-            if total <= self._max:
+            if total <= limit:
                 break
             if key != keep and "path" not in self._entries[key]:   # picked files use no cache space
                 total -= self._entries[key]["size"]

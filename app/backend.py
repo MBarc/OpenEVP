@@ -39,7 +39,6 @@ and recordings moved between them: see app/library_ops.py (mixed into Api) and
 app/folders.py.
 """
 import datetime
-import io
 import os
 import secrets
 import threading
@@ -97,9 +96,16 @@ def _decoder(fmt):
 
 def recording_wav(manager, key, should_stop=None):
     """WAV bytes for one recording (the AudioServer provider). ``should_stop``
-    lets app shutdown interrupt a long decode (formats.Cancelled)."""
-    fmt = manager.model(key[0]).native
-    return _decoder(fmt).to_wav(_download(manager, key).data, should_stop=should_stop)
+    lets app shutdown interrupt a long decode (formats.Cancelled). Raises
+    formats.DecoderUnavailable when the recorder's model, or this recording's
+    codec (e.g. an ICD-ST10's LPEC SP in a build without its table data), cannot be played (the model is read after
+    the download: opening the recorder may relabel it)."""
+    data = _download(manager, key).data
+    model = manager.model(key[0])
+    problem = model.wav_problem() or model.native.data_problem(data)
+    if problem:
+        raise formats.DecoderUnavailable(problem)
+    return _decoder(model.native).to_wav(data, should_stop=should_stop)
 
 
 def save_native(fmt, data, outdir, name):
@@ -232,6 +238,24 @@ def _update_problem(e, what="Could not check for updates"):
     return f"{what}: {reason}."
 
 
+def _sentence(text):
+    """A reason phrase ("LPEC ST ... can't be played yet") as a sentence."""
+    text = str(text).strip() or "WAV conversion is not available"
+    return text[0].upper() + text[1:] + ("" if text[-1] in ".!?" else ".")
+
+
+def _wav_problem(source, data=None):
+    """Why a loaded recording (its source, and its native bytes if known)
+    cannot be converted to WAV now, or None: its recorder model's reason for a
+    recording from a recorder, its format's otherwise, then its own header's."""
+    fmt = source["format"]
+    model = recorders.get(source.get("model")) if source.get("kind") == "device" else None
+    problem = model.wav_problem() if model is not None else _decoder_problem(fmt)
+    if problem is None and data is not None:
+        problem = fmt.data_problem(data)
+    return problem
+
+
 def _unwrapped(e):
     """The decoder's own exception behind a formats.DecodeError (or another formats
     wrapper), so messages name it as they always have ("FormatError: ...")."""
@@ -242,6 +266,8 @@ def _unwrapped(e):
 
 def _error(e):
     """The page's error for a recorder failure (base.state_for() decides the state)."""
+    if isinstance(e, formats.DecoderUnavailable):      # not a failure: a plain sentence, no class name
+        return _fail(_sentence(e))
     e = _unwrapped(e)
     if isinstance(e, DeviceGone):
         return _fail(str(e), "", "")
@@ -307,12 +333,15 @@ def _check_listing(model, folders_, rows):
 
 
 def _recording(folder, r):
-    """One recording row for the page."""
+    """One recording row for the page. play_problem: why this recording cannot be
+    played (e.g. its codec has no decoder), or None; the model's own reason is
+    the listing's play_reason."""
     seconds = r.get("seconds")
     return {"number": r["number"], "label": _label(folder, r["number"]),
             "recorded": r.get("recorded_label") or "",
             "seconds": round(seconds, 1) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None,
-            "owner": r.get("owner"), "problem": r.get("problem") or None}
+            "owner": r.get("owner"), "problem": r.get("problem") or None,
+            "play_problem": r.get("play_problem") or None}
 
 
 class Api(LibraryOps):
@@ -358,6 +387,8 @@ class Api(LibraryOps):
         self._lib_folder = None               # the library folder chosen in this session
         self._scan_folder = None              # normcased folder of the latest scan
         self._fp_session = OrderedDict()      # index key -> (size, mtime_ns, entry): read-only store
+        self._headers = OrderedDict()         # index key -> (size, mtime_ns, Format.file_problem result)
+        self._headers_lock = threading.Lock()
         self._recycle = recycle or folders.recycle   # (path) -> None or raises folders.RecycleError
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
@@ -437,13 +468,15 @@ class Api(LibraryOps):
     def _read_listing(self, device_id):
         """Read a recorder's folders and recordings, check them (A5) and remember
         them for this connection: {"model", "folders": [folder], "rows": {folder id:
-        [row]}}. Raises what the manager or the session raised, or ValueError."""
-        model = self._manager.model(device_id)
+        [row]}}. Raises what the manager or the session raised, or ValueError.
+        The model is asked for after the read: opening the recorder tells the
+        manager what it is (an ICD-ST10 is discovered as an ST25)."""
 
         def read(s):
             folders_ = s.folders()
             return folders_, {f["id"]: s.recordings(f["id"]) for f in folders_}
         folders_, rows = self._manager.with_session(device_id, read)
+        model = self._manager.model(device_id)
         _check_listing(model, folders_, rows)
         listing = {"model": model, "folders": [dict(f) for f in folders_], "rows": rows}
         with self._recs_lock:
@@ -470,12 +503,13 @@ class Api(LibraryOps):
 
     def _export_formats(self, model):
         """A model's export menu: its native format, then WAV (unavailable, with
-        the reason, when its decoder cannot run). [{"value", "label", "available", "reason"}]"""
+        the reason, when its recordings cannot be converted: Model.wav_problem).
+        [{"value", "label", "available", "reason"}]"""
         native = model.native
         out = [{"value": native.ext[1:], "label": f"{native.ext} ({native.label})", "available": True,
                 "reason": None}]
         if native is not formats.WAV:
-            problem = _decoder_problem(native)
+            problem = model.wav_problem()
             out.append({"value": "wav", "label": "WAV", "available": problem is None, "reason": problem})
         return out
 
@@ -488,7 +522,7 @@ class Api(LibraryOps):
         except Exception as e:
             return _error(e)
         model = listing["model"]
-        problem = _decoder_problem(model.native)
+        problem = model.wav_problem()
         return {"ok": True, "model": model.name, "model_id": model.model_id,
                 "folders": [{"id": f["id"], "label": f["label"],
                              "recordings": [_recording(f, r) for r in listing["rows"][f["id"]]]}
@@ -503,7 +537,7 @@ class Api(LibraryOps):
         except Exception as e:
             return _error(e)
         fmt = model.native
-        problem = _decoder_problem(fmt)
+        problem = model.wav_problem()
         if problem:
             return _fail(f"Playback: {problem}.")
         try:
@@ -513,17 +547,21 @@ class Api(LibraryOps):
         if found is None:
             return _fail("No such recording.")
         _model, folder, row = found
+        if row.get("play_problem"):          # this recording's codec (e.g. LPEC ST without its tables), not the model's
+            return _fail(f"Playback: {row['play_problem']}.")
         number = row["number"]
         key = (device_id, folder_id, number)
 
         made = []
 
-        def make():                      # runs only when the audio server has no decode cached
-            dl = _download(self._manager, key)
-            made.append(dl)
-            return _decoder(fmt).to_wav(dl.data, should_stop=self._stop.is_set)
+        def write(f):                    # runs only when the audio server has no decode cached
+            if not made:                 # (a retry after a full disk reuses the download)
+                made.append(_download(self._manager, key))
+            dl = made[-1]
+            self._reserve(fmt, dl.data)
+            formats.write_wav(fmt, dl.data, f, should_stop=self._stop.is_set)
         try:
-            info = self._server.prepare(key, make=make)
+            info = self._server.prepare(key, write=write)
         except Exception as e:
             return _error(e)
         fp = info.get("fp")
@@ -734,8 +772,9 @@ class Api(LibraryOps):
         """(native bytes, their file name, WAV or None) for a recorder recording's
         handle. When the handle has no captured bytes, the recording is downloaded
         once more from the same recorder, folder and number, and trusted only if it
-        decodes to the same audio that was loaded (then the WAV from that check is
-        returned too). Raises ValueError in plain words."""
+        decodes to the same audio that was loaded (fingerprinted in place); that
+        decode is returned as the WAV, so the caller (a WAV copy, a marked export)
+        does not decode it again. Raises ValueError in plain words."""
         src = entry["source"]
         with self._recs_lock:
             if src["native"] is not None:
@@ -749,7 +788,9 @@ class Api(LibraryOps):
         if not _usable_filename(src["format"], dl.filename):
             raise ValueError(f"the recorder gave {src['label']} a file name OpenEVP cannot use")
         wav = _decoder(src["format"]).to_wav(dl.data, should_stop=self._stop.is_set)
-        if wavinfo.wav_fingerprint(io.BytesIO(wav)) != entry["fp"]:
+        with wavinfo.buffer_file(wav) as f:
+            same = wavinfo.wav_fingerprint(f) == entry["fp"]
+        if not same:
             raise ValueError(f"{src['label']} on the recorder is no longer the recording that was marked. "
                              "Load it again, then retry.")
         with self._recs_lock:
@@ -786,12 +827,13 @@ class Api(LibraryOps):
         name = os.path.basename(path)
         detail = f"{name} was already saved" if already else f"Saved as {name}"
         paths = [path]                                # remembered: deleting them undoes the backup
-        if _decoder_problem(fmt) is None:
+        if _wav_problem(src, data) is None:
             wav_name = os.path.splitext(native_name)[0] + ".wav"
             try:
                 if wav is None:
                     wav = _decoder(fmt).to_wav(data, should_stop=self._stop.is_set)
-                wav_path, _ = save_wav(wavinfo.with_markers(wav, self._store.marks(fp)), outdir, wav_name)
+                wav_path, _ = save_wav(wavinfo.marked_parts(wav, self._store.marks(fp)), outdir, wav_name)
+                del wav
                 paths.append(wav_path)
                 detail += f", with a WAV copy ({os.path.basename(wav_path)})"
             except formats.Cancelled:
@@ -815,19 +857,28 @@ class Api(LibraryOps):
                    {"rec": rec, "label": entry["source"]["label"], "detail": detail})
 
     # ---- WAV with marks ----------------------------------------------------------
+    def _reserve(self, fmt, data):
+        """Before a decode into the audio server's cache: make room for the WAV it
+        is expected to write (older decodes are evicted first)."""
+        reserve = getattr(self._server, "reserve", None)
+        if reserve is not None:
+            reserve(formats.expected_wav_bytes(fmt, data))
+
     def _marked_wav(self, wav):
         """(wav, note): a freshly decoded WAV with the marks of its recording written
-        in, or unchanged when it has none. note says why marks were left out."""
+        in (as wavinfo.marked_parts: pieces, not a copy), or unchanged when it has
+        none. note says why marks were left out."""
         if self._store is None:
             return wav, None
         try:
-            marks = self._store.marks(wavinfo.wav_fingerprint(io.BytesIO(wav)))
+            with wavinfo.buffer_file(wav) as f:
+                marks = self._store.marks(wavinfo.wav_fingerprint(f))
         except ValueError:
             return wav, None
         if not marks:
             return wav, None
         try:
-            return wavinfo.with_markers(wav, marks), None
+            return wavinfo.marked_parts(wav, marks), None
         except ValueError as e:
             return wav, f"saved without its marks ({e})"
 
@@ -878,13 +929,16 @@ class Api(LibraryOps):
         src = entry["source"]
         try:
             if src["kind"] == "device":
-                problem = _decoder_problem(src["format"])
+                problem = _wav_problem(src)
                 if problem:
                     return _fail(f"WAV export: {problem}.")
                 try:
                     data, native_name, wav = self._device_audio(entry)
                 except ValueError as e:
                     return _fail(str(e))
+                problem = _wav_problem(src, data)
+                if problem:
+                    return _fail(f"WAV export: {problem}.")
                 if not _usable_filename(src["format"], native_name):
                     return _fail(f"The recorder gave {src['label']} a file name OpenEVP cannot use.")
                 if wav is None:
@@ -898,7 +952,7 @@ class Api(LibraryOps):
                     raw = f.read()
                 fmt = formats.by_ext(os.path.splitext(name)[1])
                 if fmt is not None and fmt is not formats.WAV:
-                    problem = _decoder_problem(fmt)
+                    problem = _decoder_problem(fmt) or fmt.data_problem(raw)
                     if problem:
                         return _fail(f"WAV export: {problem}.")
                     wav = _decoder(fmt).to_wav(raw, should_stop=self._stop.is_set)
@@ -906,7 +960,8 @@ class Api(LibraryOps):
                     wav = raw
                 del raw
                 try:
-                    same = wavinfo.wav_fingerprint(io.BytesIO(wav)) == entry["fp"]
+                    with wavinfo.buffer_file(wav) as f:
+                        same = wavinfo.wav_fingerprint(f) == entry["fp"]
                 except ValueError:
                     same = False
                 if not same:
@@ -914,7 +969,7 @@ class Api(LibraryOps):
                 investigation = _investigation(path, self._library_path())
                 outdir = os.path.join(self._dest, investigation) if investigation else self._dest
                 out_name = os.path.splitext(name)[0] + ".wav"
-            marked = wavinfo.with_markers(wav, marks)
+            marked = wavinfo.marked_parts(wav, marks)
         except formats.Cancelled:
             return _fail(CLOSING)
         except OSError as e:
@@ -1006,13 +1061,18 @@ class Api(LibraryOps):
             problem = _decoder_problem(fmt)
             if problem:
                 return _fail(f"Playing {fmt.ext} files: {problem}.")
+            problem = fmt.file_problem(path)          # this file (e.g. an ICD-ST10 recording)
+            if problem:
+                return _fail(f"{name}: {_sentence(problem)}")
             st = os.stat(path)
             key = (fmt.ext[1:], os.path.normcase(path), st.st_size, st.st_mtime_ns)
 
-            def decode():
+            def write(out):
                 with open(path, "rb") as f:
-                    return _decoder(fmt).to_wav(f.read(), should_stop=self._stop.is_set)
-            return self._loaded(self._server.prepare(key, make=decode), name, name, source, {"name": name})
+                    data = f.read()
+                self._reserve(fmt, data)
+                formats.write_wav(fmt, data, out, should_stop=self._stop.is_set)
+            return self._loaded(self._server.prepare(key, write=write), name, name, source, {"name": name})
         except Exception as e:
             return _fail(f"Could not play {name}: {_plain(e)}")
 
@@ -1103,25 +1163,33 @@ class Api(LibraryOps):
         for investigation, name, kind, path, st, rel in found:
             fid = _file_id(path)
             table[fid] = path
-            fp = error = seconds = None
+            fp = error = seconds = unplayable = None
             fmt = _kind_format(kind)
+            cached = None
+            if fmt.decoder is not None and store is not None:
+                cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
+            if fmt.decoder is not None and cached is None:
+                # A file's own header can say it cannot be decoded yet (an ICD-ST10
+                # recording; only the header is read): listed like a file without
+                # a decoder, and never cached. A cached file was decoded before.
+                unplayable = self._file_problem(fmt, path, st)
             if fmt.decoder is None:
                 # Listed, never fingerprinted or cached: no decoder is not the file's fault.
                 seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {_decoder_problem(fmt)}."
+            elif unplayable:
+                seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {unplayable}."
             elif store is None:
                 seconds = _seconds(path, kind)
+            elif cached is None:
+                pending.append((fid, path, kind, st.st_size, st.st_mtime_ns))
             else:
-                cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
-                if cached is None:
-                    pending.append((fid, path, kind, st.st_size, st.st_mtime_ns))
-                else:
-                    fp, error, seconds = cached.get("fp"), cached.get("error"), cached.get("seconds")
+                fp, error, seconds = cached.get("fp"), cached.get("error"), cached.get("seconds")
             s = summary.get(fp) if fp else None
             files.append({"id": fid, "name": name, "investigation": investigation, "type": kind,
                           "seconds": seconds,
                           "modified": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                           "fp": fp, **_marks_row(s or {}, s and s["reviewed"], s and s["notes"]),
-                          "error": error, "folder_id": _folder_id(rel)})
+                          "error": error, "unplayable": unplayable, "folder_id": _folder_id(rel)})
         folder_table = {"root": folder}
         folder_rows = [{"id": "root", "parent": None, "name": os.path.basename(os.path.normpath(folder)),
                         "rel": []}]
@@ -1169,6 +1237,20 @@ class Api(LibraryOps):
                 self._add_worker(thread)
         result.update(indexing=True, pending=len(pending))
         return result
+
+    def _file_problem(self, fmt, path, st):
+        """fmt.file_problem(path), read once per version (size, mtime) of the file:
+        such a file is never cached in the store's index, and without a store no
+        file is, so a listing would otherwise read its header every time."""
+        key = os.path.normcase(os.path.abspath(path))
+        with self._headers_lock:
+            held = self._headers.get(key)
+        if held is not None and held[:2] == (st.st_size, st.st_mtime_ns):
+            return held[2]
+        problem = fmt.file_problem(path)
+        with self._headers_lock:
+            _bounded_put(self._headers, key, (st.st_size, st.st_mtime_ns, problem), SESSION_CACHE)
+        return problem
 
     def _library_worker(self):
         """The one indexer thread. It runs the latest scan's job. A newer scan of
@@ -1265,8 +1347,8 @@ class Api(LibraryOps):
         hit = self._cached_fp(path, size, mtime_ns)
         if hit is not None:                     # done by the job this one took over from
             return {"fp": hit.get("fp"), "seconds": hit.get("seconds"), "error": hit.get("error"),
-                    **self._fp_marks(hit.get("fp"))}, False
-        fp = length = error = None
+                    "unplayable": None, **self._fp_marks(hit.get("fp"))}, False
+        fp = length = error = unplayable = None
         cacheable = True
         fmt = _kind_format(kind)
         try:
@@ -1277,20 +1359,23 @@ class Api(LibraryOps):
                 # Not the file's fault: nothing is cached, so a later scan tries
                 # again once the decoder is there.
                 error, cacheable = decoder_problem, False
+            elif unplayable := fmt.file_problem(path):
+                # Its header says it cannot be decoded yet (an ICD-ST10 recording):
+                # the file is not read, and nothing is cached (a later decoder will play it).
+                error, cacheable = f"{name} can't be played or marked: {unplayable}.", False
             elif fmt.max_bytes is not None and size > fmt.max_bytes:
                 error = f"{name} is too large to be {fmt.a_recording()}."
             else:
                 with open(path, "rb") as f:
                     data = f.read()
-                wav = _decoder(fmt).to_wav(data, should_stop=cancelled)
+                fp, length = formats.analyze(fmt, data, should_stop=cancelled)
                 del data
-                fp = wavinfo.wav_fingerprint(io.BytesIO(wav))
-                length = _wav_length(io.BytesIO(wav))
-                del wav
         except (formats.Cancelled, wavinfo.Stopped):
             return None, False
         except (MemoryError, formats.DecoderUnavailable) as e:   # not the file's fault: not kept
             fp, error, cacheable = None, _plain(e), False
+            if isinstance(e, formats.DecoderUnavailable):
+                unplayable = _plain(e)
         except OSError as e:                    # locked or vanished: may work next time
             fp, error, cacheable = None, _plain(e), False
         except Exception as e:                  # not a readable recording: remembered
@@ -1299,18 +1384,19 @@ class Api(LibraryOps):
             st = os.stat(path)
         except OSError:
             return {"fp": None, "seconds": None, "error": f"{name} is no longer there.",
-                    **_marks_row({}, False, "")}, False
+                    "unplayable": None, **_marks_row({}, False, "")}, False
         if (st.st_size, st.st_mtime_ns) != (size, mtime_ns):
             # Changed while it was read (still being copied or recorded?): nothing
             # is kept, and the next scan reads it again.
             return {"fp": None, "seconds": None,
                     "error": f"{name} changed while it was being read. Refresh the list to try again.",
-                    **_marks_row({}, False, "")}, False
+                    "unplayable": None, **_marks_row({}, False, "")}, False
         seconds = round(length, 1) if length else _seconds(path, kind)
         stored = cacheable and self._remember_fp(path, size, mtime_ns, fp, seconds, error)
         if kind == "wav" and fp and length:     # an empty WAV gets no marks (no identity of its own)
             self._import_markers(path, {"fp": fp, "duration": length}, name, (size, mtime_ns))
-        return {"fp": fp, "seconds": seconds, "error": error, **self._fp_marks(fp)}, stored
+        return {"fp": fp, "seconds": seconds, "error": error, "unplayable": unplayable,
+                **self._fp_marks(fp)}, stored
 
     def _fp_marks(self, fp):
         """_marks_row for one recording, read straight from the store."""

@@ -88,6 +88,21 @@ class MainImportTests(unittest.TestCase):
             with open(report, encoding="utf-8") as f:
                 self.assertIn("no WebView2", f.read())
 
+    def test_smoke_checks_both_decoders(self):
+        """--smoke fails a build whose LPEC LP, SP or ST decoder does not load, or
+        loads in slow mode; here (from source) they load, or the gate says why not."""
+        main = self.main()
+        report = {"problems": []}
+        main._smoke_decoders(report)
+        self.assertEqual(set(report["decoders"]), {"lpec", "lpec_sp", "lpec_st"})
+        if report["decoders"]["lpec_st"]["available"]:
+            self.assertEqual(report["decoders"]["lpec_st"]["decoded"], 0)
+        with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec_st": None}):
+            report = {"problems": []}
+            main._smoke_decoders(report)
+        self.assertIn("LPEC ST (ICD-ST10) decoding is not available: "
+                      "LPEC ST (ICD-ST10) playback is not included in this build", report["problems"])
+
     def test_smoke_lists_every_ui_file(self):
         main = self.main()
         files = main.ui_files(main._ui_dir())

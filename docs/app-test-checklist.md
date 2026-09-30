@@ -32,3 +32,17 @@ from the frozen build is caught):
     finishes with no "stuck" errors. Repeat three times.
 14. Two recorders at once (when available): both listed; exporting from one while
     browsing the other works.
+
+ICD-ST10 (LPEC ST, 44.1 kHz stereo):
+
+15. Plug it in and click it: it is listed as "Sony ICD-ST10"; its recordings show
+    "undated" (clock not set) and lengths matching `st25-download --list`; WAV
+    is available in the export menu.
+16. Export as .dvf: the files are saved (`001_A_001_Unknown.dvf`...); exporting
+    again says they are already there.
+17. Click a recording: it plays in stereo; zooming in on a short one shows the
+    left channel above the line and the right below.
+18. Mark it: the backup saves the .dvf and a WAV with the mark. Export an
+    unmarked one as WAV: it matches `st25-download --wav` byte for byte.
+19. Open the Save-to folder in the EVP Library: the ST10 files are listed with
+    their length and marks, and play.

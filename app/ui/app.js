@@ -6,9 +6,9 @@ const $ = (id) => document.getElementById(id);
 // A recorder's folders and recordings come from its model (backend recordings()): folder
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
-const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false },
+const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
-            playable: false, formats: [], model: "",       // the open recorder's: can it play, its export menu
+            playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
@@ -198,21 +198,61 @@ function showPlayerLoaded(label) {
   $("now-playing").textContent = label; $("play").disabled = true; $("play").textContent = "▶";
 }
 
-// Load a prepared audio {url, peaks, duration} into the player. Precomputed peaks and the
-// duration let wavesurfer draw at once and stream the audio instead of decoding it all.
-// Recordings up to this many samples are drawn from the audio itself (every
-// sample, both halves of the wave), so zooming in shows real detail; longer
-// ones use the server's peaks (400 per second), which keeps memory in check.
-const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;          // 30 minutes of ST25 audio
+// Load a prepared audio {url, peaks, duration, rate, channels} into the player. Precomputed
+// peaks and the duration let wavesurfer draw at once and stream the audio instead of decoding it all.
+// Recordings up to this many samples, counted over all channels, are drawn from the
+// audio itself (every sample; a stereo one shows its left channel above the line and
+// its right below), so zooming in shows real detail. The page then holds the whole
+// WAV and its decoded samples (6 bytes per sample), so the budget is in samples, not
+// seconds: 30 minutes of ICD-ST25 audio (8 kHz mono), about 2.7 minutes of ICD-ST10
+// audio (44.1 kHz stereo). Longer ones use the server's peaks (400 per second).
+const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;
+
+function fullDetail(r) {                          // drawn from the audio itself?
+  return !!r.rate && r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES;
+}
+
+function maxZoom(r) {                             // px per second: one pixel per sample at the deepest zoom
+  return fullDetail(r) ? r.rate : 400;
+}
+
+// The zoom slider is logarithmic: its 0..ZOOM_STEPS run from ZOOM_MIN_PX to the file's deepest zoom
+// (S.zoomMax px per second), so every step zooms by the same factor whether that is 400, 8000 (an
+// ICD-ST25 file) or 44100 (an ICD-ST10 one); 0 fits the whole file. S.zoomPx is the zoom itself
+// (px per second, 0 = fit), kept so that moving between files does not drift.
+const ZOOM_STEPS = 1000, ZOOM_MIN_PX = 10;
+
+function zoomPx(v, max) {                          // slider position -> px per second
+  v = Number(v);
+  if (!(v > 0)) return 0;
+  const lo = Math.min(ZOOM_MIN_PX, max);
+  return Math.min(max, lo * Math.pow(max / lo, v / ZOOM_STEPS));
+}
+
+function zoomSlider(px, max) {                     // px per second -> slider position
+  if (!(px > 0)) return 0;
+  const lo = Math.min(ZOOM_MIN_PX, max);
+  if (max <= lo) return ZOOM_STEPS;
+  return Math.max(0.001, Math.min(ZOOM_STEPS, ZOOM_STEPS * Math.log(px / lo) / Math.log(max / lo)));
+}
+
+function setZoom(px) {                             // zoom the waveform and move the slider to match
+  S.zoomPx = px;
+  $("zoom").value = zoomSlider(px, S.zoomMax);
+  S.ws.zoom(px);
+}
 
 async function loadIntoPlayer(seq, label, r, autoplay) {
   showPlayerLoaded(label);
   clearSelection();
   setCurrent(label, r);
-  const full = r.rate && r.duration * r.rate <= FULL_DETAIL_SAMPLES;
-  const zoom = $("zoom");
-  zoom.max = full ? Math.min(r.rate, 8000) : 400;   // px per second; at 8000 one pixel is one ST25 sample
-  if (Number(zoom.value) > Number(zoom.max)) zoom.value = zoom.max;
+  const full = fullDetail(r);
+  S.zoomMax = maxZoom(r);
+  if (S.zoomPx > S.zoomMax) {                     // deeper than this file allows: its deepest zoom
+    S.zoomPx = S.zoomMax;
+    S.ws.setOptions({ minPxPerSec: S.zoomPx });
+  }
+  $("zoom").value = zoomSlider(S.zoomPx, S.zoomMax);
   try {
     if (full) {
       S.ws.setOptions({ sampleRate: r.rate });
@@ -305,7 +345,9 @@ async function setupRecorder() {
 
 async function openDevice(id) {
   if (id === S.device && S.folders.length) {                // already read: just show it again
-    S.view = "device"; renderDevices(); renderMain(); return;
+    S.view = "device"; renderDevices(); renderMain();
+    if (!S.playable && S.playReason) status(`${sentence(S.playReason)} Its recordings can still be saved.`);
+    return;
   }
   if (S.exporting) { banner("Wait for the export to finish before switching recorders."); return; }
   S.view = "device";
@@ -318,9 +360,16 @@ async function openDevice(id) {
   if (!r.ok) { showError(r); S.device = null; renderDevices(); return; }
   S.folders = r.folders;
   S.folder = (r.folders.find((f) => f.recordings.length) || r.folders[0] || {}).id ?? null;
-  S.model = r.model; S.playable = !!r.playable; S.formats = r.formats || [];
+  S.model = r.model; S.playable = !!r.playable; S.playReason = r.play_reason || ""; S.formats = r.formats || [];
+  // Opening a recorder can tell what it is (an ICD-ST10 is found as an ICD-ST25): relabel it now,
+  // not at the next poll.
+  const listed = S.devices.find((d) => d.id === id);
+  if (listed) Object.assign(listed, { model: r.model, model_id: r.model_id });
   $("device-table").classList.toggle("playable", S.playable);
   setFormats(S.formats);
+  // A recorder whose recordings can't be played here (e.g. an ICD-ST10 in a build without its
+  // decoder): said once, plainly.
+  if (!S.playable && S.playReason) status(`${sentence(S.playReason)} Its recordings can still be saved.`);
   renderDevices(); renderMain();
 }
 
@@ -425,7 +474,7 @@ function libraryEvent(event, p) {
     if (!f) return;
     const fp = p.fp || null;
     setFileFp(f, fp);
-    Object.assign(f, { seconds: p.seconds, error: p.error });
+    Object.assign(f, { seconds: p.seconds, error: p.error, unplayable: p.unplayable || null });
     if (!fp) Object.assign(f, fileSummary(p));
     else {
       // Every copy of the recording shows these marks, whichever file reported them (a WAV's
@@ -880,8 +929,16 @@ function typeReason(type) {                    // why not, as a sentence
   return sentence(t && t.reason);
 }
 
+// A file that can't be played although its type can (its own header says so: an ICD-ST10
+// recording in a build without the LPEC ST decoder) has "unplayable", the reason.
+function filePlayable(f) { return typePlayable(f.type) && !f.unplayable; }
+
 function libraryPlayable(g) {                  // the file to play: the main one, or a WAV copy without the decoder
-  return typePlayable(g.main.type) ? g.main : g.files.find((f) => f.type === "wav") || null;
+  return filePlayable(g.main) ? g.main : g.files.find((f) => f.type === "wav") || null;
+}
+
+function whyUnplayable(g) {                    // why a row can't be played, as sentences
+  return g.main.unplayable ? sentence(g.main.unplayable) : `Can't play .${g.main.type} files. ` + typeReason(g.main.type);
 }
 
 function libraryPlaying(g) { return g.files.some((f) => S.playing === `lib|${f.id}`); }
@@ -919,13 +976,13 @@ function libraryRow(g) {
   const total = g.marks.A + g.marks.B + g.marks.C;
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
-  const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type]), g.seconds, g.marks, g.reviewed,
+  const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type, f.unplayable]), g.seconds, g.marks, g.reviewed,
                               g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable]);
   if (tr.sig === sig) return tr;
   tr.sig = sig;
   tr.classList.toggle("playing", libraryPlaying(g));
   tr.classList.toggle("unplayable", !playable);
-  tr.title = playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type);
+  tr.title = playable ? "" : whyUnplayable(g);
   const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
   const toggle = cToggle.lastChild;
   toggle.hidden = !total && !expanded;
@@ -955,6 +1012,9 @@ function libraryRow(g) {
   cEvp.title = "";
   if (!S.caps.marks) {
     // no marks store: nothing to show
+  } else if (g.main.unplayable) {              // not an error: it can't be played (or marked) yet
+    cEvp.textContent = "—";
+    cEvp.title = sentence(g.main.unplayable);
   } else if (g.error) {
     const warn = document.createElement("span");
     warn.className = "lib-error";
@@ -1063,7 +1123,7 @@ async function playLibrary(g, mark) {
     return;
   }
   const f = libraryPlayable(g);
-  if (!f) { banner(`Can't play .${g.main.type} files. ` + typeReason(g.main.type) + " WAV files still play."); return; }
+  if (!f) { banner(whyUnplayable(g) + (g.main.unplayable ? "" : " WAV files still play.")); return; }
   const seq = ++S.playSeq;
   banner(""); status(`Loading ${f.name}…`);
   const r = await api().play_library(f.id);
@@ -1697,7 +1757,7 @@ function libraryMenuItems(target) {
     const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
     const n = recordingsIn(ids), playable = !!libraryPlayable(g);
     return [
-      { label: "Play", disabled: !playable, title: playable ? "" : `Can't play .${g.main.type} files. ` + typeReason(g.main.type),
+      { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
       { label: "Rename…", disabled: !canRenameRecording(g),
@@ -1807,10 +1867,14 @@ function renderRows() {
     const item = { device: S.device, folder: folder.id, number: r.number };
     box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.set(k, item) : S.selected.delete(k); updateExport(); };
     const no = typeof r.number === "number" ? String(r.number).padStart(3, "0") : String(r.number);
-    const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), r.problem || ""];
+    // A recording whose own codec can't be played (e.g. a build without that codec's tables) is still saved; it says why.
+    const note = r.problem || (S.playable && r.play_problem ? sentence(r.play_problem) : "");
+    const cells = [no, r.recorded, r.seconds == null ? "" : fmtTime(r.seconds), note];
     const first = document.createElement("td"); first.appendChild(box); tr.appendChild(first);
     cells.forEach((c, i) => { const td = document.createElement("td"); td.textContent = c; if (i === 3) td.className = "note"; tr.appendChild(td); });
-    if (S.playable) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
+    if (S.playable && !r.play_problem) tr.onclick = () => play(S.device, folder.id, r.number, r.label);
+    else if (S.playable) { tr.classList.add("unplayable"); tr.title = sentence(r.play_problem); }
+    else if (S.playReason) tr.title = sentence(S.playReason);
     rows.appendChild(tr);
   }
   $("all").checked = recs.length > 0 && recs.every((r) => r.problem || S.selected.has(key(S.device, folder.id, r.number)));
@@ -1897,7 +1961,7 @@ function setupPlayer() {
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
-  $("zoom").oninput = () => S.ws.zoom(Number($("zoom").value));
+  $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSelection();                         // once: the plugin stays registered across loads
@@ -1929,16 +1993,14 @@ function wheelZoom(e) {
     S.ws.setOptions({ barHeight: Number(h.value) });
     return;
   }
-  const slider = $("zoom");
   const fit = $("waveform").clientWidth / duration;          // px per second when the whole file fits
-  const now = Number(slider.value) || fit;
-  let next = Math.min(Number(slider.max), now * (delta < 0 ? 1.25 : 0.8));
+  const now = S.zoomPx || fit;
+  let next = Math.min(S.zoomMax, now * (delta < 0 ? 1.25 : 0.8));
   if (next <= fit) next = 0;                                  // zoomed all the way out: fit to width
-  if (next === Number(slider.value)) return;
+  if (next === S.zoomPx) return;
   const x = e.clientX - $("waveform").getBoundingClientRect().left;
   const t = (S.ws.getScroll() + x) / now;                    // the second under the pointer
-  slider.value = next;
-  S.ws.zoom(next);
+  setZoom(next);
   if (next) S.ws.setScroll(t * next - x);
 }
 

@@ -26,14 +26,17 @@ import os
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 from . import x87
+from .config import LP, SP, Config
 
 Row = Sequence[float]        # a tuple once loaded (see _freeze)
 IntRow = Sequence[int]
 
-DEFAULT_DATA_FILE = Path(__file__).resolve().parent / "data" / "lpec_tables.json"
+DATA_DIR = Path(__file__).resolve().parent / "data"
+DEFAULT_DATA_FILE = DATA_DIR / LP.data_file          # LPEC LP (8000 Hz)
+SP_DATA_FILE = DATA_DIR / SP.data_file               # LPEC SP (16000 Hz)
 
 # Where the extracted tables lived before v0.8 (openevp/decoders/sony_lpec
 # replaced st25/lpec): a local copy may still be there.
@@ -57,6 +60,20 @@ _EXTRACTED_SHAPES = {
 }
 _EXTRACTED_NAMES = tuple(_EXTRACTED_SHAPES)
 _INT_TABLES = frozenset({"AB"})     # int16 values; the rest are doubles
+
+
+def extracted_shapes(cfg: Config = LP) -> dict:
+    """The extracted tables of a configuration and their shapes: LP's are
+    _EXTRACTED_SHAPES; LPEC SP has a fourth LSP stage, 16-dimensional LSP
+    codebooks and 10 bands (docs/lpec.md, "LPEC SP (16000 Hz)")."""
+    if cfg == LP:
+        return dict(_EXTRACTED_SHAPES)
+    shapes = {f"C{k + 1}": (64, cfg.order) for k in range(cfg.lsp_stages)}
+    for name, shape in _EXTRACTED_SHAPES.items():
+        if not name.startswith("C"):
+            shapes[name] = shape
+    shapes.update({"BG1": (64, cfg.bands), "BG2": (64, cfg.bands), "AB": (64, cfg.bands)})
+    return shapes
 
 
 class TablesMissing(RuntimeError):
@@ -88,51 +105,71 @@ class TablesInvalid(TablesMissing):
 
 @dataclass(frozen=True)
 class Tables:
-    """One attribute per table in docs/lpec.md, "Tables"."""
+    """One attribute per table in docs/lpec.md, "Tables", for one
+    configuration (``RATE`` 8000: LPEC LP, 16000: LPEC SP)."""
 
     # Every table is stored as a tuple (of tuples, for a matrix): the cached
     # Tables object is shared by every decode, on any thread.
 
-    # --- Extracted (from openevp/decoders/sony_lpec/data/lpec_tables.json) ---
-    C1: Sequence[Row]       # LSP codebook stage 1, double, 64 x 10
-    C2: Sequence[Row]       # LSP codebook stage 2, double, 64 x 10
-    C3: Sequence[Row]       # LSP codebook stage 3, double, 64 x 10
+    RATE: int               # 8000 or 16000: selects config.LP / config.SP
+
+    # --- Extracted (from data/lpec_tables.json / data/lpec_sp_tables.json) ---
+    C: Sequence             # LSP codebooks, one per stage, double, 64 x order
     PT: Sequence[Row]       # pitch taps, double, 64 x 3
     SHAPES: Sequence[Row]   # temporal shapes, double, 128 x 8
-    GAIN: Row           # global gain, double, 128
-    BG1: Sequence[Row]      # band gain stage 1, double, 64 x 8
-    BG2: Sequence[Row]      # band gain stage 2, double, 64 x 8
+    GAIN: Row               # global gain, double, 128
+    BG1: Sequence[Row]      # band gain stage 1, double, 64 x bands
+    BG2: Sequence[Row]      # band gain stage 2, double, 64 x bands
     VQ2: Sequence[Row]      # coefficient VQ, 2-dim, double, 256 x 2
     VQ4: Sequence[Row]      # coefficient VQ, 4-dim, double, 256 x 4
     VQ8: Sequence[Row]      # coefficient VQ, 8-dim, double, 256 x 8
-    AB: Sequence[IntRow]    # allocation base, int16, 64 x 8
-    NA: Row             # noise A, double, 1024
-    NB: Row             # noise B, double, 1024
+    AB: Sequence[IntRow]    # allocation base, int16, 64 x bands
+    NA: Row                 # noise A, double, 1024
+    NB: Row                 # noise B, double, 1024
 
     # --- Derived from the extracted codebooks above ---
-    D1: Sequence[IntRow]    # LSP codebook stage 1, Q16 int16, 64 x 10: rhu(C1*65536)
-    D2: Sequence[IntRow]    # LSP codebook stage 2, Q17 int16, 64 x 10: rhu(C2*131072)
-    D3: Sequence[IntRow]    # LSP codebook stage 3, Q18 int16, 64 x 10: rhu(C3*262144)
+    D: Sequence             # LSP codebooks, int16, one per stage: rhu(C_k * 2^shift_k)
     PQ: Sequence[IntRow]    # pitch taps, Q15 int16, 64 x 3: rhu(PT*32768)
 
     # --- Trivial or constant static tables ---
-    R: int                    # allocation reference, = 128
-    S2048: IntRow              # int16 sine, period 2048, 2049 entries
-    S1536: IntRow               # int16 sine, period 1536, 1537 entries
-    DEFAULT_SHAPE: Row          # 8 doubles, all 1.0
-    ZERO_TAPS_F: Row            # 3 doubles, all 0.0 (lag 0)
-    ZERO_TAPS_Q15: IntRow       # 3 int16, all 0 (lag 0)
+    R: int                  # allocation reference (128 LP, 432 SP)
+    S2048: IntRow           # int16 sine, period 2048, 2049 entries
+    S1536: IntRow           # int16 sine, period 1536, 1537 entries
+    DEFAULT_SHAPE: Row      # 8 doubles, all 1.0
+    ZERO_TAPS_F: Row        # 3 doubles, all 0.0 (lag 0)
+    ZERO_TAPS_Q15: IntRow   # 3 int16, all 0 (lag 0)
 
     # --- Generated at (the equivalent of) first InitDecoder ---
-    WIN512: Row          # 512-point sine window v
-    WIN512_SQ: Row       # its square, v2
-    WIN1024: Row         # 1024-point sine window
-    FFT_SIN_2048: Row    # FFT sine, period 2048
-    FFT_SIN_1536: Row    # FFT sine, period 1536
-    POST256: Row         # post-twiddle, N = 512 (256 entries)
-    POST384: Row         # post-twiddle, N = 768 (384 entries)
-    POST512: Row         # post-twiddle, N = 1024 (512 entries)
-    LSP_INIT: Row        # initial LSPs, 11 doubles
+    WIN: Row                # F-point sine window v (F = frame)
+    WIN_SQ: Row             # its square, v2
+    WIN_LONG: Row           # 2F-point sine window
+    FFT_SIN_2048: Row       # FFT sine, period 2048
+    FFT_SIN_1536: Row       # FFT sine, period 1536
+    POST: Sequence          # post-twiddle by transform type t (N_t / 2 entries)
+    LSP_INIT: Row           # initial LSPs, order + 1 doubles
+
+    @property
+    def config(self) -> Config:
+        return SP if self.RATE == SP.rate else LP
+
+    # LP names (docs/lpec.md) for the stage codebooks and run-time tables.
+    C1 = property(lambda self: self.C[0])
+    C2 = property(lambda self: self.C[1])
+    C3 = property(lambda self: self.C[2])
+    D1 = property(lambda self: self.D[0])
+    D2 = property(lambda self: self.D[1])
+    D3 = property(lambda self: self.D[2])
+    WIN512 = property(lambda self: self._lp(self.WIN))
+    WIN512_SQ = property(lambda self: self._lp(self.WIN_SQ))
+    WIN1024 = property(lambda self: self._lp(self.WIN_LONG))
+    POST256 = property(lambda self: self._lp(self.POST[0]))
+    POST384 = property(lambda self: self._lp(self.POST[1]))
+    POST512 = property(lambda self: self._lp(self.POST[3]))
+
+    def _lp(self, table):
+        if self.RATE != LP.rate:
+            raise AttributeError("an LP table name used on the LPEC SP tables")
+        return table
 
 
 # --------------------------------------------------------------------------
@@ -208,8 +245,8 @@ def _post_twiddle(n: int) -> Row:
     return [x87.fsin((2 * i + 1) * (3.14159265359 / (2 * n))) for i in range(n // 2)]
 
 
-def _lsp_init() -> Row:
-    return [i * (0.48 / 11) for i in range(11)]
+def _lsp_init(order: int = 10) -> Row:
+    return [i * (0.48 / (order + 1)) for i in range(order + 1)]
 
 
 # --------------------------------------------------------------------------
@@ -262,26 +299,30 @@ def _freeze(table):
     return table
 
 
-def load(path: Path = DEFAULT_DATA_FILE) -> Tables:
-    """Load the extracted tables and generate the derivable ones.
+def load(path: Optional[Path] = None, config: Config = LP) -> Tables:
+    """Load the extracted tables of ``config`` (LPEC LP by default) and
+    generate the derivable ones.
 
-    Raises TablesMissing if `path` (the file `tools/import_lpec_tables.py`
-    writes) does not exist, and TablesInvalid (a TablesMissing) if it is not
-    valid JSON or any table is missing or has the wrong shape. Repeated
-    calls for the same file (by path, mtime and size) reuse the first
-    result instead of re-reading and re-parsing it; a changed or replaced
-    file is detected and reloaded.
+    ``path`` defaults to the configuration's data file (``data/lpec_tables.json``
+    for LP, ``data/lpec_sp_tables.json`` for SP), which
+    ``tools/import_lpec_tables.py`` writes. Raises TablesMissing if it does not
+    exist, and TablesInvalid (a TablesMissing) if it is not valid JSON or any
+    table is missing or has the wrong shape. Repeated calls for the same file
+    (by path, mtime and size) reuse the first result instead of re-reading
+    and re-parsing it; a changed or replaced file is detected and reloaded.
     """
-    path = Path(path)
+    path = Path(path) if path is not None else DATA_DIR / config.data_file
     if not path.is_file():
-        if _OLD_DATA_FILE.is_file():
+        if config == LP and _OLD_DATA_FILE.is_file():
             raise TablesMissing(path=path,
                                  hint="found at the old location st25/lpec/data -- move it to "
                                       "openevp/decoders/sony_lpec/data")
-        raise TablesMissing(path=path)
+        if config == LP:
+            raise TablesMissing(path=path)
+        raise TablesMissing(f"this build does not include the LPEC {config.name} table data", path=path)
 
     st = path.stat()
-    key = (os.path.normcase(os.path.abspath(str(path))), st.st_mtime_ns, st.st_size)
+    key = (config.name, os.path.normcase(os.path.abspath(str(path))), st.st_mtime_ns, st.st_size)
     cached = _CACHE.get(key)
     if cached is not None:
         return cached
@@ -295,7 +336,7 @@ def load(path: Path = DEFAULT_DATA_FILE) -> Tables:
         raise TablesInvalid(path=path, hint=f"{path.name} is not a JSON object")
 
     extracted = {}
-    for name, shape in _EXTRACTED_SHAPES.items():
+    for name, shape in extracted_shapes(config).items():
         if name not in raw:
             raise TablesInvalid(path=path, hint=f"{path.name} has no table {name}")
         try:
@@ -304,30 +345,30 @@ def load(path: Path = DEFAULT_DATA_FILE) -> Tables:
             e.path = path
             raise
         extracted[name] = raw[name]
-    win512, win512_sq = _sine_window(512)
-    win1024, _win1024_sq = _sine_window(1024)  # doc has no square table for N = 1024
+
+    stages = [f"C{k + 1}" for k in range(config.lsp_stages)]
+    win, win_sq = _sine_window(config.frame)
+    win_long, _win_long_sq = _sine_window(2 * config.frame)  # no square table for 2F
+    posts = {n: _post_twiddle(n) for n in sorted(set(config.transform_n))}
 
     fields = dict(
+        C=[extracted.pop(n) for n in stages],
         **extracted,
-        D1=_scale_round(extracted["C1"], 65536.0),
-        D2=_scale_round(extracted["C2"], 131072.0),
-        D3=_scale_round(extracted["C3"], 262144.0),
+        D=[_scale_round(raw[n], float(1 << q)) for n, q in zip(stages, config.lsp_q_shifts)],
         PQ=_scale_round(extracted["PT"], 32768.0),
         S2048=_sine_q15(2048),
         S1536=_sine_q15(1536),
         DEFAULT_SHAPE=[1.0] * 8,
         ZERO_TAPS_F=[0.0, 0.0, 0.0],
         ZERO_TAPS_Q15=[0, 0, 0],
-        WIN512=win512,
-        WIN512_SQ=win512_sq,
-        WIN1024=win1024,
+        WIN=win,
+        WIN_SQ=win_sq,
+        WIN_LONG=win_long,
         FFT_SIN_2048=_fft_sin_2048(),
         FFT_SIN_1536=_fft_sin_1536(),
-        POST256=_post_twiddle(512),
-        POST384=_post_twiddle(768),
-        POST512=_post_twiddle(1024),
-        LSP_INIT=_lsp_init(),
+        POST=[posts[n] for n in config.transform_n],
+        LSP_INIT=_lsp_init(config.order),
     )
-    result = Tables(R=128, **{k: _freeze(v) for k, v in fields.items()})
+    result = Tables(RATE=config.rate, R=config.alloc_ref[0], **{k: _freeze(v) for k, v in fields.items()})
     _CACHE[key] = result
     return result

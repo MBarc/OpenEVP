@@ -15,6 +15,7 @@ chunk with 'labl' texts and 'ltxt' region lengths), the marker format many
 audio editors read (no editor has been verified with OpenEVP's files yet).
 """
 import hashlib
+import io
 import struct
 import wave
 
@@ -82,6 +83,50 @@ def wav_fingerprint(f, should_stop=None):
         if total != expected:
             raise ValueError("the WAV file is truncated")
         return fp
+
+
+class _BufferIO(io.RawIOBase):
+    """A read-only, seekable file over a bytes-like object, without copying it
+    (io.BytesIO copies a bytearray: a second copy of a long recording)."""
+
+    def __init__(self, buf):
+        super().__init__()
+        self._view = memoryview(buf).cast("B")
+        self._pos = 0
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def readinto(self, b):
+        n = max(0, min(len(b), len(self._view) - self._pos))
+        b[:n] = self._view[self._pos:self._pos + n]
+        self._pos += n
+        return n
+
+    def seek(self, offset, whence=io.SEEK_SET):
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self._pos, io.SEEK_END: len(self._view)}[whence]
+        if base + offset < 0:
+            raise ValueError("negative seek position")
+        self._pos = base + offset
+        return self._pos
+
+    def tell(self):
+        return self._pos
+
+    def close(self):
+        if not self.closed:
+            self._view.release()       # the buffer can be resized or freed again
+        super().close()
+
+
+def buffer_file(buf):
+    """A binary file object reading ``buf`` (bytes, a bytearray...) in place,
+    for wave.open() and wav_fingerprint() on a WAV held in memory. Close it
+    (or use it in a with statement) before resizing a bytearray it reads."""
+    return io.BufferedReader(_BufferIO(buf))
 
 
 def _as_file(f):
@@ -225,7 +270,8 @@ def _strict_chunks(buf):
 
 def with_markers(wav_bytes, marks):
     """A copy of a freshly-decoded WAV with the given EVP marks written as
-    standard cue/LIST markers (any old ones removed first).
+    standard cue/LIST markers (any old ones removed first). marked_parts()
+    gives the same file as a list of pieces, without the copy.
 
     ``marks`` items: ``{"start", "end", "cls", "note"}`` (seconds; "note" may
     be omitted/empty). A point mark has ``start == end``. The label text is
@@ -237,6 +283,14 @@ def with_markers(wav_bytes, marks):
     from an arbitrary WAV -- including one this function did not just write
     -- is read_markers()'s job, not this one's.
     """
+    return b"".join(marked_parts(wav_bytes, marks))
+
+
+def marked_parts(wav_bytes, marks):
+    """with_markers() as a list of bytes-like pieces whose concatenation is the
+    marked WAV: the audio is not copied (the pieces are views into
+    ``wav_bytes``), so a long recording is held once. Write them in order
+    (openevp.export.publish and save_wav take such a list)."""
     buf = memoryview(wav_bytes)
     chunks = _strict_chunks(buf)
 
@@ -278,4 +332,4 @@ def with_markers(wav_bytes, marks):
     total_len = 8 + body_len
     if total_len > _MAX_OUTPUT_SIZE:
         raise ValueError("the marked WAV would exceed the 4 GiB limit")
-    return b"".join([b"RIFF", struct.pack("<I", body_len), b"WAVE", *kept, *extra])
+    return [b"RIFF", struct.pack("<I", body_len), b"WAVE", *kept, *extra]

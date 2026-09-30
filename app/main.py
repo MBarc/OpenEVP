@@ -13,7 +13,7 @@ from openevp import __version__
 from openevp.paths import default_output
 
 from . import folders, updater
-from .audio_server import AudioServer
+from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
 from .backend import Api, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
@@ -143,10 +143,13 @@ def _own_taskbar_identity():
 
 
 # ---- --smoke: the release check's frozen GUI smoke test -------------------------
-# OpenEVP.exe --smoke [REPORT.json] starts the backend and the WebView2 page in a
-# hidden window, checks that the page loaded (its scripts, styles and every bundled
-# UI file served) and that the JS bridge answers, then exits: 0 if all is well, 1
-# if not, with the details in REPORT.json (a --windowed build has no console).
+# OpenEVP.exe --smoke [REPORT.json] checks that both Sony decoders (LPEC LP and SP
+# for the ICD-ST25 and ICD-ST10, LPEC ST for the ICD-ST10) load with their tables
+# and fast C cores,
+# starts the backend and the WebView2 page in a hidden window, checks that the page
+# loaded (its scripts, styles and every bundled UI file served) and that the JS
+# bridge answers, then exits: 0 if all is well, 1 if not, with the details in
+# REPORT.json (a --windowed build has no console).
 # It uses a throwaway data folder and save folder, no updater (no network) and no
 # driver setup; without the flag nothing changes.
 SMOKE_FLAG = "--smoke"
@@ -263,10 +266,38 @@ def main(argv=None):
     return 0
 
 
+# (report name, codec byte, what it plays) for each decoder the smoke test loads.
+SMOKE_DECODERS = (("lpec", 0x2C, "LPEC LP (ICD-ST25)"), ("lpec_sp", 0x2A, "LPEC SP (ICD-ST10)"),
+                  ("lpec_st", 0x24, "LPEC ST (ICD-ST10)"))
+
+
+def _smoke_decoders(report):
+    """Record whether each Sony decoder loads (tables, fast C core); a problem when
+    one is unavailable or would run in slow mode. The LPEC ST decoder also decodes
+    a few frames, so its C core is initialised from the bundled tables."""
+    from st25 import audio
+    decoders = report["decoders"] = {}
+    for name, codec, what in SMOKE_DECODERS:
+        ok, status = audio.available(codec), audio.status(codec)
+        decoders[name] = {"available": ok, "status": status}
+        if not ok:
+            report["problems"].append(f"{what} decoding is not available: {status}")
+        elif status:
+            report["problems"].append(f"{what}: {status}")
+    if decoders["lpec_st"]["available"]:
+        try:
+            from openevp.decoders import sony_lpec_st
+            frames = b"".join(bytes([0, n, 0]) + bytes(280) for n in (1, 2, 3))   # rejected: no samples
+            decoders["lpec_st"]["decoded"] = len(sony_lpec_st.decode(frames)[2])
+        except Exception as e:
+            report["problems"].append(f"LPEC ST (ICD-ST10) decoding failed: {type(e).__name__}: {e}")
+
+
 def _smoke_main(report_path):
     report = {"ok": False, "version": __version__, "problems": []}
     home = tempfile.mkdtemp(prefix="openevp-smoke-")
     try:
+        _smoke_decoders(report)
         _run_app(smoke=(report, home))
     except Exception as e:
         report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")
@@ -283,7 +314,11 @@ def _run_app(smoke=None):
     """The app. smoke: (report, a throwaway folder) for --smoke (see above)."""
     _own_taskbar_identity()
     running = [] if smoke else _announce_running()   # keeps the mutex handles alive until the app closes
-    cache = tempfile.mkdtemp(prefix="st25-audio-")
+    # Decode caches left in the temp folder by runs that crashed (another running
+    # OpenEVP holds its own open, so it is kept: see clean_stale_caches).
+    clean_stale_caches(tempfile.gettempdir())
+    cache = tempfile.mkdtemp(prefix=CACHE_PREFIX)
+    cache_lock = hold_cache(cache)
     manager = None
     server = None
     api = None
@@ -385,4 +420,5 @@ def _run_app(smoke=None):
             server.stop()
         if manager is not None:
             manager.close()
+        cache_lock.close()
         shutil.rmtree(cache, ignore_errors=True)

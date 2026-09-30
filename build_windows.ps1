@@ -1,7 +1,7 @@
 # Build the OpenEVP app (dist\OpenEVP\), the ST25 command-line tool (dist\openevp-st25.exe)
 # and the installer (dist\OpenEVP-Setup-<version>.exe).
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1
-# A build without the LPEC table data (no WAV conversion) must be asked for:
+# A build without the LPEC (LP, SP) and LPEC ST table data (no WAV conversion) must be asked for:
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1 -NoLpecTables
 param([switch]$NoLpecTables)
 $ErrorActionPreference = "Stop"
@@ -28,35 +28,51 @@ $pyplat = python -c "import sysconfig; print(sysconfig.get_platform())"
 if ($LASTEXITCODE -ne 0) { throw "python not found" }
 if ($pyplat -ne "win-amd64") { throw "Python is '$pyplat'; an x64 (win-amd64) Python is required to match libusb-1.0.dll" }
 
-# The LPEC decoder's C core (openevp\decoders\sony_lpec\lpec_core.dll): built
-# before the tests so they check it against pure Python, and collected into both
-# builds below. The pure-Python decoder still works without it (~60x slower),
-# but that is a fallback for a dev machine without gcc, not an acceptable
-# release: a build that can't produce the DLL throws and stops here rather than
-# silently shipping the slow decoder.
+# The Sony decoders' C cores (openevp\decoders\sony_lpec\lpec_core.dll for the
+# ICD-ST25's LPEC LP, openevp\decoders\sony_lpec_st\lpec_st_core.dll for the
+# ICD-ST10's LPEC ST): built before the tests so they check them against pure
+# Python, and collected into both builds below. The pure-Python decoders still
+# work without them (15-60x slower), but that is a fallback for a dev machine
+# without gcc, not an acceptable release: a build that can't produce the DLLs
+# throws and stops here rather than silently shipping the slow decoders.
 $lpecDir = "openevp\decoders\sony_lpec"
 $lpecCore = "$lpecDir\lpec_core.dll"
+$lpecStDir = "openevp\decoders\sony_lpec_st"
+$lpecStCore = "$lpecStDir\lpec_st_core.dll"
 python tools\build_lpec_core.py
-if ($LASTEXITCODE -ne 0) { throw "building lpec_core.dll failed" }
-if (-not (Test-Path $lpecCore)) { throw "$lpecCore was not built" }
-if ((Get-PeMachine $lpecCore) -ne $AMD64) { throw "lpec_core.dll is not an x64 DLL" }
+if ($LASTEXITCODE -ne 0) { throw "building the decoders' C cores failed" }
+foreach ($core in $lpecCore, $lpecStCore) {
+    if (-not (Test-Path $core)) { throw "$core was not built" }
+    if ((Get-PeMachine $core) -ne $AMD64) { throw "$core is not an x64 DLL" }
+}
 
-# The decoder (openevp.decoders.sony_lpec) is imported dynamically (st25/audio.py),
-# so PyInstaller cannot see it: the openevp package is collected explicitly, with
-# the decoder's DLL, for both builds below, or the frozen app/CLI silently lose
-# WAV support. The extracted table data ($lpecDir\data\lpec_tables.json,
-# generated locally by tools/import_lpec_tables.py and never committed) is
-# bundled the same way. Without it the built app and CLI look fine but can never
-# convert to WAV, so its absence fails the build unless -NoLpecTables asks for
-# such a build (for development).
-$decoder = @("--collect-submodules", "openevp", "--collect-binaries", "openevp.decoders.sony_lpec")
-$lpecTables = "$lpecDir\data\lpec_tables.json"
-if (Test-Path $lpecTables) {
-    $decoder += @("--add-data", "$lpecTables;$lpecDir\data")
-} elseif ($NoLpecTables) {
-    Write-Warning "$lpecTables not found (-NoLpecTables): the built app and CLI will NOT be able to convert to WAV."
-} else {
-    throw "$lpecTables not found: the built app and CLI could not convert to WAV. Run tools\import_lpec_tables.py and rebuild, or pass -NoLpecTables for a development build without WAV conversion."
+# The decoders (openevp.decoders.sony_lpec and openevp.decoders.sony_lpec_st) are
+# imported dynamically (st25/audio.py), so PyInstaller cannot see them: the
+# openevp package is collected explicitly, with the decoders' DLLs, for both
+# builds below, or the frozen app/CLI silently lose WAV support. The extracted
+# table data ($lpecDir\data\lpec_tables.json and $lpecDir\data\lpec_sp_tables.json
+# from tools/import_lpec_tables.py, $lpecStDir\data\lpec_st_tables.json from
+# tools/import_lpec_st_tables.py; all generated locally and never committed) is
+# bundled the same way. Without it the
+# built app and CLI look fine but can never convert to WAV (ICD-ST25 or ICD-ST10
+# recordings), so its absence fails the build unless -NoLpecTables asks for such
+# a build (for development).
+$decoder = @("--collect-submodules", "openevp", "--collect-binaries", "openevp.decoders.sony_lpec",
+             "--collect-binaries", "openevp.decoders.sony_lpec_st")
+$tables = @(@{ File = "$lpecDir\data\lpec_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
+               What = "ICD-ST25 (LPEC LP)" },
+            @{ File = "$lpecDir\data\lpec_sp_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
+               What = "ICD-ST10 SP mode (LPEC SP)" },
+            @{ File = "$lpecStDir\data\lpec_st_tables.json"; Dir = "$lpecStDir\data"; Tool = "tools\import_lpec_st_tables.py";
+               What = "ICD-ST10 (LPEC ST)" })
+foreach ($t in $tables) {
+    if (Test-Path $t.File) {
+        $decoder += @("--add-data", "$($t.File);$($t.Dir)")
+    } elseif ($NoLpecTables) {
+        Write-Warning "$($t.File) not found (-NoLpecTables): the built app and CLI will NOT be able to convert $($t.What) recordings to WAV."
+    } else {
+        throw "$($t.File) not found: the built app and CLI could not convert $($t.What) recordings to WAV. Run $($t.Tool) and rebuild, or pass -NoLpecTables for a development build without WAV conversion."
+    }
 }
 
 # The driver manifest (app\driver\models.json, a build output): which recorder models
