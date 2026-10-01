@@ -557,7 +557,7 @@ class ClipsFoldersInTheLibraryTests(tf.FolderApiBase):
         self.assertEqual(again["imported"], 0)
         self.assertEqual([m["note"] for m in self.store.marks(self.fp(self.clip_a))], ["on the clip"])
 
-    def test_export_clips_never_cuts_clips(self):
+    def test_a_folder_job_never_cuts_clips(self):
         self.populate()
         api = self.new_api()
         r = self.index(api)
@@ -576,13 +576,41 @@ class ClipsFoldersInTheLibraryTests(tf.FolderApiBase):
         self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]),
                          ["real.wav", "user.wav", "user_EVP-C_00m01.0s.wav"])
         self.assertTrue(self.row(r, "real_EVP-A_00m00.5s_hi.wav")["clip"])
-        # A Clips folder (or one inside it), or clips picked as files: refused, nothing written.
+        # A Clips folder (or one inside it): refused, nothing written (no bulk re-clipping).
         for rel in (("Case", "Clips"), ("Case", "Clips", "Deeper"), ("Case", "Night", "clips")):
             self.assertEqual(api.export_clips_folder(self.folder(r, *rel), 2)["error"], library_ops.CLIPS_AGAIN)
-        self.assertEqual(api.export_clips_files([self.file(r, "b.wav")], 3)["error"], library_ops.CLIPS_AGAIN)
         self.assertFalse(api.clips_running())
         self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Night", "clips"))),
                          [library_ops.CLIPS_MARKER, "b.wav"])
+
+    def test_the_library_cuts_clips_from_one_clip_beside_it(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        self.store.add_mark(self.fp(self.clip_b), 0.1, 0.2, "A", "again", name="b.wav", duration=1.0)
+        self.store.add_mark(self.fp(tm.wav_bytes(b"clip d")), 0.3, 0.4, "B", "", name="d.wav", duration=1.0)
+        before = {rel: api.folder_info(self.folder(r, *rel))["with_evps"] for rel in ((), ("Case",), ("Case", "Night"))}
+        event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_files([self.file(r, "b.wav")], 3))
+        self.assertEqual((event, p["recordings"], p["saved"], p["skipped"], p["notes"]), ("clips-done", 1, 1, [], []))
+        night = os.path.join(self.lib, "Case", "Night", "clips")
+        self.assertEqual(p["folder"], night)                                    # the clip's own Clips folder
+        self.assertEqual(sorted(os.listdir(night)), [library_ops.CLIPS_MARKER, "b.wav", "b_EVP-A_00m00.1s_again.wav"])
+        # One deeper inside a Clips folder: beside it too, never a Clips folder in there.
+        event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_files([self.file(r, "d.wav")], 4))
+        self.assertEqual((event, p["saved"]), ("clips-done", 1))
+        deeper = os.path.join(self.lib, "Case", "Clips", "Deeper")
+        self.assertEqual(sorted(os.listdir(deeper)), ["d.wav", "d_EVP-B_00m00.3s.wav"])
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Clips"))),
+                         [library_ops.CLIPS_MARKER, "Deeper", "a.wav"])
+        # Again: already there, nothing new.
+        event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_files([self.file(r, "b.wav")], 5))
+        self.assertEqual((p["saved"], p["already"]), (0, 1))
+        # Clips, never counted: the folders' figures and the library's recordings are as before.
+        r = self.index(api)
+        self.assertTrue(self.row(r, "b_EVP-A_00m00.1s_again.wav")["clip"])
+        self.assertTrue(self.row(r, "d_EVP-B_00m00.3s.wav")["clip"])
+        self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]), ["real.wav", "user.wav"])
+        self.assertEqual({rel: api.folder_info(self.folder(r, *rel))["with_evps"] for rel in before}, before)
 
     def test_a_removed_marker_makes_them_recordings(self):
         self.populate()
@@ -679,16 +707,61 @@ class ClipsFoldersInTheLibraryTests(tf.FolderApiBase):
         api._pick = lambda start: ordinary
         self.assertEqual(api.choose_destination(), ordinary)
 
-    def test_the_player_never_cuts_clips_from_a_clip(self):
+    def test_the_player_cuts_clips_from_a_clip_beside_it(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        before = {rel: api.folder_info(self.folder(r, *rel))["with_evps"] for rel in ((), ("Case",))}
+        loaded = api.play_library(self.file(r, "a.wav"))
+        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "the part")["ok"])
+        res = api.export_clips(loaded["rec"])
+        clips_dir = os.path.join(self.lib, "Case", "Clips")
+        self.assertEqual((res["ok"], res["saved"], res["names"], res["folder"]),
+                         (True, 1, ["a_EVP-C_00m00.2s_the part.wav"], clips_dir), res)
+        self.assertFalse(os.path.exists(os.path.join(clips_dir, "Clips")))     # never a Clips folder in a Clips folder
+        self.assertFalse(api._busy.locked())
+        # Save clip of that mark: the same clip, already there. At 0.5x: the speed in the name, beside it too.
+        mark_id = api.get_marks(loaded["rec"])["marks"][0]["id"]
+        self.assertEqual(api.export_clips(loaded["rec"], mark_id)["already"], 1)
+        slow = api.export_clips(loaded["rec"], mark_id, 0.5, True)
+        self.assertEqual((slow["names"], slow["folder"]), (["a_EVP-C_00m00.2s_the part_0.5x.wav"], clips_dir), slow)
+        self.assertEqual(sorted(os.listdir(clips_dir)),
+                         [library_ops.CLIPS_MARKER, "Deeper", "a.wav", "a_EVP-C_00m00.2s_the part.wav",
+                          "a_EVP-C_00m00.2s_the part_0.5x.wav"])
+        # Clips, never counted: the new ones are clips, the figures are as before.
+        r = self.index(api)
+        self.assertTrue(self.row(r, "a_EVP-C_00m00.2s_the part.wav")["clip"])
+        self.assertEqual({rel: api.folder_info(self.folder(r, *rel))["with_evps"] for rel in before}, before)
+        self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]), ["real.wav", "user.wav"])
+
+    def test_a_clips_clip_with_too_long_a_path_drops_the_note_and_never_overwrites(self):
         self.populate()
         api = self.new_api()
         r = self.index(api)
         loaded = api.play_library(self.file(r, "a.wav"))
-        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "")["ok"])
-        res = api.export_clips(loaded["rec"])
-        self.assertEqual((res["ok"], res["error"]), (False, library_ops.CLIPS_AGAIN))
-        self.assertFalse(os.path.exists(os.path.join(self.lib, "Case", "Clips", "Clips")))
-        self.assertFalse(api._busy.locked())
+        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "a long note")["ok"])
+        clips_dir = os.path.join(self.lib, "Case", "Clips")
+        with open(os.path.join(clips_dir, "a_EVP-C_00m00.2s.wav"), "wb") as f:
+            f.write(b"someone else's")                                          # taken: never overwritten
+        asked = []
+
+        def too_long(path):
+            asked.append(os.path.dirname(path))
+            return len(os.path.basename(path)) > 22
+        with mock.patch.object(backend.folders, "too_long", too_long):
+            res = api.export_clips(loaded["rec"])
+        self.assertTrue(res["ok"], res)
+        self.assertEqual((res["saved"], res["notes"]), (1, []))
+        self.assertEqual(set(asked), {clips_dir})                                # checked where it goes
+        self.assertNotEqual(res["names"], ["a_EVP-C_00m00.2s.wav"])
+        self.assertTrue(res["names"][0].startswith("a_EVP-C_00m00.2s") and "long note" not in res["names"][0])
+        with open(os.path.join(clips_dir, "a_EVP-C_00m00.2s.wav"), "rb") as f:
+            self.assertEqual(f.read(), b"someone else's")
+        with mock.patch.object(backend.folders, "too_long", lambda p: True):
+            res = api.export_clips(loaded["rec"])
+        self.assertEqual((res["saved"], res["names"]), (0, []))
+        self.assertEqual(res["notes"], ["a: the EVP at 00m00.2s was not saved (the path would be too long for Windows)"])
+        self.assertFalse(os.path.exists(os.path.join(clips_dir, "Clips")))
 
     def test_recordings_cannot_be_moved_into_a_clips_folder(self):
         self.populate()

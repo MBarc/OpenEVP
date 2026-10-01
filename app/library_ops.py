@@ -42,7 +42,8 @@ CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library l
                      b"counts them as EVPs while this file is here; delete this file to treat them as "
                      b"recordings.\r\n")
 CLIPS_ONLY = "A Clips folder is for EVP clips only. Move recordings to another folder."
-CLIPS_AGAIN = "That is an EVP clip (or a folder of them); clips are not cut from clips."
+CLIPS_AGAIN = ("That is a folder of EVP clips; its clips are not all cut again. "
+               "To cut clips from one clip, right-click it and choose Export clips.")
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
@@ -60,7 +61,8 @@ def _clips_folder(path):
     """Is a folder a Clips folder OpenEVP created (it holds CLIPS_MARKER)? Its files
     (and those of every folder inside it) are clips: the library lists them and
     they play, but they never count as EVPs, their markers are never imported and
-    Export clips never cuts them again. A folder the user named Clips is an
+    a folder's Export clips never cuts them again (one clip can be cut from: its
+    clips go beside it). A folder the user named Clips is an
     ordinary folder."""
     try:
         return os.path.isfile(os.path.join(path, CLIPS_MARKER))

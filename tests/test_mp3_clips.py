@@ -561,8 +561,18 @@ class LibraryMp3RecordingsTests(unittest.TestCase):
         self.assertTrue(p["ok"], p)
         self.assertEqual(p["fp"], self.fp(self.clip))
         self.assertTrue(api.add_mark(p["rec"], 0.1, 0.2, "A", "")["ok"])        # markable, as a WAV clip is
-        self.assertEqual(api.export_clips(p["rec"])["error"], backend.CLIPS_AGAIN)
-        self.assertEqual(api.export_clips_files([fid], 1)["error"], backend.CLIPS_AGAIN)
+        # Cut into clips like a WAV clip: beside it, in its own Clips folder (never a Clips folder in it).
+        clips_dir = os.path.join(self.lib, "Case", "Clips")
+        c = api.export_clips(p["rec"])
+        self.assertEqual((c["ok"], c["saved"], c["names"], c["folder"]),
+                         (True, 1, ["song_EVP-B_00m01.0s_clip_EVP-A_00m00.1s.mp3"], clips_dir), c)
+        event, j = self.run_job(lambda: api.export_clips_files([fid], 1))
+        self.assertEqual((event, j["saved"], j["already"], j["folder"]), ("clips-done", 0, 1, clips_dir), j)
+        self.assertEqual(sorted(os.listdir(clips_dir)),
+                         [library_ops.CLIPS_MARKER, name, "song_EVP-B_00m01.0s_clip_EVP-A_00m00.1s.mp3"])
+        r = self.index(api)
+        self.assertTrue(self.rows(r)["song_EVP-B_00m01.0s_clip_EVP-A_00m00.1s.mp3"]["clip"])
+        self.assertEqual(self.rows(r)["song.mp3"]["marks"], {"A": 0, "B": 0, "C": 0})   # nothing counted
         # Moved like a WAV clip: to another Clips folder, or out (it is then a recording).
         song = next(f["id"] for f in r["files"] if f["name"] == "song.mp3")
         self.assertEqual(api.move_files([song], folder[("Case", "Clips")])["error"], library_ops.CLIPS_ONLY)
