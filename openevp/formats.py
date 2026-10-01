@@ -21,6 +21,10 @@ A Format describes one native file type:
   only, or None. Not the file's fault, like DecoderUnavailable: such a file
   is listed and saved but not played, marked or fingerprinted, and nothing
   about it is cached. file_problem(path) and data_problem(data) apply it.
+- ``sniff(header) -> bool``: optional. Whether a file with this extension
+  really is of this format, judged from its first SNIFF_BYTES bytes only (an
+  .mpeg can be MPEG audio or an MPEG video). A file that fails it is not a
+  recording at all: never listed, played or indexed. is_format(path) applies it.
 - ``decoder``: None when OpenEVP cannot turn the format into audio (such
   files are still listed, saved and backed up, but not played, marked or
   fingerprinted). Otherwise an object with:
@@ -46,8 +50,10 @@ decoder_problem(fmt) is why a format cannot be decoded now at all.
 write_wav(fmt, ...) and analyze(fmt, ...) use a decoder's streamed forms
 when it has them and fall back to to_wav.
 
-The registry holds .wav (built in, a PCM passthrough) and .dvf (Sony ICD-ST25
-and ICD-ST10). A .dvf is decoded by its codec byte, through st25.audio:
+The registry holds .wav (built in, a PCM passthrough), .dvf (Sony ICD-ST25
+and ICD-ST10), and MP3 under each of its extensions (.mp3, .mpeg, .mpga, .mp2,
+.m2a: one decoder, openevp.decoders.mp3, with minimp3; a file counts only when
+its first bytes sniff as MPEG audio). A .dvf is decoded by its codec byte, through st25.audio:
 LPEC LP (ICD-ST25, ICD-ST10) and LPEC SP (ICD-ST10, 16 kHz) by the Sony LPEC
 decoder, LPEC ST (ICD-ST10) by the Sony LPEC ST decoder. The format-level
 availability is the LP decoder's; header_problem says when an LPEC ST or SP
@@ -57,6 +63,7 @@ codec, not per recorder model. Tests add their own formats with
 register()/unregister().
 """
 import io
+import os
 import re
 import struct
 import wave
@@ -64,6 +71,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from openevp import wavinfo as _wavinfo
+from openevp.decoders import mp3 as _mp3dec
 from st25 import audio as _st25_audio
 from st25 import dvf as _dvf
 
@@ -82,6 +90,7 @@ class DecoderUnavailable(Exception):
 
 _EXT = re.compile(r"\.[a-z0-9_-]+")
 HEADER_BYTES = 512                  # what header_problem() is given of a file
+SNIFF_BYTES = _mp3dec.SNIFF_BYTES   # what sniff() is given of a file
 
 
 @dataclass(frozen=True, eq=False)
@@ -94,6 +103,7 @@ class Format:
     max_bytes: Optional[int] = None
     noun: str = ""
     header_problem: Optional[Callable[[bytes], Optional[str]]] = None
+    sniff: Optional[Callable[[bytes], bool]] = None
 
     def __post_init__(self):
         if not isinstance(self.ext, str) or not _EXT.fullmatch(self.ext):
@@ -102,6 +112,19 @@ class Format:
     def a_recording(self):
         """The noun for one file of this format ("a Sony ICD-ST recording")."""
         return self.noun or f"a {self.label} recording"
+
+    def is_format(self, path):
+        """Whether the file at path is of this format by its content (sniff(),
+        reading only its first SNIFF_BYTES); True for a format without a sniff.
+        False when it cannot be read."""
+        if self.sniff is None:
+            return True
+        try:
+            with open(path, "rb") as f:
+                header = f.read(SNIFF_BYTES)
+        except OSError:
+            return False
+        return bool(self.sniff(header))
 
     def data_problem(self, data):
         """Why this file's bytes (its header is enough) cannot be decoded, or None."""
@@ -294,8 +317,79 @@ DVF = Format(ext=".dvf", label="Sony original", decoder=_SonyLpec(), same=_dvf.s
              noun="a Sony ICD-ST recording", header_problem=_dvf_problem)
 
 
+# ---- MP3 (.mp3, and the same audio as .mpeg, .mpga, .mp2, .m2a) ----------------
+class _Mp3:
+    """openevp.decoders.mp3 (minimp3, a C core with no pure-Python fallback) behind
+    the Format decoder contract."""
+
+    def available(self):
+        return _mp3dec.available()
+
+    def reason(self):
+        return _mp3dec.reason()
+
+    def warning(self):
+        return None
+
+    def to_wav(self, data, should_stop=None):
+        return _mp3_translated(lambda: _mp3dec.to_wav(data, should_stop))
+
+    def write_wav(self, data, f, should_stop=None):
+        return _mp3_translated(lambda: _mp3dec.write_wav(data, f, should_stop))
+
+    def wav_bytes(self, data):
+        return _mp3dec.wav_bytes(data)
+
+    def pcm(self, data, should_stop=None):
+        channels, width, rate, chunks = _mp3_translated(lambda: _mp3dec.stream(data, should_stop))
+
+        def translated():
+            it = iter(chunks)
+            while True:
+                chunk = _mp3_translated(lambda: next(it, None))
+                if chunk is None:
+                    return
+                yield chunk
+        return channels, width, rate, translated()
+
+
+def _mp3_translated(call):
+    """call(), with openevp.decoders.mp3's exceptions in this module's terms."""
+    try:
+        return call()
+    except _mp3dec.Cancelled as e:
+        raise Cancelled(str(e)) from e
+    except _mp3dec.Unavailable as e:
+        raise DecoderUnavailable(str(e)) from e
+    except (MemoryError, OSError):
+        raise
+    except Exception as e:
+        raise DecodeError(str(e) or type(e).__name__) from e
+
+
+def _mp3_seconds(path):
+    """An MP3's length from its headers only (openevp.decoders.mp3.estimate: a
+    Xing/VBRI frame count, else the first frame's bitrate over the file's size),
+    reading a few KB, never the audio; None when unknown. Listing a library
+    calls this; the exact length comes from the indexer's decode."""
+    try:
+        with open(path, "rb") as f:
+            got = _mp3dec.estimate(f, os.fstat(f.fileno()).st_size)
+    except (OSError, ValueError):
+        return None
+    return round(got[2], 1) if got else None
+
+
+MP3_DECODER = _Mp3()
+MP3_FORMATS = tuple(Format(ext=ext, label="MP3", decoder=MP3_DECODER, same=lambda existing, new: existing == new,
+                           seconds=_mp3_seconds, max_bytes=_mp3dec.MAX_BYTES, noun="an MP3 recording",
+                           sniff=_mp3dec.sniff)
+                    for ext in _mp3dec.EXTENSIONS)
+MP3 = MP3_FORMATS[0]
+
+
 # ---- the registry -------------------------------------------------------------
-_registry = {WAV.ext: WAV, DVF.ext: DVF}
+_registry = {WAV.ext: WAV, DVF.ext: DVF, **{f.ext: f for f in MP3_FORMATS}}
 
 
 def by_ext(ext):

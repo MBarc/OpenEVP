@@ -20,10 +20,8 @@ so that they can still be moved, renamed or recycled while they are being read
 (Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
 new place, and its URL keeps working.
 
-prepare_mp3() registers an MP3 clip (one in a Clips folder OpenEVP made) the
-same way, served in place as audio/mpeg: the page decodes it itself (WebView2
-plays and decodes MP3), so it has no peaks and no fingerprint (it is never
-marked). Its rate, channels and length come from its frame headers.
+Every file reaches the page as a PCM WAV: a .dvf or an MP3 is decoded here
+(prepare(), into the cache), never by the page, so there is one playback path.
 
 The listening tools read the audio a URL serves (open_audio(): the cached
 decode, or the user's file, refused once it changed on disk), and the player's
@@ -43,7 +41,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from openevp import mp3, wavinfo
+from openevp import wavinfo
 
 SPECTROGRAMS = 3                       # spectrograms kept (a 30-minute ICD-ST25 one is about 60 MB)
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
@@ -237,8 +235,8 @@ class AudioServer:
             self._httpd.server_close()
             self._httpd = None
 
-    def _url(self, file_id, ext="wav"):
-        return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.{ext}"
+    def _url(self, file_id):
+        return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.wav"
 
     def prepare(self, key, make=None, write=None, expected=None, fingerprint=True):
         """Decode a recording into the cache (once per key) and return _info().
@@ -347,48 +345,17 @@ class AudioServer:
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
 
-    def prepare_mp3(self, path):
-        """Register an MP3 clip; returns {"url", "peaks" ([]), "duration", "rate",
-        "channels", "fp" (None), "compressed" (True: the page decodes the whole
-        file), "stat"}. Raises ValueError for a file that is not an MP3, is too
-        large to be a clip, or changed while it was being read."""
-        path = os.path.abspath(path)
-        with _open_shared(path) as f:
-            stat = _stat_of(os.fstat(f.fileno()))
-            if stat[0] > mp3.MAX_BYTES:
-                raise ValueError("too large to be an MP3 clip")
-            key = ("mp3", os.path.normcase(path), *stat)
-            with self._lock:
-                e = self._entries.get(key)
-                if e is not None:
-                    self._entries.move_to_end(key)
-                    return {**self._info(e), "stat": e["stat"]}
-            rate, channels, duration = mp3.info(f.read())
-            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
-                raise ValueError("the file changed while it was being read; try again")
-        file_id = secrets.token_hex(8)
-        with self._lock:
-            self._entries[key] = {"file": file_id, "size": 0, "peaks": [], "duration": duration, "rate": rate,
-                                  "channels": channels, "fp": None, "path": path, "stat": stat, "ext": "mp3"}
-            self._by_file[file_id] = key
-            e = self._entries[key]
-        return {**self._info(e), "stat": stat}
-
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
         duration, the sample rate and channel count (short files are then drawn
         from the audio itself), and the audio fingerprint (openevp.wavinfo) of
         the decoded samples."""
-        ext = e.get("ext", "wav")
-        info = {"url": self._url(e["file"], ext), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
+        return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
                 "channels": e["channels"], "fp": e["fp"]}
-        if ext != "wav":
-            info["compressed"] = True
-        return info
 
     def _file_of(self, url):
         """(path, entry) of the audio a URL of this server serves; ValueError if none."""
-        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.(wav|mp3)", url or "")
+        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.wav", url or "")
         with self._lock:
             key = self._by_file.get(m.group(2)) if m and secrets.compare_digest(m.group(1), self._token) else None
             e = self._entries.get(key) if key is not None else None
@@ -404,10 +371,8 @@ class AudioServer:
     def open_audio(self, url):
         """The WAV a URL serves, opened for reading (a binary file; close it). A file
         served in place that changed on disk since it was loaded is refused
-        (ValueError), as the player's requests are. An MP3 clip is refused too."""
+        (ValueError), as the player's requests are."""
         path, e = self._file_of(url)
-        if e.get("ext", "wav") != "wav":
-            raise ValueError("an MP3 clip can't be analysed here")
         f = _open_shared(path)
         if "stat" in e and _stat_of(os.fstat(f.fileno())) != e["stat"]:
             f.close()
@@ -504,11 +469,11 @@ class AudioServer:
         if t:
             self._tile(h, t)
             return
-        m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.(wav|mp3)", h.path)
+        m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.wav", h.path)
         with self._lock:
             ok = m and secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._by_file
             entry = self._entries.get(self._by_file[m.group(2)]) if ok else None
-        if not entry or entry.get("ext", "wav") != m.group(3):
+        if not entry:
             h.send_error(404)
             return
         path = entry.get("path") or os.path.join(self._dir, m.group(2) + ".wav")
@@ -537,7 +502,7 @@ class AudioServer:
                     return
                 status = 206
             h.send_response(status)
-            h.send_header("Content-Type", "audio/mpeg" if entry.get("ext") == "mp3" else "audio/wav")
+            h.send_header("Content-Type", "audio/wav")
             h.send_header("Accept-Ranges", "bytes")
             h.send_header("Content-Length", str(end - start + 1))
             h.send_header("Access-Control-Allow-Origin", "*")   # the UI is served from another local port

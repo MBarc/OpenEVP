@@ -159,11 +159,19 @@ class GuiSmokeCheckTests(unittest.TestCase):
 
     def test_a_good_report_passes(self):
         self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"},
-                                            "mp3": {"available": True, "version": "1.8.4", "bytes": 9000}}), [])
+                                            "mp3": {"available": True, "version": "1.8.4", "bytes": 9000,
+                                                    "decoder": True, "decoder_status": None,
+                                                    "decoded": {"rate": 8000, "channels": 1, "seconds": 1.08}}}), [])
 
     def test_a_report_without_mp3_encoding_fails(self):
         self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"}}),
                          ["GUI smoke: the report says nothing about MP3 encoding"])
+
+    def test_a_report_without_mp3_decoding_fails(self):
+        """A build from before MP3 recordings (its smoke test never decodes one) is not this release."""
+        self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"},
+                                            "mp3": {"available": True, "version": "1.8.4", "bytes": 9000}}),
+                         ["GUI smoke: the report says nothing about MP3 decoding"])
 
     def test_failures_are_reported(self):
         self.assertEqual(self.run_check(1, {"ok": False, "problems": ["app.js did not load in the page"]}),

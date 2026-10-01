@@ -81,9 +81,9 @@ from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
                           _clips_folder, _is_clip, _make_clips_folder, _under_clips, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
-                          _kind_format, _listed_kind,
+                          _kind_format, _listed, _not_format,
                           _plain)
-from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, MP3_NO_MARKS, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
+from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -246,22 +246,9 @@ def _stat_of(st):
     return st.st_size, st.st_mtime_ns
 
 
-def _mp3_seconds(path, st):
-    """(seconds, None) of an MP3 clip from its frame headers, or (None, why not)."""
-    if st.st_size > mp3.MAX_BYTES:
-        return None, "it is too large to be an MP3 clip"
-    try:
-        with open(path, "rb") as f:
-            return round(mp3.info(f.read())[2], 1), None
-    except OSError as e:
-        return None, _plain(e)
-    except ValueError as e:
-        return None, str(e)
-
-
 def _no_fp(entry):
-    """Why a loaded recording without a fingerprint cannot be marked: an MP3 clip, or an empty WAV."""
-    return MP3_NO_MARKS if entry["source"].get("path", "").lower().endswith(".mp3") else NO_AUDIO
+    """Why a loaded recording without a fingerprint cannot be marked (an empty WAV)."""
+    return NO_AUDIO
 
 
 def _wav_length(f):
@@ -322,9 +309,11 @@ def _scan_library(folder, clips=None):
                     subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
-                if not _listed_kind(kind, clips is not None and rel in clips) or not e.is_file():
-                    continue                    # (an MP3 only in a Clips folder of OpenEVP's, as a clip)
+                if _kind_format(kind) is None or not e.is_file():
+                    continue
                 st = e.stat()
+                if not _listed(kind, e.path, st):
+                    continue                    # e.g. an .mpeg that is a video, not MPEG audio
             except OSError:
                 continue
             if clips is not None and rel in clips:  # a clip: never pushes a recording off the list
@@ -559,7 +548,6 @@ class Api(LibraryOps):
         for f in formats.all():
             problem = _decoder_problem(f)
             kinds[f.ext[1:]] = {"label": f.label, "playable": problem is None, "reason": problem}
-        kinds["mp3"] = {"label": "MP3 clip", "playable": True, "reason": None}    # in Clips folders only
         return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
                 "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
@@ -767,7 +755,7 @@ class Api(LibraryOps):
         entry = self._entry(rec)
         if entry is None:
             return _fail(RELOAD)
-        if not entry["fp"]:                   # an empty WAV has no fingerprint (see _analyze), nor an MP3 clip
+        if not entry["fp"]:                   # an empty WAV has no fingerprint (see _analyze)
             return _fail(_no_fp(entry))
         try:
             return action(entry)
@@ -1420,8 +1408,7 @@ class Api(LibraryOps):
         if entry is None:
             return _fail(RELOAD)
         if not entry["fp"]:
-            return _fail("Noise reduction works on recordings, not on MP3 clips." if entry["source"].get("path", "").lower()
-                         .endswith(".mp3") else NO_AUDIO)
+            return _fail(_no_fp(entry))
         if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (start, end)) \
                 or end <= start:
             return _fail("Select a part of the recording first.")
@@ -1874,13 +1861,6 @@ class Api(LibraryOps):
         name = os.path.basename(path)
         source = {"kind": "file", "path": path}
         try:
-            if os.path.splitext(name)[1].lower() == ".mp3":
-                if not _is_clip(path, root):
-                    return _fail(f"{name}: MP3 files play here only as EVP clips (in a Clips folder made by Export clips).")
-                info = self._server.prepare_mp3(path)      # the page decodes it; no fingerprint, no marks
-                source["stat"] = info.pop("stat", None)
-                return self._loaded(info, name, name, source,
-                                    {"name": name, "imported": 0, "markable": False, "mark_reason": MP3_NO_MARKS})
             fmt = formats.by_ext(os.path.splitext(name)[1])
             if fmt is None or fmt is formats.WAV:
                 info = self._server.prepare_file(path)
@@ -1893,7 +1873,12 @@ class Api(LibraryOps):
             problem = fmt.file_problem(path)          # this file (e.g. an ICD-ST10 recording)
             if problem:
                 return _fail(f"{name}: {_sentence(problem)}")
+            problem = _not_format(fmt, path)          # an .mpeg that is a video, not MPEG audio
+            if problem:
+                return _fail(problem)
             st = os.stat(path)
+            if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
+                return _fail(f"{name} is too large to be {fmt.a_recording()}.")
             key = (fmt.ext[1:], os.path.normcase(path), st.st_size, st.st_mtime_ns)
 
             def write(out):
@@ -1906,8 +1891,11 @@ class Api(LibraryOps):
             return _fail(f"Could not play {name}: {_plain(e)}")
 
     def open_wav(self):
-        """Let the user pick a WAV file and prepare it for the player. The path comes
-        only from the file dialog, never from the page."""
+        """Let the user pick an audio file (Open audio file: a WAV, or an MP3 by any
+        of its extensions, .mpeg included) and prepare it for the player. The path
+        comes only from the file dialog, never from the page. An MP3 is decoded
+        through the audio server like a library file; anything else is opened as
+        a WAV."""
         if self._pick_wav is None:
             return _fail("Opening files is not available here.")
         try:
@@ -1916,6 +1904,9 @@ class Api(LibraryOps):
             return _fail(f"Could not show the file dialog: {e}")
         if not path:
             return {"ok": False, "cancelled": True}
+        fmt = formats.by_ext(os.path.splitext(path)[1])
+        if fmt is not None and fmt.sniff is not None:
+            return self._play_file(path)
         try:
             info = self._server.prepare_file(path)
         except (OSError, ValueError) as e:
@@ -1997,22 +1988,14 @@ class Api(LibraryOps):
             fp = error = seconds = unplayable = None
             fmt = _kind_format(kind)
             cached = None
-            if fmt is None:
-                # An MP3 clip (_listed_kind): its length from its frame headers; never
-                # fingerprinted, indexed or cached, so never a recording.
-                seconds, error = _mp3_seconds(path, st)
-                if error:
-                    error = f"{name} can't be played: {error}."
-            if fmt is not None and fmt.decoder is not None and store is not None:
+            if fmt.decoder is not None and store is not None:
                 cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
-            if fmt is not None and fmt.decoder is not None and cached is None:
+            if fmt.decoder is not None and cached is None:
                 # A file's own header can say it cannot be decoded yet (an ICD-ST10
                 # recording; only the header is read): listed like a file without
                 # a decoder, and never cached. A cached file was decoded before.
                 unplayable = self._file_problem(fmt, path, st)
-            if fmt is None:
-                pass                            # (the MP3 clip above)
-            elif fmt.decoder is None:
+            if fmt.decoder is None:
                 # Listed, never fingerprinted or cached: no decoder is not the file's fault.
                 seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {_decoder_problem(fmt)}."
             elif unplayable:

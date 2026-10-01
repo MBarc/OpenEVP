@@ -67,8 +67,8 @@
 </main>
 <footer id="player">
   <div id="player-empty">
-    <p id="player-hint">Open a WAV file to analyze it here.</p>
-    <button id="open-wav">Open WAV file…</button>
+    <p id="player-hint">Open an audio file to analyze it here.</p>
+    <button id="open-wav" title="Open a WAV or MP3 file">Open audio file…</button>
   </div>
   <div id="player-loaded" hidden>
     <button id="play" disabled title="Play / pause">▶</button>
@@ -164,7 +164,7 @@
       </div>
       <div class="enhance-foot"><button id="enhance-reset" type="button" title="Turn every enhancement off">Reset</button></div>
     </div>
-    <button id="open-wav-2" class="link" title="Open another WAV file">Open WAV file…</button>
+    <button id="open-wav-2" class="link" title="Open another WAV or MP3 file">Open audio file…</button>
   </div>
 </footer>
 <div id="status"></div>
@@ -174,7 +174,7 @@
     <p>Gets the recordings off ghost-hunting voice recorders and onto a modern PC.</p>
     <p class="legal">OpenEVP is an independent project and is not affiliated with, endorsed by, or supported by Sony or Panasonic. "Sony", "ICD-ST25", "ICD-ST10" and "Digital Voice Editor" are trademarks of Sony Corporation. "Panasonic" and "RR-DR60" are trademarks of Panasonic Corporation.</p>
     <p class="legal">To play and convert recordings made on Sony IC recorders, OpenEVP includes numeric tables needed to read Sony's LPEC audio formats (LPEC LP, used by the ICD-ST25 and ICD-ST10, and LPEC SP and LPEC ST, used by the ICD-ST10). They are included only so owners can access their own recordings (interoperability). Rights holders who object can open an issue at https://github.com/MBarc/OpenEVP/issues and the tables will be removed promptly.</p>
-    <p class="legal">MP3 clips are encoded with lameenc (LGPL-3.0-or-later), which includes the LAME MP3 encoder (LGPL-2.0-or-later). USB access uses libusb (LGPL-2.1).</p>
+    <p class="legal">MP3 clips are encoded with lameenc (LGPL-3.0-or-later), which includes the LAME MP3 encoder (LGPL-2.0-or-later). MP3 files are decoded with minimp3 (CC0, public domain). USB access uses libusb (LGPL-2.1).</p>
     <p class="legal">OpenEVP is provided "as is", without warranty of any kind.</p>
     <div class="modal-buttons"><button id="about-close" class="primary">Close</button></div>
   </div>

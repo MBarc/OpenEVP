@@ -828,6 +828,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "The clips export did not start: boom");
 
+  // ---- Open audio file…: WAV or MP3 (the dialog's filter is app/main.py's AUDIO_FILE_TYPES) ----
+  assert.ok(/<button id="open-wav" title="Open a WAV or MP3 file">Open audio file…<\/button>/.test(html));
+  assert.ok(/<button id="open-wav-2" class="link" title="Open another WAV or MP3 file">Open audio file…<\/button>/.test(html));
+  assert.ok(!/Open WAV file/.test(html));
+
   // ---- the clip format: a menu next to Export clips (MP3 by default), one setting for the player and the library ----
   assert.ok(/<button id="export-clips"[^>]*>Export clips<\/button>\s*<select id="clip-format"[^>]*>\s*<option value="mp3">MP3 \(for sharing\)<\/option>\s*<option value="wav">WAV \(full quality\)<\/option>\s*<\/select>/.test(html),
             "the Clip format menu sits right after Export clips: MP3 (for sharing) first, then WAV (full quality)");
@@ -953,14 +958,13 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["r1"]);
   vm.runInContext(`S.lib.flat = false; renderLibrary();`, context);
 
-  // An MP3 clip (the default clip format): listed and playable in the Clips folder; the page loads the
-  // MP3 itself (no server peaks: wavesurfer decodes it at its own rate) and the mark tools are off.
-  const mp3Reason = "MP3 clips can't be marked. Mark the recording itself, or export the clip as WAV to mark it.";
-  vm.runInContext(`S.caps.formats.mp3 = { label: "MP3 clip", playable: true, reason: null };`, context);
+  // An MP3 clip (the default clip format): a clip like a WAV one. It plays as every file does, as a
+  // WAV the audio server decoded (its peaks drawn at once), can be marked, and moves like a WAV clip.
+  vm.runInContext(`S.caps.formats.mp3 = { label: "MP3", playable: true, reason: null };`, context);
   api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 61, exists: true, truncated: false, indexing: false,
                                     pending: 0, folders: clipFolders,
                                     files: [marked(libFile("r1", "a.wav", "root", "fp1"), 1),
-                                            { ...libFile("c3", "a_EVP-B_00m03.0s_hi.mp3", "fc", null), type: "mp3", clip: true }] });
+                                            { ...libFile("c3", "a_EVP-B_00m03.0s_hi.mp3", "fc", "fc3"), type: "mp3", clip: true }] });
   context.openLibraryFolder("root");
   await context.loadLibrary();
   await settle();
@@ -972,37 +976,29 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(mp3Row.cells[5].textContent, "Clip");
   rightClick(mp3Row.cells[1]);
   assert.deepStrictEqual(menuItems()[0], ["Play", false]);
-  choose("Move to…");                                          // an MP3 clip stays in a Clips folder
-  assert.ok(pick("f1").disabled && pick("f1").title === "MP3 clips stay in Clips folders");
-  assert.ok(pick("root").disabled);
+  choose("Move to…");                                          // anywhere a WAV clip may go
+  assert.ok(!pick("f1").disabled && !pick("root").disabled);
   context.closeFolderDialog();
-  assert.ok(vm.runInContext(`mp3StaysInClips("f1", ["c3"]) && !mp3StaysInClips("fc", ["c3"]) && !mp3StaysInClips("f1", ["r1"])`, context));
+  vm.runInContext(`S.drag = { ids: ["c3"] };`, context);
+  assert.ok(vm.runInContext(`typeof mp3StaysInClips === "undefined"`, context));
+  vm.runInContext(`S.drag = null;`, context);
   vm.runInContext(`S.wsCalls = []; S.ws = new Proxy(S.ws, { get: (t, k) =>
     k === "load" ? (...a) => { S.wsCalls.push(["load", ...a]); return Promise.resolve(); }
     : k === "setOptions" ? (o) => { S.wsCalls.push(["options", o]); } : t[k] });`, context);
   api.play_library = async (id) => { ops.push(["play", id]);
-    return { ok: true, url: "http://127.0.0.1:1/t/c3.mp3", peaks: [], duration: 4000, rate: 44100, channels: 2, fp: null,
-             compressed: true, rec: "h9", name: "a_EVP-B_00m03.0s_hi.mp3", imported: 0, marks: [], reviewed: false,
-             backup: { status: null, detail: "" }, backup_needed: false, markable: false, mark_reason: mp3Reason }; };
+    return { ok: true, url: "http://127.0.0.1:1/t/c3.wav", peaks: [0.5, 0.25], duration: 4000, rate: 44100, channels: 2,
+             fp: "fc3", rec: "h9", name: "a_EVP-B_00m03.0s_hi.mp3", imported: 0, marks: [], reviewed: false,
+             backup: { status: null, detail: "" }, backup_needed: false }; };
   ops.length = 0;
   mp3Row.onclick();
   await settle();
   assert.deepStrictEqual(ops, [["play", "c3"]]);
   const wsCalls = JSON.parse(vm.runInContext("JSON.stringify(S.wsCalls)", context));
-  assert.deepStrictEqual(wsCalls.filter((c) => c[0] === "load"), [["load", "http://127.0.0.1:1/t/c3.mp3"]], "no peaks: decoded in the page");
-  // (even a long one, past the full-detail budget a WAV would be drawn from server peaks for)
-  assert.ok(wsCalls.some((c) => c[0] === "options" && c[1].sampleRate === 44100), "decoded at its own rate");
-  assert.strictEqual(vm.runInContext("S.zoomMax", context), 44100);                  // zooms to the sample
-  assert.ok($("mark-evp").disabled && $("reviewed").disabled);
-  assert.strictEqual($("mark-evp").title, mp3Reason);
-  vm.runInContext(`S.region = { start: 0.1, end: 0.2 }; $("player-loaded").hidden = false;`, context);
-  fire([document], "keydown", { key: "m", target: document.body });                // M: no mark form either
-  assert.ok(!vm.runInContext("S.markForm", context));
-  assert.ok($("export-clips").disabled && $("export-marked").disabled);
-  // Another recording loaded: the tools are back.
-  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks: [],
-                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
-  assert.ok(!$("mark-evp").disabled && $("mark-evp").title !== mp3Reason);
+  // A long one, past the full-detail budget, is drawn from the server's peaks, as a WAV is.
+  assert.deepStrictEqual(wsCalls.filter((c) => c[0] === "load"), [["load", "http://127.0.0.1:1/t/c3.wav", [[0.5, 0.25]], 4000]]);
+  assert.strictEqual(vm.runInContext("S.zoomMax", context), 400);
+  assert.ok(!$("mark-evp").disabled && !$("reviewed").disabled);                 // marked like any clip
+  assert.ok(!/MP3/.test($("mark-evp").title));
   vm.runInContext(`setCurrent(null); S.region = null;`, context);
   context.openLibraryFolder("root");
   await settle();
@@ -1173,32 +1169,33 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.caps = { ...S.caps, marks_read_only: false }; renderMarkTools(); setCurrent(null);`, context);
   assert.deepStrictEqual(looping(), [null, false]);
 
-  // An MP3 clip (it can't be marked): no marks, no 🔁 rows, the mark tools off; the selection's own Loop
+  // A recording that can't be marked (the backend says why): no marks, no 🔁 rows, the mark tools off; the selection's own Loop
+  const noMarksReason = "This recording has no audio to mark.";
   // still works (playback only), and the end of the file replays only a looping selection.
-  vm.runInContext(`setCurrent("x_EVP-B_00m01.0s.mp3", ${JSON.stringify({ rec: "h4", duration: 3, fp: null, marks: [],
-    backup: { status: null, detail: "" }, reviewed: false, markable: false, mark_reason: mp3Reason, compressed: true })});
+  vm.runInContext(`setCurrent("empty.wav", ${JSON.stringify({ rec: "h4", duration: 3, fp: null, marks: [],
+    backup: { status: null, detail: "" }, reviewed: false, markable: false, mark_reason: noMarksReason })});
     drawMarks(S.playSeq);`, context);
   assert.ok($("marks-list").hidden && $("marks-list").children.length === 0 && $("mark-controls").hidden);
-  assert.ok($("mark-evp").disabled && $("mark-evp").title === mp3Reason);
+  assert.ok($("mark-evp").disabled && $("mark-evp").title === noMarksReason);
   $("loop-mark").checked = true; $("loop-mark").onchange();                       // no active mark: nothing loops
   assert.deepStrictEqual(looping(), [null, false]);
   wsLog.length = 0;
   context.playbackFinished();                                                      // the clip just ends
   assert.deepStrictEqual(wsLog, []);
-  const mp3Sel = fakeRegions.addRegion({ id: "sel3", start: 0.2, end: 0.9 });
-  context.regionCreated(mp3Sel);
+  const noMarkSel = fakeRegions.addRegion({ id: "sel3", start: 0.2, end: 0.9 });
+  context.regionCreated(noMarkSel);
   assert.ok(!$("selection-controls").hidden && $("mark-controls").hidden);
   $("loop-selection").checked = true;
-  context.regionOut(mp3Sel);
+  context.regionOut(noMarkSel);
   context.playbackFinished();                                                      // a selection that ends at the end
   assert.deepStrictEqual(wsLog, [["play", "sel3", undefined], ["play", "sel3", undefined]]);
   $("loop-selection").checked = false;
   wsLog.length = 0;
-  context.regionOut(mp3Sel);
+  context.regionOut(noMarkSel);
   context.playbackFinished();
   assert.deepStrictEqual(wsLog, []);
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
-  assert.ok(!$("mark-evp").title.includes("MP3"));
+  assert.ok(!$("mark-evp").title.includes("no audio"));
 
   // ---- playback speed: a slider over 0.25× … 2× next to Zoom and Height, with Keep pitch ----
   // A media element and a WaveSurfer that play at its rate: time moves by dt × rate, and a region
@@ -1316,11 +1313,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                { rec: "h9", duration: 3, fp: null, marks: [], url: "u", peaks: [], rate: 8000, channels: 1,
                                  backup: { status: null, detail: "" }, reviewed: false }, false);
   assert.deepStrictEqual([speedState(), media.playbackRate, $("speed-value").textContent], [[0.5, true], 0.5, "0.5×"]);
-  // An MP3 clip (compressed: decoded by the page) the same.
+  // An MP3 (decoded to a WAV by the backend) the same.
   slide(6);
   await context.loadIntoPlayer(vm.runInContext("S.playSeq", context), "x_EVP-B_00m01.0s.mp3",
-                               { rec: "h10", duration: 3, fp: null, marks: [], url: "u2", rate: 44100, channels: 1, compressed: true,
-                                 markable: false, mark_reason: mp3Reason, backup: { status: null, detail: "" }, reviewed: false }, false);
+                               { rec: "h10", duration: 3, fp: "fpM", marks: [], url: "u2.wav", peaks: [], rate: 44100, channels: 1,
+                                 backup: { status: null, detail: "" }, reviewed: false }, false);
   assert.deepStrictEqual([speedState(), media.playbackRate], [[2, true], 2]);
   // The remembered setting comes from capabilities() at startup: setupSpeed() applies it.
   vm.runInContext(`S.caps = { ...S.caps, playback_speed: 0.75, keep_pitch: false }; setupSpeed();`, context);
@@ -1627,12 +1624,12 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   specAnswer = second;
   await answer({ ok: false, error: "No spectrogram for x: the file changed on disk: load it again" });
   assert.strictEqual(specEl().msg.textContent, "No spectrogram for x: the file changed on disk: load it again");
-  // An MP3 clip: says why, asks nothing.
+  // An MP3 (a recording or a clip) is decoded to WAV by the backend: it gets one like any other.
   specCalls.length = 0;
-  loadSp("s3", { compressed: true });
+  loadSp("s3");
   vm.runInContext("loadSpectrogram()", context);
-  assert.deepStrictEqual(specCalls, []);
-  assert.match(specEl().msg.textContent, /MP3 clips have no spectrogram/);
+  assert.deepStrictEqual(specCalls, [["s3", "http://a/s3.wav"]]);
+  await answer(specInfo);
   // Off: gone, and remembered.
   loadSp("s4");
   vm.runInContext("loadSpectrogram()", context);
@@ -1742,9 +1739,9 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok($("reduce-noise").disabled && !$("reduce-noise").checked);
   loadN("n1");
   assert.ok(!$("reduce-noise").disabled && !$("reduce-noise").checked);
-  // An MP3 clip can't learn noise.
-  loadN("n3", { compressed: true, fp: null, markable: false });
-  assert.ok($("learn-noise").disabled && /MP3 clips/.test($("learn-noise").title));
+  // Audio without a fingerprint (an empty WAV) can't learn noise.
+  loadN("n3", { fp: null });
+  assert.ok($("learn-noise").disabled && /no audio/.test($("learn-noise").title));
   // Reset turns Reduce noise off too.
   loadN("n1");
   vm.runInContext("S.current.full = true;", context);

@@ -84,9 +84,11 @@ EVP clips:
     its icon), then delete it: the dialog counts its clips, and it goes to the
     Recycle Bin. Delete `.openevp-clips`: its clips count as recordings.
     MP3 clips: listed with **Clip**, play on a click (waveform drawn, zoom works),
-    the mark tools are off with "MP3 clips can't be marked…"; a selection on it
-    still plays and loops (Loop ticked), including one that ends at the clip's end; Move to… offers only
-    other `Clips` folders; an `.mp3` elsewhere in the library is not listed.
+    can be marked (not counted), and move like WAV clips (out of `Clips` they are
+    recordings). An `.mp3` elsewhere in the library is a recording: listed, indexed,
+    plays, marks count; Save with marks writes a WAV, Export clips cuts from it.
+    A WhatsApp `.mpeg` (an MP3) is listed and plays; an `.mpeg` video is not listed.
+    **Open audio file…** opens a WAV, an `.mp3` or a WhatsApp `.mpeg`.
 
 Looping a saved EVP:
 
@@ -165,8 +167,8 @@ Spectrogram:
     waveform and gets sharper (harmonics visible); scroll along: the labels stay
     at the left edge; the cursor, the marks and a drag selection cover it; a click
     on it seeks. Zoom right out on the longest recording (30 minutes): no freeze,
-    the whole length drawn. Open another recording: its own spectrogram. An MP3
-    clip says it has none. Untick it: gone, the player its usual height. Close
+    the whole length drawn. Open another recording: its own spectrogram; an MP3
+    recording or clip has one too. Untick it: gone, the player its usual height. Close
     and start OpenEVP: it is still on (or off) as you left it.
 
 Noise reduction:
@@ -186,8 +188,9 @@ Noise reduction:
     Untick it: the original plays on from where it was.
 33. On the 30-minute recording, time Reduce noise; Cancel halfway: it stops,
     and Reduce noise is unticked. Load another recording: Reduce noise is off and
-    greyed (no profile); go back: the profile is still there. An MP3 clip:
-    Learn noise is greyed out with the reason.
+    greyed (no profile); go back: the profile is still there. An MP3
+    recording and an MP3 clip: Learn noise, Reduce noise, the spectrogram,
+    Enhance and exports at a speed or enhanced all work as on a WAV.
 34. With Reduce noise on, **Exports enhanced** is ticked: Export WAV with marks
     saves `<name>_enhanced.wav` that sounds like what you heard; with Speed 0.5×
     and Boost too: `<name>_0.5x_enhanced.wav`; Save clip: `…_enhanced.mp3`.

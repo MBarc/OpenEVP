@@ -149,6 +149,16 @@ A mark belongs to the recording's audio, not to one file: if the same audio
 exists as a `.dvf` and a WAV, or has been saved more than once, marking it
 anywhere marks it everywhere.
 
+**Open audio file…** plays a WAV or an MP3 from anywhere on the PC. MP3 files
+are full recordings, like WAVs: they play with the same waveform, zoom, loop
+and speed, can be marked, and Save with marks / Export clips work on them
+(Save with marks writes a WAV). This includes MP3s saved under another
+extension, such as the `.mpeg` files WhatsApp Web saves voice notes and shared
+clips as (`.mp3`, `.mpeg`, `.mpga`, `.mp2` and `.m2a` are read; a file counts
+only if its first bytes really are MPEG audio, so an `.mpeg` video is ignored).
+Marks belong to the audio, so renaming `x.mp3` to `x.mpeg` keeps them. An MP3's
+own tags (title, comment) are never read as marks.
+
 ## EVP Library
 
 Click **EVP Library** in the sidebar for every recording saved to disk
@@ -317,8 +327,8 @@ It is computed by OpenEVP itself, not the page: about 32 ms windows (256-point
 FFT at 8 kHz, 512 at 16 kHz, 1024 at 44.1/48 kHz), up to 8 kHz (a 44.1 kHz
 recording has little but hiss above that), at several levels of detail served
 as image tiles, so only what is on screen is drawn. A 30-minute ICD-ST25
-recording takes under 2 seconds and about 60 MB; MP3 clips have none (open the
-recording they came from).
+recording takes under 2 seconds and about 60 MB. MP3 recordings and clips get
+one too: they are decoded to WAV like every other file.
 
 ### EVP clips
 
@@ -361,18 +371,16 @@ with **Open folder**.
   them out (they are copies of parts of recordings). You can still mark a clip
   in the player; the mark is kept, but it doesn't count either. Export clips
   never cuts clips from clips.
-- MP3 clips are listed and play the same way (the player decodes the MP3
-  itself). They can't be marked: the mark tools say so (mark the recording, or
-  export the clip as WAV). OpenEVP lists `.mp3` files only in its own `Clips`
-  folders, as clips; anywhere else they are other files, and an MP3 clip can
-  only be moved to another `Clips` folder OpenEVP made.
+- MP3 clips are clips exactly like WAV clips: listed, played and markable, never
+  counted, and they can be moved out of the `Clips` folder (then they are
+  ordinary recordings). An MP3 anywhere else in the library is a recording.
 - Rename or delete a `Clips` folder like any other folder (delete goes to the
   Recycle Bin), and renaming, moving or deleting a folder takes its `Clips`
   folder along. Recordings can't be moved into a `Clips` folder: it is for
   clips only. WAV clips can be moved out of it, and then are ordinary WAVs.
 - OpenEVP recognises its own `Clips` folders by a small hidden file inside,
-  `.openevp-clips`; delete that file and its WAV clips count as ordinary
-  recordings (its MP3 clips are then no longer listed).
+  `.openevp-clips`; delete that file and its clips (WAV or MP3) count as
+  ordinary recordings.
   A folder you named `Clips` yourself is an ordinary folder.
 
 ### Where marks live
@@ -510,6 +518,15 @@ MP3 clips are encoded with [lameenc](https://github.com/chrisstaite/lameenc)
 includes the [LAME](https://lame.sourceforge.io/) MP3 encoder, licensed
 LGPL-2.0-or-later. The app bundles it as a separate extension module
 (`_internal\lameenc.*.pyd`), with its license in `_internal\lameenc-*.dist-info`.
+
+MP3 files are decoded with [minimp3](https://github.com/lieff/minimp3),
+dedicated to the public domain under CC0 1.0 Universal; see
+`vendor/minimp3/LICENSE`. `vendor/minimp3/minimp3.h` is commit
+`ea99364f61c14656440e8d77e9c233ccf3124633` (2026-07-27), pinned by SHA-256 in
+`tools/build_lpec_core.py`; it is compiled into
+`openevp/decoders/mp3/mp3_core.dll` with OpenEVP's own wrapper (`_mp3.c`).
+On x86-64 minimp3 always takes its SSE2 code path, so the same file decodes to
+the same samples on every PC.
 
 `vendor/webview2/MicrosoftEdgeWebview2Setup.exe` is Microsoft's Evergreen WebView2
 bootstrapper (Authenticode-signed by Microsoft; the build checks its SHA-256). It is

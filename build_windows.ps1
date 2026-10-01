@@ -39,9 +39,12 @@ $lpecDir = "openevp\decoders\sony_lpec"
 $lpecCore = "$lpecDir\lpec_core.dll"
 $lpecStDir = "openevp\decoders\sony_lpec_st"
 $lpecStCore = "$lpecStDir\lpec_st_core.dll"
+# The MP3 decoder's C core (openevp\decoders\mp3\mp3_core.dll, minimp3 from
+# vendor\minimp3, pinned by SHA-256 in the tool) has no pure-Python fallback at all.
+$mp3Core = "openevp\decoders\mp3\mp3_core.dll"
 python tools\build_lpec_core.py
 if ($LASTEXITCODE -ne 0) { throw "building the decoders' C cores failed" }
-foreach ($core in $lpecCore, $lpecStCore) {
+foreach ($core in $lpecCore, $lpecStCore, $mp3Core) {
     if (-not (Test-Path $core)) { throw "$core was not built" }
     if ((Get-PeMachine $core) -ne $AMD64) { throw "$core is not an x64 DLL" }
 }
@@ -58,7 +61,8 @@ foreach ($core in $lpecCore, $lpecStCore) {
 # recordings), so its absence fails the build unless -NoLpecTables asks for such
 # a build (for development).
 $decoder = @("--collect-submodules", "openevp", "--collect-binaries", "openevp.decoders.sony_lpec",
-             "--collect-binaries", "openevp.decoders.sony_lpec_st")
+             "--collect-binaries", "openevp.decoders.sony_lpec_st",
+             "--collect-binaries", "openevp.decoders.mp3")
 $tables = @(@{ File = "$lpecDir\data\lpec_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
                What = "ICD-ST25 (LPEC LP)" },
             @{ File = "$lpecDir\data\lpec_sp_tables.json"; Dir = "$lpecDir\data"; Tool = "tools\import_lpec_tables.py";
