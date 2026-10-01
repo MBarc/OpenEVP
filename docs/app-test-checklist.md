@@ -160,8 +160,10 @@ Enhance:
 
 Spectrogram:
 
-31. Tick **Spectrogram** (under Height) with a recording loaded: within a couple
-    of seconds a spectrogram appears under the waveform, labelled 1, 2, 3 kHz on
+31. On a fresh install (or a PC where it was never unticked), **Spectrogram**
+    (under Height) is ticked. Open a recording: the waveform appears as quickly as
+    without it and plays at once; within a couple of seconds the spectrogram fills
+    in under the waveform, labelled 1, 2, 3 kHz on
     an ICD-ST25 recording (up to 8 kHz on an ICD-ST10 one); speech shows as
     bright stacked bands. Zoom in with the wheel: it stays lined up with the
     waveform and gets sharper (harmonics visible); scroll along: the labels stay
@@ -169,7 +171,8 @@ Spectrogram:
     on it seeks. Zoom right out on the longest recording (30 minutes): no freeze,
     the whole length drawn. Open another recording: its own spectrogram; an MP3
     recording or clip has one too. Untick it: gone, the player its usual height. Close
-    and start OpenEVP: it is still on (or off) as you left it.
+    and start OpenEVP: still off, and opening recordings asks for none. Tick it
+    again: it is back, and stays on after a restart.
 
 Noise reduction:
 

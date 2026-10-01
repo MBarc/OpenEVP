@@ -257,17 +257,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(dict(results)["d"]["cancelled"], True)
         self.assertTrue(api.spectrogram(rec2)["ok"])        # asked again: made
 
+    def test_no_store_is_on(self):
+        api = backend.Api(self.m, self.emit, lambda start: None, self.dest, self.server, store=None)
+        self.addCleanup(api.shutdown)
+        self.assertTrue(api.spectrogram_shown())
+
     def test_setting(self):
         api = self.real_api(None)
-        self.assertEqual((api.spectrogram_shown(), api.capabilities()["spectrogram"]), (False, False))
+        # On for a new user, and for anyone who never touched it (no setting stored).
+        self.assertEqual((api.spectrogram_shown(), api.capabilities()["spectrogram"]), (True, True))
+        self.assertIsNone(self.store.get_setting(backend.SPECTROGRAM))
+        # Turned off: off from then on, also at the next start.
+        self.assertEqual(api.set_spectrogram(False), {"ok": True, "spectrogram": False, "remembered": True})
+        self.assertFalse(self.real_api(None).spectrogram_shown())
         self.assertEqual(api.set_spectrogram(True), {"ok": True, "spectrogram": True, "remembered": True})
         self.assertTrue(self.real_api(None).spectrogram_shown())
         self.assertFalse(api.set_spectrogram("yes")["ok"])
         self.store.set_setting(backend.SPECTROGRAM, "damaged")
-        self.assertFalse(api.spectrogram_shown())
+        self.assertTrue(api.spectrogram_shown())                      # damaged: the default, on
+        self.store.set_setting(backend.SPECTROGRAM, False)
         second = AppData(os.path.join(self.tmp, "appdata"))
         self.addCleanup(second.close)
         other = self.real_api(None, store=second)
+        self.assertFalse(other.spectrogram_shown())                  # the first window's "off"
         self.assertEqual(other.set_spectrogram(True)["remembered"], False)
         self.assertTrue(other.spectrogram_shown())
 

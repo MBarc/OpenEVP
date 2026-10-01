@@ -1594,7 +1594,13 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
 
   // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
   assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
-  assert.ok(!$("spectrogram").checked && !vm.runInContext("S.spec.on", context), "off unless remembered on");
+  // On by default: capabilities() said nothing (a new user), so it is on; only an explicit false turns it off.
+  assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context), "on unless turned off");
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: false }; setupSpectrogram();`, context);
+  assert.ok(!$("spectrogram").checked && !vm.runInContext("S.spec.on", context), "turned off: stays off");
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
+  assert.ok($("spectrogram").checked);
+  vm.runInContext(`S.spec.on = false; $("spectrogram").checked = false;`, context);
   const wrapper = document.createElement("div");
   let wrapW = 800, wsScroll = 0;
   Object.defineProperty(wrapper, "clientWidth", { get: () => wrapW });
@@ -1673,6 +1679,32 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   // Remembered on at the next start.
   vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
   assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context));
+  // Opening a recording: the waveform is loaded and drawn first; the spectrogram is only asked for
+  // a moment later (a timer), and not at all if another recording was opened meanwhile.
+  const timers = [];
+  context.setTimeout = (fn, ms) => { timers.push([fn, ms]); return timers.length; };
+  specCalls.length = 0;
+  const opened = { rec: "s6", duration: 100, fp: "fs6", rate: 8000, url: "http://a/s6.wav", peaks: [0.5], marks: [],
+                   backup: { status: null, detail: "" }, reviewed: false };
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s6", opened, false);
+  assert.deepStrictEqual(specCalls, [], "nothing asked before the waveform is up");
+  const specTimer = timers.find(([, ms]) => ms === 150);
+  assert.ok(specTimer, "asked shortly after");
+  specTimer[0]();
+  assert.deepStrictEqual(specCalls, [["s6", "http://a/s6.wav"]]);
+  await answer(specInfo);
+  assert.strictEqual(tiles().length, 4);
+  timers.length = 0; specCalls.length = 0;
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s7", { ...opened, rec: "s7", url: "http://a/s7.wav" }, false);
+  const stale = timers.find(([, ms]) => ms === 150);
+  vm.runInContext("S.playSeq++", context);                                         // another recording opened meanwhile
+  stale[0]();
+  assert.deepStrictEqual(specCalls, []);
+  vm.runInContext(`S.spec.on = false; $("spectrogram").checked = false;`, context);   // off: no timer at all
+  timers.length = 0;
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s8", { ...opened, rec: "s8" }, false);
+  assert.ok(!timers.some(([, ms]) => ms === 150));
+  context.setTimeout = () => 0;
   vm.runInContext(`S.spec.on = false; hideSpectrogram(); setCurrent(null);`, context);
 
   // ---- Noise reduction: Learn noise from a selection, Reduce noise plays a noise-reduced version ----

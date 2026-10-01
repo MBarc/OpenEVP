@@ -107,7 +107,7 @@ CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
 PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
 ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
-SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool)
+SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool; on unless turned off)
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -1135,11 +1135,12 @@ class Api(LibraryOps):
 
     def spectrogram_shown(self):
         """Is the player's spectrogram shown? (Picked in this session if it could not be
-        remembered, else remembered, else False.)"""
+        remembered, else remembered, else True: it is on until someone turns it off, and
+        only an explicit False -- stored when they untick it -- keeps it off.)"""
         if self._spectrogram is not None:
             return self._spectrogram
         saved = self._store.get_setting(SPECTROGRAM) if self._store is not None else None
-        return saved if isinstance(saved, bool) else False
+        return saved if isinstance(saved, bool) else True
 
     def set_spectrogram(self, shown):
         """Show the spectrogram or not, and remember it. {"ok", "spectrogram", "remembered"}."""

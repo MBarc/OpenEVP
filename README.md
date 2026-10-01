@@ -316,12 +316,14 @@ cause of the "musical noise" of simple spectral subtraction).
 
 ### Spectrogram
 
-Tick **Spectrogram** (under Height) to see one under the waveform: time across,
+**Spectrogram** (under Height) is on unless you untick it: it shows under the waveform, time across,
 pitch up (0 Hz at the bottom, labelled in kHz), loudness as colour from black
 through purple and red to pale yellow. A voice shows as stacked bright bands
 (its harmonics) shaped by its formants, which is often easier to spot than in
 the waveform, even under noise. It scrolls and zooms with the waveform, and the
-cursor, the marks and a drag selection cover it too. The choice is remembered.
+cursor, the marks and a drag selection cover it too. Untick it and it stays off
+(remembered); tick it again any time. Opening a recording is never slowed down by
+it: the waveform comes first, and the spectrogram fills in a moment later.
 
 It is computed by OpenEVP itself, not the page: about 32 ms windows (256-point
 FFT at 8 kHz, 512 at 16 kHz, 1024 at 44.1/48 kHz), up to 8 kHz (a 44.1 kHz

@@ -281,7 +281,7 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   if (seq !== S.playSeq) return;
   status("");
   drawMarks(seq);
-  loadSpectrogram();
+  scheduleSpectrogram(seq);                     // after the waveform has painted: opening is never slower
   if (r.imported) banner(`Loaded ${plural(r.imported, "EVP mark")} stored in this file.`, "ok");
   if (autoplay) S.ws.play();
 }
@@ -2540,7 +2540,7 @@ async function playVersion(url, peaks) {
 const SPEC_HEIGHT = 120;
 
 function setupSpectrogram() {
-  S.spec.on = S.caps.spectrogram === true;
+  S.spec.on = S.caps.spectrogram !== false;                  // on unless turned off (the backend's default too)
   $("spectrogram").checked = S.spec.on;
   $("spectrogram").onchange = () => setSpectrogram($("spectrogram").checked);
   for (const ev of ["zoom", "scroll", "redraw"]) S.ws.on(ev, queueSpectrogram);
@@ -2565,6 +2565,14 @@ function setSpectrogram(on) {
     })();
   }
   return S.spec.save;
+}
+
+// A recording just opened: its waveform paints first, the spectrogram is asked for a moment later
+// (the backend computes it while the player is already usable; tiles fill in when it answers).
+const SPEC_DELAY_MS = 150;
+function scheduleSpectrogram(seq) {
+  if (!S.spec.on) return;
+  setTimeout(() => { if (seq === S.playSeq && S.spec.on) loadSpectrogram(); }, SPEC_DELAY_MS);
 }
 
 // Ask for the spectrogram of what the player plays now (a newer request wins).
