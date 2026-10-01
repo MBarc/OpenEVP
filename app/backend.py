@@ -87,10 +87,20 @@ SAVE_TO_CLIPS = ("That folder is inside a Clips folder, which is for EVP clips o
                  "Choose another folder to save recordings to.")
 CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
+PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
+KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
+SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
 class _BackupRunning(Exception):
     """install_update: a backup is running when the installer would take over."""
+
+
+def _speed(value):
+    """value as one of SPEEDS (a float), or None if it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return next((s for s in SPEEDS if s == value), None)
 
 
 def _download(manager, key):
@@ -423,6 +433,7 @@ class Api(LibraryOps):
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
         self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
+        self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -487,6 +498,7 @@ class Api(LibraryOps):
                 "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
+                **self.playback_speed(),
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -980,6 +992,38 @@ class Api(LibraryOps):
                 pass
         self._clip_format = None if remembered else fmt
         return {"ok": True, "format": fmt, "remembered": remembered}
+
+    def playback_speed(self):
+        """{"playback_speed", "keep_pitch"}: the player's speed (one of SPEEDS) and whether
+        it keeps the pitch -- the ones picked in this session if they could not be
+        remembered, else the remembered ones, else 1.0 and True (each one on its own:
+        a damaged setting falls back to its default)."""
+        if self._playback is not None:
+            speed, keep = self._playback
+        else:
+            get = self._store.get_setting if self._store is not None else (lambda name: None)
+            speed, keep = _speed(get(PLAYBACK_SPEED)), get(KEEP_PITCH)
+            speed = 1.0 if speed is None else speed
+            keep = keep if isinstance(keep, bool) else True
+        return {"playback_speed": speed, "keep_pitch": keep}
+
+    def set_playback_speed(self, speed, keep_pitch):
+        """Pick the player's speed (one of SPEEDS) and whether it keeps the pitch, and
+        remember them. A window that cannot write the settings (a second window) uses
+        them for this session. {"ok", "playback_speed", "keep_pitch", "remembered"}."""
+        speed = _speed(speed)
+        if speed is None or not isinstance(keep_pitch, bool):
+            return _fail("Unknown playback speed.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(PLAYBACK_SPEED, speed)
+                self._store.set_setting(KEEP_PITCH, keep_pitch)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._playback = None if remembered else (speed, keep_pitch)
+        return {"ok": True, "playback_speed": speed, "keep_pitch": keep_pitch, "remembered": remembered}
 
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""

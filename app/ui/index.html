@@ -127,6 +127,10 @@
         <input id="zoom" type="range" min="0" max="1000" step="any" value="0"></label>
       <label title="Make quiet parts taller (or hold Shift and scroll over the waveform)">Height
         <input id="height" type="range" min="1" max="100" step="any" value="1"></label>
+      <label id="speed-label" title="Playback speed: [ slower, ] faster, \ back to 1× (or double-click the slider)"><span>Speed <span id="speed-value">1×</span></span>
+        <input id="speed" type="range" min="0" max="6" step="1" value="3"></label>
+      <label id="keep-pitch-label" title="On: slower or faster speech at its normal pitch. Off: like a tape, the pitch changes with the speed.">
+        <input id="keep-pitch" type="checkbox" checked> Keep pitch</label>
     </div>
     <button id="open-wav-2" class="link" title="Open another WAV file">Open WAV file…</button>
   </div>

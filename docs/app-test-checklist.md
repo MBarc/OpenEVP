@@ -104,3 +104,17 @@ Looping a saved EVP:
     looping mark, or open another recording: nothing loops on. An imported point
     marker's 🔁 is greyed out. In a second OpenEVP window (read-only), looping
     works the same.
+
+Playback speed:
+
+27. Next to **Zoom** and **Height**: **Speed 1×** and **Keep pitch** (ticked). Play
+    a recording with speech and drag Speed to 0.5×: it slows down at once, from
+    where it was (no restart), and the label turns highlighted; the voice keeps
+    its normal pitch. Untick **Keep pitch**: still 0.5×, now deeper, like a slow
+    tape. Tick it again. Try 2× both ways. The cursor, the time and the selection's
+    and a mark's Loop stay right at 0.5× and 2× (a loop still comes back to its
+    start). `]` and `[` step faster and slower, `\` goes back to 1×, and so does a
+    double-click on the slider; none of them do anything while typing a note.
+    Open another recording, and an MP3 clip: the speed stays. Close and start
+    OpenEVP again: speed and Keep pitch are as you left them. In a second OpenEVP
+    window, a change applies there for that session only.

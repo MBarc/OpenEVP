@@ -23,11 +23,17 @@ from openevp import clips, wavinfo  # noqa: E402
 WAIT = 30
 
 
+_WAV_CLIPS = mock.patch.object(backend.Api, "clip_format", lambda self: "wav")
+
+
 def setUpModule():
     """These tests are about WAV clips (MP3 is the default format: see test_mp3_clips)."""
-    patch = mock.patch.object(backend.Api, "clip_format", lambda self: "wav")
-    patch.start()
-    unittest.addModuleCleanup(patch.stop)
+    _WAV_CLIPS.start()
+
+
+def tearDownModule():
+    """A module cleanup (unittest.addModuleCleanup) is not run by pytest: undo it here."""
+    _WAV_CLIPS.stop()
 
 
 def pcm_wav(rate, channels, seconds, width=2):
