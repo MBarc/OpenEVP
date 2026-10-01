@@ -97,6 +97,8 @@ const byId = new Map();
 const document = {
   getElementById(id) { if (!byId.has(id)) byId.set(id, new Element(id === "format" ? "select" : "div", id)); return byId.get(id); },
   createElement(tag) { return new Element(tag); },
+  createTextNode(t) { return String(t); },                 // text: a plain string child
+  createDocumentFragment() { return new Element("#fragment"); },
   querySelectorAll() { return []; },
   querySelector() { return null; },
   addEventListener(type, fn, capture) { listen(document, type, fn, capture); },
@@ -213,6 +215,7 @@ const context = { window, document, WaveSurfer: anything, console, getComputedSt
                   setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, localStorage: window.localStorage,
                   Map, Set, JSON, Promise, Number, String, Math, Object, Array, RegExp };
 vm.createContext(context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "notes.js"), "utf8"), context);   // as index.html loads it
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "app.js"), "utf8"), context);
 
 const $ = (id) => document.getElementById(id);
@@ -2013,5 +2016,28 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
+
+  // The update dialog lists every release the update skips over, newest first, each under its
+  // version heading with its notes beneath; markup in the notes stays text.
+  api.check_update = async () => ({ ok: true, available: true, current: "0.9.7", version: "0.10.0", notes: "n",
+    page: "p", can_install: true, earlier: 2, releases: [
+      { version: "0.10.0", date: "2026-10-01", notes: "## Fixes\n- <img src=x onerror=alert(1)>" },
+      { version: "0.9.9", date: "2026-09-20", notes: "y".repeat(800) },
+      { version: "0.9.8", date: "2026-09-10", notes: "" }] });
+  await context.checkForUpdate(false);
+  const dlg = $("update-notes");
+  assert.ok(!$("update-dialog").hidden);
+  assert.strictEqual($("update-title").textContent, "OpenEVP 0.10.0 is available");
+  const sections = dlg.children.filter((c) => c.tagName === "DETAILS");
+  assert.deepStrictEqual(sections.map((d) => d.children[0].children[0].textContent), ["What's new in 0.10.0", "0.9.9", "0.9.8"]);
+  assert.deepStrictEqual(sections.map((d) => d.open), [true, false, false]);
+  const first = sections[0].children[1];
+  assert.deepStrictEqual(first.children.map((c) => c.tagName), ["H4", "UL"]);
+  assert.strictEqual(first.children[1].textContent, "<img src=x onerror=alert(1)>");
+  assert.ok(!dlg.innerHTML && !first.children[1].children[0].innerHTML, "notes are built from text, not HTML");
+  assert.strictEqual(sections[2].children[1].textContent, "No notes for this release.");
+  assert.strictEqual(dlg.lastChild.textContent, "…and 2 earlier updates.");
+  $("update-later").onclick();
+  assert.ok($("update-dialog").hidden);
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

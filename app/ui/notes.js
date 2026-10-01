@@ -73,4 +73,51 @@ function renderNotes(container, markdown) {
   flushPara();
 }
 
-if (typeof module !== "undefined") module.exports = { renderNotes };
+// The update dialog's notes: one section per release the update skips over, newest first
+// ({version, date, notes} as check_update returns them), each a collapsible <details> headed
+// "What's new in <newest>" / "<older>", its notes beneath (their own headings as subheadings).
+// The newest is open; the older ones are open too when everything together is short
+// (RELEASES_OPEN_CHARS), otherwise collapsed. `earlier` releases beyond the list are counted.
+const RELEASES_OPEN_CHARS = 600;
+
+function renderReleaseNotes(container, releases, earlier) {
+  container.textContent = "";
+  const list = (releases || []).filter((r) => r && r.version);
+  const short = list.reduce((n, r) => n + String(r.notes || "").length, 0) <= RELEASES_OPEN_CHARS;
+  list.forEach((r, i) => {
+    const section = document.createElement("details");
+    section.className = "release";
+    section.open = i === 0 || short;
+    const summary = document.createElement("summary");
+    const title = document.createElement("span");
+    title.className = "release-version";
+    title.textContent = i === 0 ? `What's new in ${r.version}` : String(r.version);
+    summary.appendChild(title);
+    if (r.date) {
+      const date = document.createElement("span");
+      date.className = "release-date";
+      date.textContent = String(r.date);
+      summary.appendChild(date);
+    }
+    section.appendChild(summary);
+    const body = document.createElement("div");
+    body.className = "release-notes";
+    if (String(r.notes || "").trim()) renderNotes(body, r.notes);
+    else {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = "No notes for this release.";
+      body.appendChild(p);
+    }
+    section.appendChild(body);
+    container.appendChild(section);
+  });
+  if (earlier > 0) {
+    const more = document.createElement("p");
+    more.className = "muted release-earlier";
+    more.textContent = `…and ${earlier} earlier update${earlier === 1 ? "" : "s"}.`;
+    container.appendChild(more);
+  }
+}
+
+if (typeof module !== "undefined") module.exports = { renderNotes, renderReleaseNotes };

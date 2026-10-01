@@ -134,7 +134,7 @@ async function checkForUpdate(manual) {
   if (!r.ok) { if (manual) showError(r); return; }
   if (!r.available) { if (manual) banner(`You have the latest version (${r.current}).`, "ok"); return; }
   $("update-title").textContent = `OpenEVP ${r.version} is available`;
-  renderNotes($("update-notes"), r.notes || "");
+  renderReleaseNotes($("update-notes"), r.releases || [{ version: r.version, notes: r.notes || "" }], r.earlier || 0);
   $("update-status").textContent = r.can_install
     ? `You have ${r.current}. Windows will ask for permission, then OpenEVP reopens on the new version. ` +
       "If it doesn't, start it from the Start menu."
