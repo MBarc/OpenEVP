@@ -1292,6 +1292,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     play: (t) => { spPlaying = true; if (t != null) spTime = t; }, pause: () => { spPlaying = false; },
     stop: () => { throw new Error("a speed change must not stop playback"); },
     isPlaying: () => spPlaying, getCurrentTime: () => spTime, getDuration: () => 3,
+    getScroll: () => 0, setScroll: () => {}, zoom: () => {},
     playPause: () => { spPlaying = !spPlaying; },
     load: async () => { media.playbackRate = media.defaultPlaybackRate; },          // the HTML load algorithm
   }, { get: (t, k) => (k in t ? t[k] : anything) });
@@ -1758,10 +1759,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   loopBtn(0).onclick(ev);
   assert.ok(vm.runInContext("S.markLoop && S.activeMark === 't1'", context));
   loopBtn(0).onclick(ev);
-  // View's dot: the spectrogram turned off, or Height raised (zoom is navigation: no dot).
+  // View's dot: the spectrogram turned off, Height raised, or the waveform zoomed in past fit
+  // (fit-to-width itself is plain navigation: no dot). Its tooltip names the zoom, like Speed's "…×".
   vm.runInContext(`S.spec.on = true; showTabMarks();`, context);
-  $("zoom").value = "500";
-  assert.ok(!tabMarked().includes("view"));
+  vm.runInContext(`S.zoomPx = 1200; showTabMarks();`, context);        // fit is 800/3 px/s here: 4.5×
+  assert.ok(tabMarked().includes("view"), "zoomed in past fit marks View");
+  assert.strictEqual($("tab-view").title, "Zoom, Height and the spectrogram. On now: Zoom 4.5×.");
+  vm.runInContext(`S.zoomPx = 0; showTabMarks();`, context);
+  assert.ok(!tabMarked().includes("view"), "back at fit (0): the dot clears");
+  // The zoom slider and the mouse wheel over the waveform both move S.zoomPx, and both refresh the dot.
+  $("zoom").value = String(context.zoomSlider(2000, vm.runInContext("S.zoomMax", context))); $("zoom").oninput();
+  assert.ok(vm.runInContext("S.zoomPx", context) > 0 && tabMarked().includes("view"), "the slider marks View once zoomed in");
+  $("zoom").value = "0"; $("zoom").oninput();
+  assert.ok(vm.runInContext("S.zoomPx", context) === 0 && !tabMarked().includes("view"), "the slider back at fit clears the dot");
+  fire([$("waveform")], "wheel", { deltaY: -100, clientX: 400 });
+  assert.ok(vm.runInContext("S.zoomPx", context) > 0 && tabMarked().includes("view"), "wheel-zooming in marks View");
+  for (let i = 0; i < 20 && vm.runInContext("S.zoomPx", context) > 0; i++) fire([$("waveform")], "wheel", { deltaY: 100, clientX: 400 });
+  assert.ok(vm.runInContext("S.zoomPx", context) === 0 && !tabMarked().includes("view"), "wheel-zooming back out to fit clears the dot");
   $("height").value = "20"; $("height").oninput();
   assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Height raised."));
   $("height").value = "1"; $("height").oninput();
