@@ -174,7 +174,8 @@ td.note { color: var(--warn); }
 #view-controls { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 #view-controls label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #view-controls input[type="range"] { width: 110px; }
-#view-controls #keep-pitch-label { justify-content: flex-end; gap: 4px; }
+#view-controls #keep-pitch-label, #view-controls #export-speed-label { justify-content: flex-end; gap: 4px; }
+#view-controls label[hidden] { display: none; }
 #speed-label.changed { color: var(--accent); font-weight: 600; }
 #speed-value { font-variant-numeric: tabular-nums; }
 #version { font-size: 12px; color: var(--muted); }

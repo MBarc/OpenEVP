@@ -118,3 +118,15 @@ Playback speed:
     Open another recording, and an MP3 clip: the speed stays. Close and start
     OpenEVP again: speed and Keep pitch are as you left them. In a second OpenEVP
     window, a change applies there for that session only.
+28. Set Speed to 0.5×: **Exports at 0.5×** appears under Keep pitch, ticked (it
+    is hidden at 1×). On a marked recording, **Export WAV with marks**: a
+    progress bar and percentage show while it slows down, and it saves
+    `<name>_0.5x.wav`; open it in an audio editor: twice as long, the voice at
+    normal pitch, and the EVP markers sit on the EVPs. Export again: "already
+    saved". Untick **Keep pitch** and export again: a new, deeper (tape-style)
+    file. **Export clips** and a row's **Save clip** save `…_0.5x.mp3` (and
+    `.wav` with WAV picked): each clip is twice as long, the 0.5 s around the
+    EVP included. The library's **Export clips** on a folder does the same, and
+    its banner says "at 0.5×". Untick **Exports at 0.5×**: exports are at normal
+    speed with the usual names. Time Export WAV with marks at 0.5× (Keep pitch)
+    on a 30-minute ICD-ST25 recording and a few-minute ICD-ST10 stereo one.

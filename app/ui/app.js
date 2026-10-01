@@ -8,6 +8,7 @@ const $ = (id) => document.getElementById(id);
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             speed: 1, keepPitch: true, speedSave: null, speedDirty: false,   // the player's speed (one of SPEEDS), Keep pitch
+            exportAtSpeed: true,                          // "Exports at 0.5×": ticked whenever the speed leaves 1×
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -1993,6 +1994,12 @@ window.onBackendEvent = (event, p) => {
   }
   if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
   if (event === "store-writable") { storeWritable(); return; }                                     // nor this
+  if (event === "speed-progress") {                         // Export WAV with marks at another speed
+    if (!S.exportingMarked) return;
+    progress(p.done, p.total);
+    status(`${S.speedWork} ${p.total ? Math.floor(100 * p.done / p.total) : 100}%`);
+    return;
+  }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (p.job !== S.job) return;
@@ -2096,12 +2103,24 @@ function showSpeed() {
   $("speed-value").textContent = `${S.speed}×`;
   $("speed-label").classList.toggle("changed", S.speed !== 1);
   $("keep-pitch").checked = S.keepPitch;
+  $("export-speed-label").hidden = S.speed === 1;
+  $("export-speed").checked = S.exportAtSpeed;
+  $("export-speed-text").textContent = `Exports at ${S.speed}×`;
 }
+
+// The exports at the player's speed (Export WAV with marks, Export clips, Save clip, the library's
+// Export clips): [speed, keep pitch] while "Exports at …×" shows and is ticked, else [1, true].
+function exportSpeed() {
+  const on = S.speed !== 1 && S.exportAtSpeed && !$("player-loaded").hidden;
+  return on ? [S.speed, S.keepPitch] : [1, true];
+}
+function atSpeed() { const [sp] = exportSpeed(); return sp === 1 ? "" : ` at ${sp}×`; }
 
 // Change the speed and/or Keep pitch: applied at once, shown, and remembered (in order, the latest last).
 function setSpeed(speed, keepPitch = S.keepPitch) {
   speed = SPEEDS[speedIndex(speed)];
   const changed = speed !== S.speed || keepPitch !== S.keepPitch;
+  if (S.speed === 1 && speed !== 1) S.exportAtSpeed = true;    // leaving 1×: exports follow it again
   S.speed = speed; S.keepPitch = !!keepPitch;
   applySpeed(); showSpeed();
   if (changed) saveSpeed();
@@ -2135,6 +2154,7 @@ function setupSpeed() {
   $("speed").oninput = () => setSpeed(SPEEDS[Number($("speed").value)]);
   $("speed").addEventListener("dblclick", () => setSpeed(1));
   $("keep-pitch").onchange = () => setSpeed(S.speed, $("keep-pitch").checked);
+  $("export-speed").onchange = () => { S.exportAtSpeed = $("export-speed").checked; };
   document.addEventListener("keydown", speedKeys);
 }
 
@@ -2731,10 +2751,12 @@ async function retryBackup(rec) {
 async function exportMarked() {
   if (!S.current) return;
   const rec = S.current.rec;
-  S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status("Saving a WAV with the marks…");
+  const at = exportSpeed();
+  S.speedWork = at[0] === 1 ? "" : `Saving a WAV with the marks at ${at[0]}×…`;
+  S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status(S.speedWork || "Saving a WAV with the marks…");
   let r;
-  try { r = await api().export_marked(rec); } finally {
-    S.exportingMarked = false; status(""); renderMarks(); scheduleLibraryRender();
+  try { r = await api().export_marked(rec, ...at); } finally {
+    S.exportingMarked = false; S.speedWork = ""; status(""); progress(0, null); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }
   const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
@@ -2778,9 +2800,10 @@ function clipsSummary(p) {
 async function exportClips(mark) {
   if (!S.current || S.savingClips) return;
   const rec = S.current.rec;
-  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(mark ? "Saving the clip…" : "Saving the clips…");
+  const at = exportSpeed();
+  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}…`);
   let r;
-  try { r = await api().export_clips(rec, mark ? mark.id : null); } finally {
+  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at); } finally {
     S.savingClips = false; status(""); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }
@@ -2805,13 +2828,13 @@ function groupMarked(g) { return !g.clip && g.marks.A + g.marks.B + g.marks.C > 
 // A folder (and its folders) or one recording's files, as a background job: progress, Cancel.
 async function exportLibraryClips(what, name) {
   if (!canExportClips()) return;
-  const job = ++S.clips.job;
-  S.clips.running = true; S.clips.name = name; S.clips.cancelling = false;
+  const job = ++S.clips.job, at = exportSpeed();
+  S.clips.running = true; S.clips.name = name; S.clips.cancelling = false; S.clips.at = atSpeed();
   renderMarks(); updateExport(); scheduleLibraryRender();
   clipsRunning(0, null);
   let r;
   try {
-    r = what.folder ? await api().export_clips_folder(what.folder, job) : await api().export_clips_files(what.files, job);
+    r = what.folder ? await api().export_clips_folder(what.folder, job, ...at) : await api().export_clips_files(what.files, job, ...at);
   } catch (e) {                                 // the call itself failed: nothing is running
     r = { ok: false, error: `The clips export did not start: ${(e && e.message) || e}` };
   }
@@ -2824,7 +2847,7 @@ async function exportLibraryClips(what, name) {
 function clipsRunning(done, total) {
   progress(done, total === null ? 1 : total);
   const count = total ? ` ${done} of ${total}` : "";
-  banner(`Exporting the clips of ${S.clips.name || "the recordings"}…${count}`, "ok",
+  banner(`Exporting the clips of ${S.clips.name || "the recordings"}${S.clips.at || ""}…${count}`, "ok",
          { label: "Cancel", run: () => { S.clips.cancelling = true; $("banner-action").disabled = true; api().cancel_clips(S.clips.job); } });
   $("banner-action").disabled = !!S.clips.cancelling;             // asked once: it stops after the recording it is on
 }

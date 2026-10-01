@@ -1286,6 +1286,65 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                          [[0.75, false], "2", 0.75, false, false]);
   vm.runInContext(`S.caps = { ...S.caps, playback_speed: 3, keep_pitch: "x" }; setupSpeed();`, context);   // damaged: 1×, Keep pitch
   assert.deepStrictEqual(speedState(), [1, true]);
+  // ---- exports at the current speed: "Exports at 0.5×" beside the speed, only when it isn't 1× ----
+  const exportShown = () => [$("export-speed-label").hidden, $("export-speed").checked, $("export-speed-text").textContent];
+  assert.deepStrictEqual(exportShown().slice(0, 1), [true], "hidden at 1×");
+  slide(1);
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.5×"]);           // ticked when it leaves 1×
+  slide(0);
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.25×"]);
+  $("export-speed").checked = false; $("export-speed").onchange();                 // unticked: it stays so …
+  slide(1);
+  assert.deepStrictEqual(exportShown(), [false, false, "Exports at 0.5×"]);
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [1, true]);
+  slide(3);
+  assert.deepStrictEqual(exportShown().slice(0, 1), [true]);
+  slide(1);                                                                         // … until it is back at 1×
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.5×"]);
+  // The exports pass the speed and Keep pitch: Export WAV with marks (with progress), Export clips, Save clip,
+  // and the library's Export clips; at 1×, or with the box unticked, 1 and true.
+  const speedExports = [];
+  const savedExports = { marked: api.export_marked, clips: api.export_clips, files: api.export_clips_files };
+  let finishMarked = null;
+  api.export_marked = (...a) => { speedExports.push(["marked", ...a]);
+                                  return new Promise((res) => { finishMarked = () => res({ ok: true, saved: true, already: false, name: "x_0.5x.wav", folder_name: "" }); }); };
+  api.export_clips = async (...a) => { speedExports.push(["clips", ...a]); return { ok: true, saved: 1, already: 0, names: [], notes: [], folder: null }; };
+  api.export_clips_files = async (...a) => { speedExports.push(["files", ...a]); return { ok: true, job: a[1] }; };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 1, exists: false, truncated: false,
+                                    indexing: false, pending: 0, files: [], folders: [] });
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  loadMarked("h12", [{ id: "e1", start: 1, end: 1.5, cls: "A", note: "" }]);
+  const marking = context.exportMarked();
+  assert.strictEqual($("status").textContent, "Saving a WAV with the marks at 0.5×…");
+  window.onBackendEvent("speed-progress", { done: 50, total: 200 });
+  assert.deepStrictEqual([$("status").textContent, $("progress").hidden, $("progress-fill").style.width],
+                         ["Saving a WAV with the marks at 0.5×… 25%", false, "25%"]);
+  finishMarked(); await marking;
+  assert.deepStrictEqual([$("status").textContent, $("progress").hidden], ["", true]);
+  window.onBackendEvent("speed-progress", { done: 50, total: 200 });              // a late one: ignored
+  assert.strictEqual($("status").textContent, "");
+  await context.exportClips(null);
+  await context.exportClips({ id: "e1" });
+  await context.exportLibraryClips({ files: ["f1"] }, "one.wav");
+  assert.ok($("banner-text").textContent.includes("Exporting the clips of one.wav at 0.5×…"));
+  window.onBackendEvent("clips-done", { job: vm.runInContext("S.clips.job", context), saved: 0, already: 0, recordings: 0,
+                                         skipped: [], notes: [], folder: null, cancelled: false });
+  $("export-speed").checked = false; $("export-speed").onchange();
+  await context.exportClips(null);
+  slide(3); $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  await context.exportClips(null);
+  const libJob = vm.runInContext("S.clips.job", context) + 1;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(speedExports)), [
+    ["marked", "h12", 0.5, false], ["clips", "h12", null, 0.5, false], ["clips", "h12", "e1", 0.5, false],
+    ["files", ["f1"], libJob - 1, 0.5, false], ["clips", "h12", null, 1, true], ["clips", "h12", null, 1, true]]);
+  slide(1);
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [0.5, true]);
+  $("player-loaded").hidden = true;                                                // no player, no box shown: normal speed
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [1, true]);
+  $("player-loaded").hidden = false;
+  slide(3);
+  Object.assign(api, { export_marked: savedExports.marked, export_clips: savedExports.clips, export_clips_files: savedExports.files });
+  context.banner("");
   // Looping still triggers at 0.5× and 2×: the selection's loop and a mark's loop, via the fake regions.
   for (const idx of [1, 6]) {
     slide(idx);

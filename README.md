@@ -222,6 +222,21 @@ or the investigation's folder for a file in the library). Those marks are standa
 `cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
 read (none has been verified with OpenEVP yet).
 
+### Playback speed
+
+**Speed**, next to Zoom and Height, plays at 0.25× to 2× (`[` slower, `]`
+faster, `\` or a double-click back to 1×). With **Keep pitch** ticked (the
+default) speech slows down at its normal pitch; untick it to hear it like a
+tape, deeper when slower. The speed and Keep pitch are remembered.
+
+While the speed isn't 1×, **Exports at 0.5×** (ticked whenever you leave 1×)
+makes Export WAV with marks, Export clips and Save clip, and the library's
+Export clips, save at that speed, the same way it plays: the names end in the
+speed (`…_0.5x.wav`, `…_EVP-A_00m12.4s_0.5x.mp3`), the marks are moved to
+match, and a clip's 0.5 s on each side is slowed down with it. Untick it for
+normal-speed exports. Slowing down a whole recording with Keep pitch takes a
+while (a progress bar shows how far it is).
+
 ### EVP clips
 
 **Export clips** (next to Export WAV with marks) saves every mark of the loaded
