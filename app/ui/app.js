@@ -7,6 +7,8 @@ const $ = (id) => document.getElementById(id);
 // ids and recording numbers are opaque (any string, a number), shown only through labels
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
+            speed: 1, keepPitch: true, speedSave: null, speedDirty: false,   // the player's speed (one of SPEEDS), Keep pitch
+            exportAtSpeed: false,                         // "Exports at 0.5×": ticked when the user leaves 1× (this session)
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -1992,6 +1994,12 @@ window.onBackendEvent = (event, p) => {
   }
   if (event === "backup-done" || event === "backup-failed") { backupEvent(event, p); return; }   // not an export job
   if (event === "store-writable") { storeWritable(); return; }                                     // nor this
+  if (event === "speed-progress") {                         // Export WAV with marks at another speed
+    if (!S.exportingMarked) return;
+    progress(p.done, p.total);
+    status(`${S.speedWork} ${p.total ? Math.floor(100 * p.done / p.total) : 100}%`);
+    return;
+  }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (p.job !== S.job) return;
@@ -2023,7 +2031,7 @@ function setupPlayer() {
   S.ws = WaveSurfer.create({ container: "#waveform", height: 80,
                              waveColor: css.getPropertyValue("--muted").trim(),
                              progressColor: css.getPropertyValue("--accent").trim() });
-  S.ws.on("ready", () => { $("play").disabled = false; tick(); });
+  S.ws.on("ready", () => { $("play").disabled = false; applySpeed(); tick(); });
   S.ws.on("timeupdate", tick);
   S.ws.on("play", () => { $("play").textContent = "❚❚"; });
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
@@ -2032,6 +2040,7 @@ function setupPlayer() {
   $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
+  setupSpeed();
   setupSelection();                         // once: the plugin stays registered across loads
   setupMarks();
   $("open-wav").onclick = openWav;
@@ -2070,6 +2079,95 @@ function wheelZoom(e) {
   const t = (S.ws.getScroll() + x) / now;                    // the second under the pointer
   setZoom(next);
   if (next) S.ws.setScroll(t * next - x);
+}
+
+// ---- Playback speed: 0.25× to 2×, keeping the pitch (on by default) or tape-style ----
+// The media element plays at S.speed: wavesurfer's cursor, time, region-out and the stop at a
+// region's end all follow the media's own clock, so they stay right at any speed. A change applies
+// at once, mid-play. defaultPlaybackRate carries it across loads (a load resets playbackRate to it).
+// The setting is the backend's (capabilities().playback_speed / keep_pitch; a second window keeps it
+// for the session); a new recording keeps it.
+const SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
+
+function speedIndex(v) { const i = SPEEDS.indexOf(Number(v)); return i < 0 ? SPEEDS.indexOf(1) : i; }
+
+function applySpeed() {
+  if (!S.ws) return;
+  S.ws.setPlaybackRate(S.speed, S.keepPitch);
+  const media = S.ws.getMediaElement && S.ws.getMediaElement();
+  if (media) media.defaultPlaybackRate = S.speed;
+}
+
+function showSpeed() {
+  $("speed").value = String(speedIndex(S.speed));
+  $("speed-value").textContent = `${S.speed}×`;
+  $("speed-label").classList.toggle("changed", S.speed !== 1);
+  $("keep-pitch").checked = S.keepPitch;
+  $("export-speed-label").hidden = S.speed === 1;
+  $("export-speed").checked = S.exportAtSpeed;
+  $("export-speed-text").textContent = `Exports at ${S.speed}×`;
+}
+
+// The player's exports at its speed (Export WAV with marks, Export clips, a row's Save clip; never
+// the library's Export clips): [speed, keep pitch] while "Exports at …×" shows and is ticked, else
+// [1, true]. Never ticked at startup, even when the remembered speed isn't 1×: only once the user
+// moves the speed off 1× in this session.
+function exportSpeed() {
+  const on = S.speed !== 1 && S.exportAtSpeed && !$("player-loaded").hidden;
+  return on ? [S.speed, S.keepPitch] : [1, true];
+}
+function atSpeed() { const [sp] = exportSpeed(); return sp === 1 ? "" : ` at ${sp}×`; }
+
+// Change the speed and/or Keep pitch: applied at once, shown, and remembered (in order, the latest last).
+function setSpeed(speed, keepPitch = S.keepPitch) {
+  speed = SPEEDS[speedIndex(speed)];
+  const changed = speed !== S.speed || keepPitch !== S.keepPitch;
+  if (S.speed === 1 && speed !== 1) S.exportAtSpeed = true;    // the user left 1×: exports follow it
+  S.speed = speed; S.keepPitch = !!keepPitch;
+  applySpeed(); showSpeed();
+  if (changed) saveSpeed();
+}
+
+// One save at a time, of the latest values: changes made while one is on its way are saved after it.
+function saveSpeed() {
+  S.speedDirty = true;
+  if (!S.speedSave) {
+    S.speedSave = (async () => {
+      while (S.speedDirty) {
+        await null;                                          // S.speedSave is set before this ends
+        S.speedDirty = false;
+        let r;
+        try { r = await api().set_playback_speed(S.speed, S.keepPitch); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+        if (r.ok) Object.assign(S.caps, { playback_speed: r.playback_speed, keep_pitch: r.keep_pitch });
+        else showError(r);
+      }
+      S.speedSave = null;
+    })();
+  }
+  return S.speedSave;
+}
+
+function stepSpeed(by) { setSpeed(SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1, speedIndex(S.speed) + by))]); }
+
+function setupSpeed() {
+  S.speed = SPEEDS[speedIndex(S.caps.playback_speed)];      // the remembered ones (or 1×, Keep pitch)
+  S.keepPitch = S.caps.keep_pitch !== false;
+  S.exportAtSpeed = false;                                   // a remembered speed never ticks "Exports at …×"
+  applySpeed(); showSpeed();
+  $("speed").oninput = () => setSpeed(SPEEDS[Number($("speed").value)]);
+  $("speed").addEventListener("dblclick", () => setSpeed(1));
+  $("keep-pitch").onchange = () => setSpeed(S.speed, $("keep-pitch").checked);
+  $("export-speed").onchange = () => { S.exportAtSpeed = $("export-speed").checked; };
+  document.addEventListener("keydown", speedKeys);
+}
+
+// [ slower, ] faster, \ back to 1×: not while typing, nor with the player empty or a dialog open.
+function speedKeys(e) {
+  if (e.key !== "[" && e.key !== "]" && e.key !== "\\") return;
+  if (e.ctrlKey || e.altKey || e.metaKey || typingIn(e.target) || $("player-loaded").hidden) return;
+  if (document.querySelector(".modal:not([hidden])")) return;          // the About or update dialog is open
+  e.preventDefault();
+  if (e.key === "\\") setSpeed(1); else stepSpeed(e.key === "]" ? 1 : -1);
 }
 
 // ---- Selection: drag across the waveform to pick a part; play or loop just that part ----
@@ -2656,10 +2754,12 @@ async function retryBackup(rec) {
 async function exportMarked() {
   if (!S.current) return;
   const rec = S.current.rec;
-  S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status("Saving a WAV with the marks…");
+  const at = exportSpeed();
+  S.speedWork = at[0] === 1 ? "" : `Saving a WAV with the marks at ${at[0]}×…`;
+  S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status(S.speedWork || "Saving a WAV with the marks…");
   let r;
-  try { r = await api().export_marked(rec); } finally {
-    S.exportingMarked = false; status(""); renderMarks(); scheduleLibraryRender();
+  try { r = await api().export_marked(rec, ...at); } finally {
+    S.exportingMarked = false; S.speedWork = ""; status(""); progress(0, null); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }
   const where = r.folder_name ? `the ${r.folder_name} folder of your save folder` : "your save folder";
@@ -2703,9 +2803,10 @@ function clipsSummary(p) {
 async function exportClips(mark) {
   if (!S.current || S.savingClips) return;
   const rec = S.current.rec;
-  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(mark ? "Saving the clip…" : "Saving the clips…");
+  const at = exportSpeed();
+  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}…`);
   let r;
-  try { r = await api().export_clips(rec, mark ? mark.id : null); } finally {
+  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at); } finally {
     S.savingClips = false; status(""); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }

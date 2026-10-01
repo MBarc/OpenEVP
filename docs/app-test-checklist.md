@@ -104,3 +104,31 @@ Looping a saved EVP:
     looping mark, or open another recording: nothing loops on. An imported point
     marker's 🔁 is greyed out. In a second OpenEVP window (read-only), looping
     works the same.
+
+Playback speed:
+
+27. Next to **Zoom** and **Height**: **Speed 1×** and **Keep pitch** (ticked). Play
+    a recording with speech and drag Speed to 0.5×: it slows down at once, from
+    where it was (no restart), and the label turns highlighted; the voice keeps
+    its normal pitch. Untick **Keep pitch**: still 0.5×, now deeper, like a slow
+    tape. Tick it again. Try 2× both ways. The cursor, the time and the selection's
+    and a mark's Loop stay right at 0.5× and 2× (a loop still comes back to its
+    start). `]` and `[` step faster and slower, `\` goes back to 1×, and so does a
+    double-click on the slider; none of them do anything while typing a note.
+    Open another recording, and an MP3 clip: the speed stays. Close and start
+    OpenEVP again: speed and Keep pitch are as you left them. In a second OpenEVP
+    window, a change applies there for that session only.
+28. Set Speed to 0.5×: **Exports at 0.5×** appears under Keep pitch, ticked (it
+    is hidden at 1×). On a marked recording, **Export WAV with marks**: a
+    progress bar and percentage show while it slows down, and it saves
+    `<name>_0.5x.wav`; open it in an audio editor: twice as long, the voice at
+    normal pitch to the very last sample, and the EVP markers sit on the EVPs.
+    Export again: "already saved". Untick **Keep pitch** and export again:
+    `<name>_0.5x-tape.wav`, deeper. **Export clips** and a row's **Save clip**
+    save `…_0.5x.mp3` (and `.wav` with WAV picked): each clip is twice as long,
+    the 0.5 s around the EVP included. The library's **Export clips** on a folder
+    saves normal-speed clips with the usual names. Untick **Exports at 0.5×**:
+    the player's exports are at normal speed too. Close and start OpenEVP: the
+    speed is still 0.5× but **Exports at 0.5×** is unticked until you move the
+    speed to 1× and back. Time Export WAV with marks at 0.5× (Keep pitch)
+    on a 30-minute ICD-ST25 recording and a few-minute ICD-ST10 stereo one.

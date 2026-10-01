@@ -38,6 +38,10 @@ EVP clips (one MP3 or WAV per mark, openevp.clips) go into a Clips subfolder of 
 folder a WAV with marks goes into: export_clips() for the loaded recording (like
 export_marked()), and a background job for library recordings or folders. Their
 format is a setting (clip_format: "mp3" by default, or "wav"; set_clip_format()).
+The player's export_clips() and export_marked() can save at the player's speed
+(speed, keep_pitch: openevp.stretch; the names end in the speed, "-tape" without
+Keep pitch; the library's clips job never does); the player's speed and Keep pitch
+are settings too (playback_speed / keep_pitch; set_playback_speed()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
 counts them as EVPs and never cuts clips from them again.
@@ -53,7 +57,7 @@ import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, formats, mp3, recorders, wavinfo
+from openevp import __version__, clips, formats, mp3, recorders, stretch, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -87,10 +91,31 @@ SAVE_TO_CLIPS = ("That folder is inside a Clips folder, which is for EVP clips o
                  "Choose another folder to save recordings to.")
 CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
+PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
+KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
+SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
 class _BackupRunning(Exception):
     """install_update: a backup is running when the installer would take over."""
+
+
+def _speed(value):
+    """value as one of SPEEDS (a float), or None if it is not one."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return next((s for s in SPEEDS if s == value), None)
+
+
+def _export_speed(speed, keep_pitch):
+    """(speed, keep_pitch) for an export at the player's speed (speed one of SPEEDS,
+    keep_pitch a bool), or None when either is not valid."""
+    speed = _speed(speed)
+    return None if speed is None or not isinstance(keep_pitch, bool) else (speed, keep_pitch)
+
+
+NORMAL = (1.0, True)                # an export at normal speed
+BAD_SPEED = "Unknown playback speed."
 
 
 def _download(manager, key):
@@ -423,6 +448,7 @@ class Api(LibraryOps):
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
         self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
+        self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -487,6 +513,7 @@ class Api(LibraryOps):
                 "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
+                **self.playback_speed(),
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -943,7 +970,7 @@ class Api(LibraryOps):
         except ValueError as e:
             return wav, f"saved without its marks ({e})"
 
-    def export_marked(self, rec):
+    def export_marked(self, rec, speed=1, keep_pitch=True):
         """Save a WAV with the current marks of the loaded recording into the Save-to
         folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
@@ -954,8 +981,17 @@ class Api(LibraryOps):
         not start while an export or an update install runs, and neither starts
         while it runs. Admission checks _stop under _workers_lock, the lock
         shutdown() takes after setting _stop, so shutdown() either refuses it or
-        sees it and waits for it before closing the store."""
-        return self._marked_call(rec, self._export_marked)
+        sees it and waits for it before closing the store.
+
+        At a speed other than 1 (one of SPEEDS) the WAV is slowed down or sped up
+        (openevp.stretch: keep_pitch, or tape-style), its marks moved to match, and
+        its name ends in the speed (<stem>_0.5x.wav, <stem>_0.5x-tape.wav without
+        keep_pitch); "speed-progress" events
+        ({"done", "total"}) report how far that is."""
+        at = _export_speed(speed, keep_pitch)
+        if at is None:
+            return _fail(BAD_SPEED)
+        return self._marked_call(rec, lambda entry: self._export_marked(entry, at))
 
     def clip_format(self):
         """The clip format, "mp3" or "wav" (clips.FORMATS): the one picked in this
@@ -981,19 +1017,55 @@ class Api(LibraryOps):
         self._clip_format = None if remembered else fmt
         return {"ok": True, "format": fmt, "remembered": remembered}
 
+    def playback_speed(self):
+        """{"playback_speed", "keep_pitch"}: the player's speed (one of SPEEDS) and whether
+        it keeps the pitch -- the ones picked in this session if they could not be
+        remembered, else the remembered ones, else 1.0 and True (each one on its own:
+        a damaged setting falls back to its default)."""
+        if self._playback is not None:
+            speed, keep = self._playback
+        else:
+            get = self._store.get_setting if self._store is not None else (lambda name: None)
+            speed, keep = _speed(get(PLAYBACK_SPEED)), get(KEEP_PITCH)
+            speed = 1.0 if speed is None else speed
+            keep = keep if isinstance(keep, bool) else True
+        return {"playback_speed": speed, "keep_pitch": keep}
+
+    def set_playback_speed(self, speed, keep_pitch):
+        """Pick the player's speed (one of SPEEDS) and whether it keeps the pitch, and
+        remember them. A window that cannot write the settings (a second window) uses
+        them for this session. {"ok", "playback_speed", "keep_pitch", "remembered"}."""
+        speed = _speed(speed)
+        if speed is None or not isinstance(keep_pitch, bool):
+            return _fail("Unknown playback speed.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(PLAYBACK_SPEED, speed)
+                self._store.set_setting(KEEP_PITCH, keep_pitch)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._playback = None if remembered else (speed, keep_pitch)
+        return {"ok": True, "playback_speed": speed, "keep_pitch": keep_pitch, "remembered": remembered}
+
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""
         return _fail(mp3.UNAVAILABLE) if fmt == "mp3" and not mp3.available() else None
 
-    def export_clips(self, rec, mark_id=None):
+    def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True):
         """Save each mark of the loaded recording (or only the mark mark_id) as its
         own clip (clip_format(): MP3 or WAV) into the Clips subfolder of the folder
         export_marked() would use: see openevp.clips. Never replaces a file (identical bytes count as
         already saved). Admitted, locked and waited for exactly as export_marked().
-        {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}."""
+        {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}.
+        speed, keep_pitch: clips at the player's speed (see export_marked())."""
         if mark_id is not None and not isinstance(mark_id, str):
             return _fail("That mark is no longer there.")
-        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id), CLIPS_BUSY, CLIPS_BUSY_UPDATE)
+        at = _export_speed(speed, keep_pitch)
+        if at is None:
+            return _fail(BAD_SPEED)
+        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id, at), CLIPS_BUSY, CLIPS_BUSY_UPDATE)
 
     def _marked_call(self, rec, work, busy=MARKED_BUSY, busy_update=MARKED_BUSY_UPDATE):
         """Run work(entry) for a loaded recording on the caller's thread, holding
@@ -1092,7 +1164,7 @@ class Api(LibraryOps):
         investigation = _investigation(path, self._library_path() if library is None else library)
         return os.path.join(dest, investigation) if investigation else dest
 
-    def _export_marked(self, entry):
+    def _export_marked(self, entry, at=NORMAL):
         marks = self._store.marks(entry["fp"])
         if not marks:
             return _fail("This recording has no marks yet.")
@@ -1101,7 +1173,24 @@ class Api(LibraryOps):
             return got
         wav, outdir, stem = got
         del got
+        speed, keep_pitch = at
         out_name = stem + ".wav"
+        if speed != 1:
+            out_name = stem + stretch.suffix(speed, keep_pitch) + ".wav"
+            try:
+                wav = stretch.change_speed(wav, speed, keep_pitch, should_stop=self._stop.is_set,
+                                           progress=self._speed_progress())
+            except stretch.Cancelled:
+                return _fail(CLOSING)
+            except ValueError as e:
+                return _fail(f"Could not change the speed of {entry['name']}: {e}")
+            except MemoryError:
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} at {speed:g}x.",
+                             "Close other programs and try again, or save it at normal speed.")
+            except Exception as e:
+                return _error(e)
+            marks = stretch.scale_marks(marks, speed)
         try:
             marked = wavinfo.marked_parts(wav, marks)
         except ValueError as e:
@@ -1119,7 +1208,19 @@ class Api(LibraryOps):
                 "folder_name": folder_name}
 
     # ---- EVP clips: one WAV per mark (openevp.clips) ----------------------------------
-    def _export_clips(self, entry, mark_id):
+    def _speed_progress(self):
+        """A progress(done, total) for stretch.change_speed: "speed-progress" events,
+        at most one per whole percent."""
+        last = [-1]
+
+        def progress(done, total):
+            pct = 100 * done // total if total else 100
+            if pct != last[0]:
+                last[0] = pct
+                self._emit("speed-progress", {"done": done, "total": total})
+        return progress
+
+    def _export_clips(self, entry, mark_id, at=NORMAL):
         src = entry["source"]
         if src.get("kind") == "file" and _is_clip(src["path"], self._library_path()):
             return _fail(CLIPS_AGAIN)                    # never a Clips folder inside a Clips folder
@@ -1141,27 +1242,32 @@ class Api(LibraryOps):
         del got
         outdir = os.path.join(outdir, CLIPS)
         try:
-            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt)
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
 
-    def _save_clips(self, wav, marks, outdir, stem, fmt="wav"):
-        """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"):
+    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL):
+        """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"), at
+        (speed, keep_pitch) (the name then ends in the speed: clips.name()):
         (saved, already there, file names, notes on clips not made). Raises OSError
         when a clip cannot be written."""
         saved = already = 0
         names, notes = [], []
         for m in marks:
             try:
-                clip = clips.make(wav, m, fmt)
+                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1])
             except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue
-            name = clips.name(stem, m, fmt=fmt)
+            except MemoryError:
+                notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut "
+                             "(not enough memory; close other programs and try again)")
+                continue
+            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1])
             if folders.too_long(os.path.join(outdir, name)):
-                name = clips.name(stem, m, with_note=False, fmt=fmt)   # the note is what can go
+                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1])   # the note can go
                 if folders.too_long(os.path.join(outdir, name)):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")
@@ -1276,7 +1382,7 @@ class Api(LibraryOps):
         skipped and reported. Events: "clips-progress", then "clips-done" (also when
         cancelled or closing) or "clips-failed" (a clip could not be written), sent
         once _busy is free again. dest, library: the Save-to and library folders
-        when the job started; fmt: the clip format then."""
+        when the job started; fmt: the clip format then. Always at normal speed."""
         saved = already = recordings = 0
         skipped, notes, outdirs, done_keys = [], [], [], set()
         outcome = []

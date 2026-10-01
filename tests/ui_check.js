@@ -81,7 +81,8 @@ class Element {
 const listeners = new Map();
 function listen(target, type, fn, capture) {
   if (!listeners.has(target)) listeners.set(target, []);
-  listeners.get(target).push({ type, fn, capture: !!(capture === true || (capture && capture.capture)) });
+  const l = { type, fn, capture: !!(capture === true || (capture && capture.capture)) }, all = listeners.get(target);
+  if (!all.some((x) => x.type === l.type && x.fn === l.fn && x.capture === l.capture)) all.push(l);   // as the DOM: once
 }
 function fire(targets, type, props = {}) {
   let stopped = false;
@@ -1156,6 +1157,241 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(wsLog, []);
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   assert.ok(!$("mark-evp").title.includes("MP3"));
+
+  // ---- playback speed: a slider over 0.25× … 2× next to Zoom and Height, with Keep pitch ----
+  // A media element and a WaveSurfer that play at its rate: time moves by dt × rate, and a region
+  // whose end is crossed fires region-out, as the regions plugin does on timeupdate.
+  const media = { playbackRate: 1, defaultPlaybackRate: 1, preservesPitch: true };
+  const rateLog = [];
+  let spPlaying = false, spTime = 0;
+  const spWs = new Proxy({
+    setPlaybackRate: (rate, keep) => { rateLog.push([rate, keep]); if (keep != null) media.preservesPitch = keep; media.playbackRate = rate; },
+    getMediaElement: () => media,
+    play: (t) => { spPlaying = true; if (t != null) spTime = t; }, pause: () => { spPlaying = false; },
+    stop: () => { throw new Error("a speed change must not stop playback"); },
+    isPlaying: () => spPlaying, getCurrentTime: () => spTime, getDuration: () => 3,
+    playPause: () => { spPlaying = !spPlaying; },
+    load: async () => { media.playbackRate = media.defaultPlaybackRate; },          // the HTML load algorithm
+  }, { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = spWs; context.__regions = fakeRegions;
+  vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
+  const speedCalls = [];
+  api.set_playback_speed = async (speed, keep) => { speedCalls.push([speed, keep]);
+                                                    return { ok: true, playback_speed: speed, keep_pitch: keep, remembered: true }; };
+  const speedState = () => JSON.parse(vm.runInContext("JSON.stringify([S.speed, S.keepPitch])", context));
+  const speedSaved = () => vm.runInContext("S.speedSave || Promise.resolve()", context);
+  const key = (k, target = document.body, extra = {}) => fire([document], "keydown", { key: k, target, ...extra });
+  const slide = (i) => { $("speed").value = String(i); $("speed").oninput(); };
+  const BACKSLASH = String.fromCharCode(92);
+  $("player-loaded").hidden = false;
+  // Startup: 1× and Keep pitch (capabilities() said nothing), the label plain.
+  assert.deepStrictEqual(speedState(), [1, true]);
+  assert.strictEqual($("speed").value, "3");
+  assert.strictEqual($("speed-value").textContent, "1×");
+  assert.ok(!$("speed-label").classList.contains("changed") && $("keep-pitch").checked);
+  assert.ok(html.includes(`[ slower, ] faster, ${BACKSLASH} back to 1×`), "the shortcuts are in its title");
+  assert.ok(/<input id="speed" type="range" min="0" max="6" step="1" value="3">/.test(html), "7 steps, 1× in the middle");
+  // The slider's steps: the label shows each, highlighted whenever it isn't 1×; it applies at once, mid-play.
+  spPlaying = true; spTime = 1.2;
+  const steps = [];
+  for (let i = 0; i <= 6; i++) {
+    slide(i);
+    steps.push([$("speed-value").textContent, $("speed-label").classList.contains("changed"), media.playbackRate]);
+  }
+  assert.deepStrictEqual(steps, [["0.25×", true, 0.25], ["0.5×", true, 0.5], ["0.75×", true, 0.75], ["1×", false, 1],
+                                 ["1.25×", true, 1.25], ["1.5×", true, 1.5], ["2×", true, 2]]);
+  assert.ok(spPlaying && spTime === 1.2, "still playing, from where it was");
+  assert.strictEqual(media.defaultPlaybackRate, 2);
+  assert.ok(rateLog.every(([, keep]) => keep === true), "Keep pitch on: preservesPitch stays true");
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls, [[2, true]]);              // remembered: one save, of the latest
+  slide(5); await new Promise((r) => setImmediate(r)); slide(4); slide(0);   // changes while a save is on its way
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls.slice(1), [[1.5, true], [0.25, true]]);   // saved after it, the last one last
+  slide(6); await speedSaved();
+  speedCalls.length = 0;
+  // Double-click resets it to 1×.
+  fire([$("speed")], "dblclick", { target: $("speed") });
+  assert.deepStrictEqual([speedState(), $("speed").value, $("speed-value").textContent, media.playbackRate], [[1, true], "3", "1×", 1]);
+  await speedSaved();
+  fire([$("speed")], "dblclick", { target: $("speed") });                          // already 1×: nothing to save
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls, [[1, true]]);
+  // Keep pitch off: tape-style (preservesPitch false), at the same speed; on again: true.
+  slide(1);
+  rateLog.length = 0; speedCalls.length = 0;
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  assert.deepStrictEqual([rateLog[rateLog.length - 1], media.preservesPitch, speedState()], [[0.5, false], false, [0.5, false]]);
+  $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  assert.deepStrictEqual([rateLog[rateLog.length - 1], media.preservesPitch], [[0.5, true], true]);
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls, [[0.5, true]]);           // off and on again before it was saved
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls, [[0.5, true], [0.5, false]]);
+  $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  await speedSaved();
+  assert.ok(spPlaying && spTime === 1.2);
+  // Keys: ] faster, [ slower (one step, stopping at the ends), \ back to 1×.
+  speedCalls.length = 0;
+  let ke = key("]");
+  assert.ok(ke.defaultPrevented);
+  assert.strictEqual(speedState()[0], 0.75);
+  key("["); key("["); key("["); key("[");
+  assert.strictEqual(speedState()[0], 0.25);
+  key(BACKSLASH);
+  assert.strictEqual(speedState()[0], 1);
+  for (let i = 0; i < 9; i++) key("]");
+  assert.strictEqual($("speed-value").textContent, "2×");
+  key(BACKSLASH);
+  // … but not while typing (a note, the mark form, a menu), with Ctrl, or with the player empty.
+  for (const tag of ["input", "textarea", "select"]) {
+    ke = key("]", document.createElement(tag));
+    assert.ok(!ke.defaultPrevented && speedState()[0] === 1, tag);
+  }
+  const rangeEl = document.createElement("input"); rangeEl.type = "range";
+  key("]", rangeEl);                                                                // the slider itself focused: it works
+  assert.strictEqual(speedState()[0], 1.25);
+  key(BACKSLASH, document.body, { ctrlKey: true });
+  assert.strictEqual(speedState()[0], 1.25);
+  $("player-loaded").hidden = true;
+  key(BACKSLASH);
+  assert.strictEqual(speedState()[0], 1.25);
+  $("player-loaded").hidden = false;
+  await speedSaved();
+  assert.deepStrictEqual(speedCalls, [[1.25, true]]);
+  // A refused save says why, and the speed stays (it applies for now).
+  api.set_playback_speed = async () => ({ ok: false, error: "Unknown playback speed." });
+  slide(1);
+  await speedSaved();
+  assert.ok($("banner-text").textContent.includes("Unknown playback speed."));
+  assert.strictEqual(media.playbackRate, 0.5);
+  context.banner("");
+  api.set_playback_speed = async (speed, keep) => { speedCalls.push([speed, keep]);
+                                                    return { ok: true, playback_speed: speed, keep_pitch: keep, remembered: false }; };
+  // A new recording keeps the speed (a load resets playbackRate to defaultPlaybackRate, the speed).
+  await context.loadIntoPlayer(vm.runInContext("S.playSeq", context), "Recording A-002",
+                               { rec: "h9", duration: 3, fp: null, marks: [], url: "u", peaks: [], rate: 8000, channels: 1,
+                                 backup: { status: null, detail: "" }, reviewed: false }, false);
+  assert.deepStrictEqual([speedState(), media.playbackRate, $("speed-value").textContent], [[0.5, true], 0.5, "0.5×"]);
+  // An MP3 clip (compressed: decoded by the page) the same.
+  slide(6);
+  await context.loadIntoPlayer(vm.runInContext("S.playSeq", context), "x_EVP-B_00m01.0s.mp3",
+                               { rec: "h10", duration: 3, fp: null, marks: [], url: "u2", rate: 44100, channels: 1, compressed: true,
+                                 markable: false, mark_reason: mp3Reason, backup: { status: null, detail: "" }, reviewed: false }, false);
+  assert.deepStrictEqual([speedState(), media.playbackRate], [[2, true], 2]);
+  // The remembered setting comes from capabilities() at startup: setupSpeed() applies it.
+  vm.runInContext(`S.caps = { ...S.caps, playback_speed: 0.75, keep_pitch: false }; setupSpeed();`, context);
+  assert.deepStrictEqual([speedState(), $("speed").value, media.playbackRate, media.preservesPitch, $("keep-pitch").checked],
+                         [[0.75, false], "2", 0.75, false, false]);
+  vm.runInContext(`S.caps = { ...S.caps, playback_speed: 3, keep_pitch: "x" }; setupSpeed();`, context);   // damaged: 1×, Keep pitch
+  assert.deepStrictEqual(speedState(), [1, true]);
+  // ---- exports at the current speed: "Exports at 0.5×" beside the speed, only when it isn't 1× ----
+  const exportShown = () => [$("export-speed-label").hidden, $("export-speed").checked, $("export-speed-text").textContent];
+  assert.deepStrictEqual(exportShown().slice(0, 1), [true], "hidden at 1×");
+  slide(1);
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.5×"]);           // ticked when it leaves 1×
+  slide(0);
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.25×"]);
+  $("export-speed").checked = false; $("export-speed").onchange();                 // unticked: it stays so …
+  slide(1);
+  assert.deepStrictEqual(exportShown(), [false, false, "Exports at 0.5×"]);
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [1, true]);
+  slide(3);
+  assert.deepStrictEqual(exportShown().slice(0, 1), [true]);
+  slide(1);                                                                         // … until it is back at 1×
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.5×"]);
+  // After a restart at a remembered 0.5×: the speed is kept, the box shows but is NOT ticked (exports at 1×);
+  // only moving the speed off 1× in this session ticks it.
+  vm.runInContext(`S.caps = { ...S.caps, playback_speed: 0.5, keep_pitch: true }; setupSpeed();`, context);
+  assert.deepStrictEqual([speedState(), exportShown()], [[0.5, true], [false, false, "Exports at 0.5×"]]);
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [1, true]);
+  slide(2);                                                                         // 0.5× -> 0.75×: still not ticked
+  assert.deepStrictEqual(exportShown(), [false, false, "Exports at 0.75×"]);
+  slide(3); slide(1);                                                               // off 1× by the user: ticked
+  assert.deepStrictEqual(exportShown(), [false, true, "Exports at 0.5×"]);
+  vm.runInContext(`S.caps = { ...S.caps, playback_speed: 1, keep_pitch: true };`, context);
+  // The player's exports pass the speed and Keep pitch: Export WAV with marks (with progress), Export clips and
+  // Save clip; at 1×, or with the box unticked, 1 and true. The library's Export clips never passes a speed.
+  const speedExports = [];
+  const savedExports = { marked: api.export_marked, clips: api.export_clips, files: api.export_clips_files };
+  let finishMarked = null;
+  api.export_marked = (...a) => { speedExports.push(["marked", ...a]);
+                                  return new Promise((res) => { finishMarked = () => res({ ok: true, saved: true, already: false, name: "x_0.5x.wav", folder_name: "" }); }); };
+  api.export_clips = async (...a) => { speedExports.push(["clips", ...a]); return { ok: true, saved: 1, already: 0, names: [], notes: [], folder: null }; };
+  api.export_clips_files = async (...a) => { speedExports.push(["files", ...a]); return { ok: true, job: a[1] }; };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 1, exists: false, truncated: false,
+                                    indexing: false, pending: 0, files: [], folders: [] });
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  loadMarked("h12", [{ id: "e1", start: 1, end: 1.5, cls: "A", note: "" }]);
+  const marking = context.exportMarked();
+  assert.strictEqual($("status").textContent, "Saving a WAV with the marks at 0.5×…");
+  window.onBackendEvent("speed-progress", { done: 50, total: 200 });
+  assert.deepStrictEqual([$("status").textContent, $("progress").hidden, $("progress-fill").style.width],
+                         ["Saving a WAV with the marks at 0.5×… 25%", false, "25%"]);
+  finishMarked(); await marking;
+  assert.deepStrictEqual([$("status").textContent, $("progress").hidden], ["", true]);
+  window.onBackendEvent("speed-progress", { done: 50, total: 200 });              // a late one: ignored
+  assert.strictEqual($("status").textContent, "");
+  await context.exportClips(null);
+  await context.exportClips({ id: "e1" });
+  await context.exportLibraryClips({ files: ["f1"] }, "one.wav");
+  assert.ok($("banner-text").textContent.includes("Exporting the clips of one.wav…"));
+  window.onBackendEvent("clips-done", { job: vm.runInContext("S.clips.job", context), saved: 0, already: 0, recordings: 0,
+                                         skipped: [], notes: [], folder: null, cancelled: false });
+  $("export-speed").checked = false; $("export-speed").onchange();
+  await context.exportClips(null);
+  slide(3); $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  await context.exportClips(null);
+  const libJob = vm.runInContext("S.clips.job", context) + 1;
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(speedExports)), [
+    ["marked", "h12", 0.5, false], ["clips", "h12", null, 0.5, false], ["clips", "h12", "e1", 0.5, false],
+    ["files", ["f1"], libJob - 1], ["clips", "h12", null, 1, true], ["clips", "h12", null, 1, true]]);
+  slide(1);
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [0.5, true]);
+  $("player-loaded").hidden = true;                                                // no player, no box shown: normal speed
+  assert.deepStrictEqual(Array.from(context.exportSpeed()), [1, true]);
+  $("player-loaded").hidden = false;
+  slide(3);
+  Object.assign(api, { export_marked: savedExports.marked, export_clips: savedExports.clips, export_clips_files: savedExports.files });
+  context.banner("");
+  // Looping still triggers at 0.5× and 2×: the selection's loop and a mark's loop, via the fake regions.
+  for (const idx of [1, 6]) {
+    slide(idx);
+    const rate = media.playbackRate;
+    vm.runInContext(`clearSelection(); setCurrent(null);`, context);
+    loadMarked("h11", [{ id: "s1", start: 1, end: 1.5, cls: "A", note: "" }]);
+    const run = (r, seconds) => {                         // play on for some wall-clock seconds at the media's rate
+      let outs = 0;
+      for (let tw = 0; tw < seconds; tw += 0.05) {
+        const before = spTime;
+        spTime += 0.05 * rate;
+        if (before < r.end && spTime >= r.end) {
+          outs++;
+          const n = wsLog.length;
+          context.regionOut(r);
+          if (wsLog.length > n && wsLog[wsLog.length - 1][1] === r.id) spTime = r.start;   // replayed from its start
+        }
+      }
+      return outs;
+    };
+    loopBtn(0).onclick(ev);
+    spTime = 1; spPlaying = true;
+    const markOuts = run(reg("s1"), 0.5 / rate * 3 + 0.2);   // three passes' worth of wall-clock time
+    assert.ok(markOuts >= 3 && spTime >= 1 && spTime < 1.5 + 0.05 * rate, `mark loop at ${rate}×: ${markOuts}`);
+    const loopSel = fakeRegions.addRegion({ id: `selsp${idx}`, start: 2, end: 2.5 });
+    context.regionCreated(loopSel);
+    $("loop-selection").checked = true;
+    spTime = 2;
+    const selOuts = run(loopSel, 0.5 / rate * 3 + 0.2);
+    assert.ok(selOuts >= 3 && spTime >= 2 && spTime < 2.5 + 0.05 * rate, `selection loop at ${rate}×: ${selOuts}`);
+    assert.strictEqual(media.playbackRate, rate, "a replay keeps the speed");
+    wsLog.length = 0;
+    context.playbackFinished();                                                    // the end of the file: it loops too
+    assert.deepStrictEqual(wsLog, [["play", `selsp${idx}`, undefined]]);
+    $("loop-selection").checked = false;
+  }
+  vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   console.log("ok");
