@@ -811,5 +811,68 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
   assert.deepStrictEqual(menuItems()[3], ["Export clips", true]);                  // no marks: nothing to cut
   press("Escape");
+
+  // A Clips folder OpenEVP made: listed with its own icon and "Clips" tag, its clips counted apart and
+  // playable, but never EVPs (even one marked in the player): no chips, no filter, no count, not in the
+  // All recordings view; Export clips is off for it and its clips; recordings can't be moved into it.
+  const clipFolders = [...libFolders, { id: "fc", name: "Clips", rel: ["Clips"], parent: "root", clips: true, in_clips: true }];
+  const marked = (f, A) => ({ ...f, marks: { A, B: 0, C: 0 } });
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 60, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: clipFolders,
+                                    files: [marked(libFile("r1", "a.wav", "root", "fp1"), 1),
+                                            { ...marked(libFile("c1", "a_EVP-A_00m01.0s.wav", "fc", "fpc1"), 2), clip: true },
+                                            { ...libFile("c2", "a_EVP-A_00m02.0s.wav", "fc", "fpc2"), clip: true }] });
+  await context.loadLibrary();
+  await settle();
+  assert.strictEqual($("library-count").textContent, "(1)");                       // recordings only
+  const clipsRow = folderRow("fc");
+  assert.ok(clipsRow.classList.contains("lib-clips"));
+  assert.strictEqual(clipsRow.cells[1].textContent, "🎞️ Clips Clips2 clips");
+  assert.strictEqual(clipsRow.cells[1].children[0].children[1].className, "badge badge-clips");
+  assert.strictEqual(clipsRow.cells[5].textContent, "", "no EVP chips for clips");
+  assert.match(clipsRow.title, /not counted as EVPs/);
+  assert.ok(!folderRow("f1").classList.contains("lib-clips"));
+  assert.strictEqual(folderRow("f1").cells[1].textContent, "📁 Old MillNo recordings");
+  rightClick(clipsRow.cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false], ["Export clips", true]]);
+  assert.strictEqual(menu.children[3].title, "These are clips already");
+  press("Escape");
+  // "Has EVPs": the recording, not the folder of (marked) clips.
+  vm.runInContext(`S.lib.filter = "evp"; renderLibrary();`, context);
+  assert.deepStrictEqual(rowsNow().map((r) => r.folderId || r.group.main.id), ["r1"]);
+  vm.runInContext(`S.lib.filter = "all"; renderLibrary();`, context);
+  // Moving the recording: the Clips folder is not offered, nor a drop target.
+  rightClick(recRow("r1").cells[1]);
+  choose("Move to…");
+  assert.ok(pick("fc").disabled && pick("fc").title === "A Clips folder is for EVP clips only");
+  assert.ok(!pick("f1").disabled);
+  context.closeFolderDialog();
+  vm.runInContext(`S.drag = { ids: ["r1"] };`, context);
+  assert.strictEqual(context.dropTarget({ target: clipsRow.cells[1] }), null);
+  assert.strictEqual(context.dropTarget({ target: folderRow("f1").cells[1] }), folderRow("f1"));
+  vm.runInContext(`S.drag = null;`, context);
+  // Inside it: the clips, each "Clip" in the EVP column; one plays; Export clips is off.
+  context.openLibraryFolder("fc");
+  await settle();
+  assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["c1", "c2"]);
+  const clipRow = recRow("c1");
+  assert.ok(clipRow.classList.contains("lib-clip"));
+  assert.strictEqual(clipRow.cells[5].textContent, "Clip");
+  assert.match(clipRow.cells[5].title, /2 marks of its own, not counted as EVPs/);
+  assert.strictEqual(recRow("c2").cells[5].textContent, "Clip");
+  rightClick(clipRow.cells[1]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
+  assert.strictEqual(menu.children[3].title, "This is a clip already");
+  press("Escape");
+  ops.length = 0;
+  clipRow.onclick();
+  await settle();
+  assert.deepStrictEqual(ops, [["play", "c1"]]);
+  // The All recordings view: recordings only.
+  vm.runInContext(`S.lib.flat = true; renderLibrary();`, context);
+  assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["r1"]);
+  vm.runInContext(`S.lib.flat = false; renderLibrary();`, context);
+  context.openLibraryFolder("root");
+  await settle();
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

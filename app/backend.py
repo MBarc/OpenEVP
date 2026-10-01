@@ -37,6 +37,9 @@ the scan_id of the list_library() call that started it.
 EVP clips (one WAV per mark, openevp.clips) go into a Clips subfolder of the
 folder a WAV with marks goes into: export_clips() for the loaded recording (like
 export_marked()), and a background job for library recordings or folders.
+The Clips folders it creates hold a marker file: the library lists their clips
+(playable, in the folder view only) but never imports their markers, never
+counts them as EVPs and never cuts clips from them again.
 
 Library folders can be created, renamed and deleted (to the Recycle Bin only),
 and recordings moved between them: see app/library_ops.py (mixed into Api) and
@@ -59,10 +62,10 @@ from .updater import UpdateCancelled
 from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
-                          _clips_folder, _make_clips_folder, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
+                          _clips_folder, _is_clip, _make_clips_folder, _under_clips, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
                           _kind_format,
                           _plain)
-from .library_ops import (BACKUP_RECYCLED, CLIPS, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
+from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -171,7 +174,7 @@ def _wav_length(f):
         return w.getnframes() / w.getframerate() if w.getframerate() else None
 
 
-def _scan_library(folder):
+def _scan_library(folder, clips=None):
     """([(investigation, name, kind, path, stat, folder_rel)], [folder_rel, ...],
     truncated, complete): every recording file (an extension in openevp.formats:
     .dvf, .wav...) in folder and all its subfolders -- a
@@ -179,8 +182,11 @@ def _scan_library(folder):
     stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
-    hidden or system (AppData, $RECYCLE.BIN...) and the Clips folders OpenEVP made
-    (they hold its marker file) are skipped. complete is
+    hidden or system (AppData, $RECYCLE.BIN...) are skipped. The Clips folders
+    OpenEVP made (they hold its marker file) are skipped too when clips is None
+    (an Export clips job: clips are never cut again); with a set, they are walked
+    and clips gets the folder_rel of each of them and of every folder inside one
+    (its files are clips: listed and playable, never counted as EVPs). complete is
     False when a folder could not be read (its files are missing from the
     list). investigation is the first folder under `folder` ("" for files
     directly in it). The folders list holds every subfolder walked (including
@@ -207,10 +213,13 @@ def _scan_library(folder):
                 if folders.entry_is_link(e):
                     continue
                 if e.is_dir():
-                    # AppData, System Volume Information..., and the Clips folders OpenEVP made (EVP
-                    # clips: output for sharing, never listed, indexed or counted, markers never imported)
-                    if not folders.entry_is_hidden(e) and not _clips_folder(e.path):
-                        subdirs.append(e)
+                    # AppData, System Volume Information...; the Clips folders OpenEVP made
+                    # only when the caller takes clips (an Export clips job does not)
+                    if folders.entry_is_hidden(e):
+                        continue
+                    if clips is None and _clips_folder(e.path):
+                        continue
+                    subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
                 if not kind or _kind_format(kind) is None or not e.is_file():
@@ -223,6 +232,8 @@ def _scan_library(folder):
                 return found[:SAVED_LIMIT], subfolders, True, complete
         for d in subdirs:
             subfolders.append(rel + (d.name,))
+            if clips is not None and (rel in clips or _clips_folder(d.path)):
+                clips.add(rel + (d.name,))
         for d in reversed(subdirs):
             stack.append((d.path, investigation or d.name, rel + (d.name,)))
     return found, subfolders, False, complete
@@ -1105,12 +1116,16 @@ class Api(LibraryOps):
                 return _fail(LIB_CHANGED)
             if path not in paths:
                 paths.append(path)
+        root = self._library_path()
+        paths = [p for p in paths if not _is_clip(p, root)]       # clips are never cut again
+        if not paths:
+            return _fail(CLIPS_AGAIN)
         return self._start_clips(lambda: [(p, "") for p in paths], None, job)
 
     def export_clips_folder(self, folder_id, job):
         """Export the clips of every marked recording in a library folder and all its
-        subfolders as a background job (the Clips folders OpenEVP made are left out,
-        as the library leaves them out); see _clips_job."""
+        subfolders as a background job (the Clips folders OpenEVP made are left out:
+        clips are never cut again; a Clips folder itself is refused); see _clips_job."""
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1121,6 +1136,8 @@ class Api(LibraryOps):
         refused = self._usable(root, path, allow_root=True)
         if refused:
             return refused
+        if _under_clips(path, root):
+            return _fail(CLIPS_AGAIN)
 
         def work():
             files = _scan_library(path)[0]                 # never inside a Clips folder of OpenEVP's
@@ -1348,9 +1365,10 @@ class Api(LibraryOps):
         return None
 
     # ---- files on disk (library files and WAVs opened from the file dialog) -------
-    def _play_file(self, path):
+    def _play_file(self, path, root=None):
         """The player's result for a .wav (served in place, its embedded markers
-        imported once) or another recording file, e.g. a .dvf (decoded through the
+        imported once unless it is a clip: see _is_clip, with root the library
+        folder) or another recording file, e.g. a .dvf (decoded through the
         audio server by its format's decoder), on disk."""
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
@@ -1361,7 +1379,7 @@ class Api(LibraryOps):
             if fmt is None or fmt is formats.WAV:
                 info = self._server.prepare_file(path)
                 source["stat"] = info.pop("stat", None)
-                imported = self._import_markers(path, info, name, source["stat"])
+                imported = 0 if _is_clip(path, root) else self._import_markers(path, info, name, source["stat"])
                 return self._loaded(info, name, name, source, {"name": name, "imported": imported})
             problem = _decoder_problem(fmt)
             if problem:
@@ -1398,7 +1416,7 @@ class Api(LibraryOps):
             return _fail(f"Could not open {os.path.basename(path)}: {_plain(e)}")
         name = os.path.basename(path)
         stat = info.pop("stat", None)
-        imported = self._import_markers(path, info, name, stat)
+        imported = 0 if _is_clip(path) else self._import_markers(path, info, name, stat)
         return self._loaded(info, name, name, {"kind": "file", "path": path, "stat": stat},
                             {"name": name, "imported": imported})
 
@@ -1461,13 +1479,15 @@ class Api(LibraryOps):
                     self._lib_job = None
             return result
         root_identity = _root_identity(folder)  # before the walk: what the folder ids point into
-        found, subfolders, truncated, complete = _scan_library(folder)
+        clip_rels = set()                       # the Clips folders OpenEVP made, and the folders in them
+        found, subfolders, truncated, complete = _scan_library(folder, clip_rels)
         store = self._store
         summary = store.summary() if store is not None else {}
         table, files, pending = {}, [], []
         for investigation, name, kind, path, st, rel in found:
             fid = _file_id(path)
             table[fid] = path
+            clip = rel in clip_rels
             fp = error = seconds = unplayable = None
             fmt = _kind_format(kind)
             cached = None
@@ -1486,7 +1506,7 @@ class Api(LibraryOps):
             elif store is None:
                 seconds = _seconds(path, kind)
             elif cached is None:
-                pending.append((fid, path, kind, st.st_size, st.st_mtime_ns))
+                pending.append((fid, path, kind, st.st_size, st.st_mtime_ns, clip))
             else:
                 fp, error, seconds = cached.get("fp"), cached.get("error"), cached.get("seconds")
             s = summary.get(fp) if fp else None
@@ -1494,15 +1514,18 @@ class Api(LibraryOps):
                           "seconds": seconds,
                           "modified": datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
                           "fp": fp, **_marks_row(s or {}, s and s["reviewed"], s and s["notes"]),
-                          "error": error, "unplayable": unplayable, "folder_id": _folder_id(rel)})
+                          "error": error, "unplayable": unplayable, "folder_id": _folder_id(rel), "clip": clip})
         folder_table = {"root": folder}
         folder_rows = [{"id": "root", "parent": None, "name": os.path.basename(os.path.normpath(folder)),
-                        "rel": []}]
+                        "rel": [], "in_clips": False, "clips": False}]
         for parts in sorted(subfolders, key=lambda p: tuple(part.lower() for part in p)):
             fid = _folder_id(parts)
             folder_table[fid] = os.path.join(folder, *parts)
+            # clips: a Clips folder OpenEVP made (inside another one, just a folder of clips);
+            # in_clips: its files are clips (it is one, or inside one)
             folder_rows.append({"id": fid, "parent": _folder_id(parts[:-1]), "name": parts[-1],
-                                "rel": list(parts)})
+                                "rel": list(parts), "in_clips": parts in clip_rels,
+                                "clips": parts in clip_rels and parts[:-1] not in clip_rels})
         if store is not None and not store.read_only:
             try:
                 # Files past the limit, or in a folder that could not be read, were
@@ -1582,10 +1605,10 @@ class Api(LibraryOps):
         unflushed = 0
         try:
             problems = _decoder_problems(p[2] for p in pending)
-            for done, (fid, path, kind, size, mtime_ns) in enumerate(pending, 1):
+            for done, (fid, path, kind, size, mtime_ns, clip) in enumerate(pending, 1):
                 if superseded():
                     return
-                row, stored = self._index_file(path, kind, size, mtime_ns, cancelled, problems.get(kind))
+                row, stored = self._index_file(path, kind, size, mtime_ns, cancelled, problems.get(kind), clip)
                 if stored:
                     unflushed += 1
                     if unflushed >= INDEX_FLUSH_EVERY:
@@ -1645,9 +1668,10 @@ class Api(LibraryOps):
         except (StoreReadOnly, StoreUnavailable):
             return False
 
-    def _index_file(self, path, kind, size, mtime_ns, cancelled, decoder_problem):
+    def _index_file(self, path, kind, size, mtime_ns, cancelled, decoder_problem, clip=False):
         """(the library-row fields or None, whether the store's index was written)
-        for one file. None only when the decode was cancelled."""
+        for one file. None only when the decode was cancelled. A clip's markers are
+        never imported (it is an EVP already)."""
         name = os.path.basename(path)
         hit = self._cached_fp(path, size, mtime_ns)
         if hit is not None:                     # done by the job this one took over from
@@ -1698,7 +1722,7 @@ class Api(LibraryOps):
                     "unplayable": None, **_marks_row({}, False, "")}, False
         seconds = round(length, 1) if length else _seconds(path, kind)
         stored = cacheable and self._remember_fp(path, size, mtime_ns, fp, seconds, error)
-        if kind == "wav" and fp and length:     # an empty WAV gets no marks (no identity of its own)
+        if kind == "wav" and fp and length and not clip:   # an empty WAV gets no marks (no identity of its own)
             self._import_markers(path, {"fp": fp, "duration": length}, name, (size, mtime_ns))
         return {"fp": fp, "seconds": seconds, "error": error, "unplayable": unplayable,
                 **self._fp_marks(fp)}, stored
@@ -1720,8 +1744,9 @@ class Api(LibraryOps):
             return self._library.get(file_id)
 
     def play_library(self, file_id):
-        """Prepare a library file (by id from list_library) for the player."""
-        return self._play_file(self._library_file(file_id))
+        """Prepare a library file (by id from list_library) for the player. A clip
+        plays like any WAV; its markers are never imported (it is an EVP already)."""
+        return self._play_file(self._library_file(file_id), root=self._library_path())
 
     def library_marks(self, file_id):
         """The marks of a library file's recording, by its cached fingerprint

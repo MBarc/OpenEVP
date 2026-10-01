@@ -634,8 +634,8 @@ class DeleteTests(FolderApiBase):
         self.write("b.wav", wav_bytes(b"b"))
         real = backend._scan_library
 
-        def overlapped(folder):
-            found = real(folder)
+        def overlapped(folder, clips=None):
+            found = real(folder, clips)
             with api._lib_lock:
                 api._fs_gen += 2                                          # an operation started and ended
             return found
