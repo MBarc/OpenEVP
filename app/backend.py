@@ -82,6 +82,8 @@ BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then upda
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
 CLIPS_BUSY = "Wait for the export to finish, then export the clips."
+SAVE_TO_CLIPS = ("That folder is inside a Clips folder, which is for EVP clips only. "
+                 "Choose another folder to save recordings to.")
 CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 
 
@@ -151,7 +153,7 @@ def _investigation(path, library):
     return parts[0]
 
 
-SAVED_LIMIT = 5000          # the library lists at most this many files (the page says so)
+SAVED_LIMIT = 5000          # the library lists at most this many recordings, and this many clips (the page says so)
 
 
 def _seconds(path, kind):
@@ -179,7 +181,9 @@ def _scan_library(folder, clips=None):
     truncated, complete): every recording file (an extension in openevp.formats:
     .dvf, .wav...) in folder and all its subfolders -- a
     folder's files first (by name), then its subfolders in name order. Walking
-    stops as soon as more than SAVED_LIMIT files were found. Symlinked folders
+    stops as soon as more than SAVED_LIMIT recordings were found (clips do not
+    count: at most SAVED_LIMIT of them are listed, and never at the cost of a
+    recording; more is reported as truncated too). Symlinked folders
     and junctions are not followed (no loops); names starting with "." (Mac
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
     hidden or system (AppData, $RECYCLE.BIN...) are skipped. The Clips folders
@@ -196,6 +200,8 @@ def _scan_library(folder, clips=None):
     found = []
     subfolders = []
     complete = True
+    recordings = listed_clips = 0
+    clips_cut = False                           # clips were left off past their own limit
     stack = [(folder, "", ())]
     while stack:
         where, investigation, rel = stack.pop()
@@ -227,16 +233,24 @@ def _scan_library(folder, clips=None):
                 st = e.stat()
             except OSError:
                 continue
+            if clips is not None and rel in clips:  # a clip: never pushes a recording off the list
+                if listed_clips >= SAVED_LIMIT:
+                    clips_cut = True
+                    continue
+                listed_clips += 1
+                found.append((investigation, e.name, kind, e.path, st, rel))
+                continue
+            recordings += 1
+            if recordings > SAVED_LIMIT:
+                return found, subfolders, True, complete
             found.append((investigation, e.name, kind, e.path, st, rel))
-            if len(found) > SAVED_LIMIT:
-                return found[:SAVED_LIMIT], subfolders, True, complete
         for d in subdirs:
             subfolders.append(rel + (d.name,))
             if clips is not None and (rel in clips or _clips_folder(d.path)):
                 clips.add(rel + (d.name,))
         for d in reversed(subdirs):
             stack.append((d.path, investigation or d.name, rel + (d.name,)))
-    return found, subfolders, False, complete
+    return found, subfolders, clips_cut, complete
 
 
 def _marks_row(counts, reviewed, notes):
@@ -1054,6 +1068,9 @@ class Api(LibraryOps):
 
     # ---- EVP clips: one WAV per mark (openevp.clips) ----------------------------------
     def _export_clips(self, entry, mark_id):
+        src = entry["source"]
+        if src.get("kind") == "file" and _is_clip(src["path"], self._library_path()):
+            return _fail(CLIPS_AGAIN)                    # never a Clips folder inside a Clips folder
         marks = self._store.marks(entry["fp"])
         if mark_id is not None:
             marks = [m for m in marks if m.get("id") == mark_id]
@@ -1853,11 +1870,15 @@ class Api(LibraryOps):
 
     def choose_destination(self):
         """Let the user pick the save folder, starting in the current one; returns it
-        (or None if cancelled). The choice is remembered for the next start."""
+        (or None if cancelled). The choice is remembered for the next start. A
+        folder inside a Clips folder OpenEVP made is refused (a failure dict):
+        recordings saved there would be taken for clips."""
         try:
             picked = self._pick(self._start_folder())
         except Exception:                       # the dialog failed; keep the current folder
             return None
+        if picked and _under_clips(picked):
+            return _fail(SAVE_TO_CLIPS)
         if picked:
             with self._dest_lock:
                 self._dest = picked

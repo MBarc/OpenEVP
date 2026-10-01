@@ -632,6 +632,51 @@ class ClipsFoldersInTheLibraryTests(tf.FolderApiBase):
         self.assertTrue(os.path.isfile(os.path.join(self.tmp, "bin-1", "c.wav")))
         self.assertEqual(self.names(), ["Case", "Other"])
 
+    def test_clips_never_push_recordings_off_the_list(self):
+        library_ops._make_clips_folder(os.path.join(self.lib, "A Clips"))     # walked before the recordings
+        for i in range(4):
+            self.write(f"A Clips/c{i}.wav", tm.wav_bytes(b"clip %d" % i))
+        for i in range(3):
+            self.write(f"B/r{i}.wav", tm.wav_bytes(b"rec %d" % i))
+        api = self.new_api()
+        with mock.patch.object(backend, "SAVED_LIMIT", 3):
+            r = api.list_library()
+            self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]), ["r0.wav", "r1.wav", "r2.wav"])
+            self.assertEqual(sorted(f["name"] for f in r["files"] if f["clip"]), ["c0.wav", "c1.wav", "c2.wav"])
+            self.assertTrue(r["truncated"])                                     # a clip was left off
+            os.remove(os.path.join(self.lib, "A Clips", "c3.wav"))
+            r = api.list_library()
+            self.assertEqual((len(r["files"]), r["truncated"]), (6, False))      # 3 recordings + 3 clips: all there
+            self.write("B/r3.wav", tm.wav_bytes(b"rec 3"))
+            r = api.list_library()
+            self.assertEqual(len([f for f in r["files"] if not f["clip"]]), 3)
+            self.assertTrue(r["truncated"])
+
+    def test_save_to_inside_a_clips_folder_is_refused(self):
+        self.populate()
+        api = self.new_api()
+        before = api.default_destination()
+        for rel in (("Case", "Clips"), ("Case", "Clips", "Deeper")):
+            picked = os.path.join(self.lib, *rel)
+            api._pick = lambda start, picked=picked: picked
+            self.assertEqual(api.choose_destination(), {**backend._fail(backend.SAVE_TO_CLIPS)})
+            self.assertEqual(api.default_destination(), before)
+            self.assertNotEqual(self.store.get_setting("save_folder"), picked)
+        ordinary = os.path.join(self.lib, "Other", "Clips")                      # the user's own: fine
+        api._pick = lambda start: ordinary
+        self.assertEqual(api.choose_destination(), ordinary)
+
+    def test_the_player_never_cuts_clips_from_a_clip(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        loaded = api.play_library(self.file(r, "a.wav"))
+        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "")["ok"])
+        res = api.export_clips(loaded["rec"])
+        self.assertEqual((res["ok"], res["error"]), (False, library_ops.CLIPS_AGAIN))
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "Case", "Clips", "Clips")))
+        self.assertFalse(api._busy.locked())
+
     def test_recordings_cannot_be_moved_into_a_clips_folder(self):
         self.populate()
         api = self.new_api()

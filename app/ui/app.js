@@ -1960,6 +1960,7 @@ function updateExport() {
 
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
+  if (d && d.ok === false) { showError(d); return; }   // refused (a folder inside a Clips folder)
   if (d) { setDest(d); loadLibrary(); }   // the library may be the save folder
 };
 

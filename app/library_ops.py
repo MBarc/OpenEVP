@@ -41,7 +41,7 @@ CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library l
                      b"counts them as EVPs while this file is here; delete this file to treat them as "
                      b"recordings.\r\n")
 CLIPS_ONLY = "A Clips folder is for EVP clips only. Move recordings to another folder."
-CLIPS_AGAIN = "That folder holds EVP clips; clips are not cut from clips."
+CLIPS_AGAIN = "That is an EVP clip (or a folder of them); clips are not cut from clips."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
