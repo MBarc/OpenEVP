@@ -491,6 +491,8 @@ class Api(LibraryOps):
         self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
         self._noise = OrderedDict()           # noise profile id -> (fp, openevp.denoise.Profile), this session only
         self._denoising = {}                  # reduce_noise() job -> its cancel Event
+        self._spec_lock = threading.Lock()
+        self._spec_jobs = {}                  # url -> {"cancel", "done" (Events), "result"}: spectrograms being made
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -724,6 +726,10 @@ class Api(LibraryOps):
                  "source": source, "url": info.get("url"), "variants": set()}
         with self._recs_lock:
             _bounded_put(self._recs, rec, entry)
+        pin = getattr(self._server, "pin", None)
+        if pin is not None and entry["url"]:
+            pin([entry["url"]])                           # the player's recording now; earlier pins end
+        self._cancel_spectrograms()
         return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"], source)}
 
     def _marks_state(self, fp, source=None):
@@ -1172,12 +1178,38 @@ class Api(LibraryOps):
             return _fail(CLOSING)
         try:
             found = self._server.spectrogram_of(url)
-            if found is None:
-                with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
-                    spec = spectrogram.compute(reader, should_stop=self._stop.is_set)
-                found = self._server.add_spectrogram(url, spec), spec
+        except ValueError as e:
+            return _fail(f"No spectrogram for {entry['name']}: {_plain(e)}")
+        if found is not None:
+            return {"ok": True, "tiles": found[0], **found[1].info()}
+        # One job per URL: a second request waits for it. A request for other audio (another
+        # version, another recording) supersedes the jobs running: they are cancelled.
+        with self._spec_lock:
+            job = self._spec_jobs.get(url)
+            mine = job is None
+            if mine:
+                for other in self._spec_jobs.values():
+                    other["cancel"].set()
+                job = self._spec_jobs[url] = {"cancel": threading.Event(), "done": threading.Event(), "result": None}
+        if not mine:
+            job["done"].wait()
+            return job["result"]
+        try:
+            job["result"] = self._make_spectrogram(entry, url, job["cancel"])
+        finally:
+            with self._spec_lock:
+                if self._spec_jobs.get(url) is job:
+                    del self._spec_jobs[url]
+            job["done"].set()
+        return job["result"]
+
+    def _make_spectrogram(self, entry, url, cancel):
+        try:
+            with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
+                spec = spectrogram.compute(reader, should_stop=lambda: self._stop.is_set() or cancel.is_set())
+            found = self._server.add_spectrogram(url, spec), spec
         except spectrogram.Cancelled:
-            return _fail(CLOSING)
+            return {"ok": False, "cancelled": True, "error": CLOSING if self._stop.is_set() else "Stopped."}
         except (OSError, ValueError) as e:
             return _fail(f"No spectrogram for {entry['name']}: {_plain(e)}")
         except MemoryError:
@@ -1186,6 +1218,17 @@ class Api(LibraryOps):
         except Exception as e:
             return _error(e)
         return {"ok": True, "tiles": found[0], **found[1].info()}
+
+    def _cancel_spectrograms(self):
+        """Stop every spectrogram being made (the player moved on)."""
+        with self._spec_lock:
+            for job in self._spec_jobs.values():
+                job["cancel"].set()
+
+    def cancel_spectrogram(self):
+        """The page hid the spectrogram or let go of the recording: stop any being made."""
+        self._cancel_spectrograms()
+        return {"ok": True}
 
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""
@@ -1423,7 +1466,7 @@ class Api(LibraryOps):
             _bounded_put(self._noise, profile.id, (entry["fp"], profile), NOISE_PROFILES)
         return {"ok": True, "profile": profile.id, "seconds": round(end - start, 2)}
 
-    def reduce_noise(self, rec, profile_id, amount, job):
+    def reduce_noise(self, rec, profile_id, amount, job, playing=None):
         """A noise-reduced version of the loaded recording (openevp.denoise with a
         profile from learn_noise(), amount 0..100 %), made once and kept in the
         audio server's cache under (its fingerprint, the profile, the amount). It has
@@ -1431,7 +1474,13 @@ class Api(LibraryOps):
         and never listed: the player plays it under the same handle, and marks stay
         the recording's. "denoise-progress" events ({"job", "done", "total"}) report
         how far it is; cancel_denoise(job) stops it. {"ok", "url", "peaks",
-        "duration", "rate", "channels"}, or {"ok": False, "cancelled": True}."""
+        "duration", "rate", "channels"}, or {"ok": False, "cancelled": True}.
+
+        playing: the URL of the version the player plays now (its own audio, or an
+        earlier noise-reduced one). While a version is made, the recording's own
+        decode and that one are pinned in the cache (making it never evicts what the
+        player needs); afterwards only the new version and the one playing are kept
+        (one amount per recording, so versions never pile up in the cache)."""
         entry = self._entry(rec)
         if entry is None:
             return _fail(RELOAD)
@@ -1449,6 +1498,11 @@ class Api(LibraryOps):
                 return _fail(CLOSING)
             self._denoising[job] = cancel
         url = entry["url"]
+        playing = self._audio_url(entry, playing) if isinstance(playing, str) else None
+        keep = [url] + ([playing] if playing and playing != url else [])
+        pin = getattr(self._server, "pin", None)
+        if pin is not None:
+            pin(keep)
         last = [-1]
 
         def progress(done, total):
@@ -1487,6 +1541,9 @@ class Api(LibraryOps):
             return _fail("The noise-reduced audio came out a different length; it was not used.")
         with self._recs_lock:
             entry["variants"].add(info["url"])
+        if pin is not None:
+            pin(keep + [info["url"]])
+            self._server.drop_versions(("denoise", entry["fp"]), keep + [info["url"]])
         return {"ok": True, "url": info["url"], "peaks": info["peaks"], "duration": info["duration"],
                 "rate": info["rate"], "channels": info["channels"]}
 

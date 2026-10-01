@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+import urllib.request
 import wave
 
 import numpy as np
@@ -167,9 +168,15 @@ class ApiTests(unittest.TestCase):
         self.events.clear()
         self.assertEqual(api.reduce_noise(rec, lp["profile"], 40, 8)["url"], r["url"])
         self.assertEqual([e for e, _ in self.events], [])
-        self.assertNotEqual(api.reduce_noise(rec, lp["profile"], 60, 9)["url"], r["url"])
+        r60 = api.reduce_noise(rec, lp["profile"], 60, 9, r["url"])            # the 40% one plays meanwhile
+        self.assertNotEqual(r60["url"], r["url"])
         other = api.learn_noise(rec, 2.0, 3.5)["profile"]
-        self.assertNotEqual(api.reduce_noise(rec, other, 40, 10)["url"], r["url"])
+        r2 = api.reduce_noise(rec, other, 40, 10, r60["url"])
+        self.assertNotEqual(r2["url"], r60["url"])
+        # One version kept per recording, besides the one playing: the 40% one is gone.
+        self.assertFalse(api._server.serves(r["url"]))
+        self.assertTrue(api._server.serves(r60["url"]) and api._server.serves(r2["url"]))
+        r = r2
         # Never fingerprinted, never a recording: no fp in the cache, the store knows only the original.
         entry = api._server._entries[api._server._by_file[api._server.file_id(r["url"])]]
         self.assertIsNone(entry["fp"])
@@ -213,6 +220,48 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(api._denoising, {})
         api._emit = self.emit
         self.assertTrue(api.reduce_noise(rec, lp, 40, 6)["ok"])                         # and it works afterwards
+
+
+class CacheBudgetTests(unittest.TestCase):
+    """Making a version never evicts the recording's own decode or the version playing,
+    even when the cache budget holds hardly more than one file."""
+    setUp = tm.MarksApiTests.setUp
+    new_api = tm.MarksApiTests.new_api
+
+    def test_a_small_cache_keeps_what_the_player_needs(self):
+        data = pcm16(noisy(8000, seconds=4.0), 8000)
+        cache = os.path.join(self.tmp, "cache")
+        os.makedirs(cache)
+        server = AudioServer(lambda key: data, cache, max_bytes=len(data) + 1000)   # room for about one file
+        server.start()
+        self.addCleanup(server.stop)
+        dvf = os.path.join(self.tmp, "r.dvf")
+        with open(dvf, "wb") as f:
+            f.write(b"x")
+        api = backend.Api(self.m, self.emit, lambda start: None, self.dest, server, store=self.store)
+        self.addCleanup(api.shutdown)
+        # The recording's own audio is a decode in the cache (as a .dvf or an MP3 is).
+        info = server.prepare(("dvf", dvf, 1, 1))
+        loaded = api._loaded(info, "r.dvf", "r.dvf", {"kind": "file", "path": dvf})
+        rec, own = loaded["rec"], loaded["url"]
+        lp = api.learn_noise(rec, 0, 1.5)["profile"]
+        a = api.reduce_noise(rec, lp, 40, 1, own)
+        self.assertTrue(a["ok"], a)
+        self.assertTrue(server.serves(own), "the recording's decode was evicted by its version")
+        b = api.reduce_noise(rec, lp, 70, 2, a["url"])                    # 40% plays while 70% is made
+        self.assertTrue(server.serves(own) and server.serves(a["url"]) and server.serves(b["url"]))
+        c = api.reduce_noise(rec, lp, 20, 3, b["url"])
+        self.assertTrue(server.serves(own) and server.serves(b["url"]) and server.serves(c["url"]))
+        self.assertFalse(server.serves(a["url"]))                          # neither playing nor the latest
+        for url in (own, c["url"]):                                        # Reduce noise off, or on: both play
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+        # Another recording: its decode goes in, the old one may go (no longer pinned).
+        other = server.prepare(("dvf", dvf, 2, 2))
+        api._loaded(other, "o.dvf", "o.dvf", {"kind": "file", "path": dvf})
+        server.prepare(("dvf", dvf, 3, 3))
+        self.assertTrue(server.serves(other["url"]))
+        self.assertFalse(server.serves(own))
 
 
 class ExportTests(unittest.TestCase):

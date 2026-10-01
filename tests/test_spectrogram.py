@@ -6,7 +6,9 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
 import urllib.error
 import urllib.request
 import zlib
@@ -194,6 +196,66 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertIn("changed on disk", r["error"])
         self.assertNotIn(self.tmp, r["error"])
+
+    def test_one_job_per_url_and_superseded_jobs_stop(self):
+        import threading
+        path = os.path.join(self.tmp, "take.wav")
+        with open(path, "wb") as f:
+            f.write(sine_wav(1000.0, seconds=3.0))
+        api = self.real_api(path)
+        loaded = api.open_wav()
+        rec = loaded["rec"]
+        started, release, computed = threading.Event(), threading.Event(), []
+        real = spectrogram.compute
+
+        def slow(reader, should_stop=None):
+            computed.append(1)
+            started.set()
+            release.wait(5)
+            if should_stop():
+                raise spectrogram.Cancelled()
+            return real(reader, should_stop)
+        results = []
+        with mock.patch.object(spectrogram, "compute", slow):
+            a = threading.Thread(target=lambda: results.append(("a", api.spectrogram(rec))))
+            b = threading.Thread(target=lambda: results.append(("b", api.spectrogram(rec))))
+            a.start()
+            self.assertTrue(started.wait(5))
+            b.start()                                         # the same URL: waits for the first
+            time.sleep(0.2)
+            release.set()
+            a.join(5)
+            b.join(5)
+        self.assertEqual(len(computed), 1)
+        self.assertEqual(dict(results)["a"], dict(results)["b"])
+        self.assertTrue(dict(results)["a"]["ok"])
+        # Another recording loaded while one is being made: that job is cancelled.
+        api._server._specs.clear()
+        started.clear()
+        release.clear()
+        with mock.patch.object(spectrogram, "compute", slow):
+            t = threading.Thread(target=lambda: results.append(("c", api.spectrogram(rec))))
+            t.start()
+            self.assertTrue(started.wait(5))
+            api.open_wav()                                    # the player moves on
+            release.set()
+            t.join(5)
+        self.assertEqual(dict(results)["c"], {"ok": False, "cancelled": True, "error": "Stopped."})
+        self.assertEqual(api._spec_jobs, {})
+        # And the page can cancel it itself (hiding the spectrogram, unloading the recording).
+        api._server._specs.clear()
+        started.clear()
+        release.clear()
+        rec2 = api.open_wav()["rec"]
+        with mock.patch.object(spectrogram, "compute", slow):
+            t = threading.Thread(target=lambda: results.append(("d", api.spectrogram(rec2))))
+            t.start()
+            self.assertTrue(started.wait(5))
+            self.assertEqual(api.cancel_spectrogram(), {"ok": True})
+            release.set()
+            t.join(5)
+        self.assertEqual(dict(results)["d"]["cancelled"], True)
+        self.assertTrue(api.spectrogram(rec2)["ok"])        # asked again: made
 
     def test_setting(self):
         api = self.real_api(None)

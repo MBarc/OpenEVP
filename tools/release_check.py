@@ -287,6 +287,8 @@ BUNDLED = (   # (file in _internal, its source)
     ("driver/uninstall-winusb.ps1", "app/driver/uninstall-winusb.ps1"),
     ("driver/manifest.ps1", "app/driver/manifest.ps1"),
     ("driver/models.json", "app/driver/models.json"),
+    # third-party licence texts that must ship with the app (the Leveler's BSD-3 notice)
+    ("LICENSES/chromium-dynamics-compressor.txt", "LICENSES/chromium-dynamics-compressor.txt"),
 )
 
 

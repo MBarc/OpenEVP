@@ -2044,7 +2044,7 @@ function setupPlayer() {
                              progressColor: css.getPropertyValue("--accent").trim() });
   S.ws.on("ready", () => { $("play").disabled = false; applySpeed(); tick(); });
   S.ws.on("timeupdate", tick);
-  S.ws.on("play", () => { $("play").textContent = "❚❚"; resumeAudio(); });
+  S.ws.on("play", () => { $("play").textContent = "❚❚"; resumeAudio(true); });
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
@@ -2293,6 +2293,8 @@ function makeAudioGraph() {
     const ctx = new AC();
     S.enh.source = ctx.createMediaElementSource(media);
     S.enh.ctx = ctx;
+    // Running again (a later resume worked): the warning goes.
+    ctx.onstatechange = () => { if (ctx.state === "running" && $("banner-text").textContent === AUDIO_STUCK) banner(""); };
   } catch (e) {
     banner(`Enhance is not available: ${(e && e.message) || e}`);
     return false;
@@ -2302,9 +2304,19 @@ function makeAudioGraph() {
 }
 
 // A new AudioContext may start suspended (autoplay rules): resumed on play and on every change.
-function resumeAudio() {
+// Once the media element is routed through it, a context that stays suspended means silence:
+// checked: true (on play) says so plainly instead of playing nothing.
+const AUDIO_STUCK = "Enhance couldn't start the audio, so nothing can be heard. Click Play again; " +
+                    "if it stays silent, restart OpenEVP.";
+function resumeAudio(checked = false) {
   const ctx = S.enh.ctx;
-  if (ctx && ctx.state === "suspended" && ctx.resume) ctx.resume().catch(() => {});
+  if (!ctx) return;
+  const verify = () => { if (checked && ctx.state !== "running") audioStuck(); };
+  if (ctx.state === "suspended" && ctx.resume) ctx.resume().then(verify, () => { if (checked) audioStuck(); });
+  else verify();
+}
+function audioStuck() {
+  banner(AUDIO_STUCK, "warn", { label: "Try again", run: () => { banner(""); resumeAudio(true); } });
 }
 
 // "Exports enhanced": shown while anything is on, ticked only when the user turns enhancement on in
@@ -2478,7 +2490,7 @@ async function reduceNoise() {
   showNoise();
   noiseProgress(0, null);
   let r;
-  try { r = await api().reduce_noise(cur.rec, prof.id, amount, job); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  try { r = await api().reduce_noise(cur.rec, prof.id, amount, job, cur.playing); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
   if (!S.noise.running || S.noise.running.job !== job) return;          // cancelled, or a newer one runs
   S.noise.running = null;
   progress(0, null);
@@ -2564,7 +2576,9 @@ async function loadSpectrogram() {
   const { rec } = S.current, url = S.current.playing;
   specMessage("Computing the spectrogram…");
   let r;
+  S.spec.asking = true;
   try { r = await api().spectrogram(rec, url); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (seq === S.spec.seq) S.spec.asking = false;
   if (seq !== S.spec.seq || !S.spec.on || !S.current || S.current.rec !== rec || S.current.playing !== url) return;
   if (!r.ok) { specMessage(errorText(r)); return; }
   S.spec.info = r; S.spec.url = url;
@@ -2574,6 +2588,7 @@ async function loadSpectrogram() {
 }
 
 function hideSpectrogram() {
+  if (S.spec.asking) { S.spec.asking = false; api().cancel_spectrogram(); }   // its job stops in the backend
   S.spec.seq++;
   S.spec.info = null;
   clearSpectrogramTiles();

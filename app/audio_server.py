@@ -217,6 +217,7 @@ class AudioServer:
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
+        self._pinned = set()                 # keys never evicted (the player's recording and the version it plays)
         self._specs = OrderedDict()          # spectrogram id -> (file id, openevp.spectrogram.Spectrogram); LRU order
         self._httpd = None
 
@@ -384,6 +385,35 @@ class AudioServer:
             path = e.get("path") or os.path.join(self._dir, e["file"] + ".wav")
             return path, dict(e)
 
+    def _key_for(self, url):
+        """The cache key of the audio a URL of this server serves, or None (under _lock)."""
+        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.wav", url or "")
+        if not m or not secrets.compare_digest(m.group(1), self._token):
+            return None
+        return self._by_file.get(m.group(2))
+
+    def serves(self, url):
+        """Does a URL of this server serve audio now?"""
+        with self._lock:
+            return self._key_for(url) is not None
+
+    def pin(self, urls):
+        """Keep the audio these URLs serve in the cache, never evicted, until the next
+        pin() (which replaces the set): the recording in the player and the version of
+        it that plays, so making another version can never push them out."""
+        with self._lock:
+            self._pinned = {k for k in (self._key_for(u) for u in urls) if k is not None}
+
+    def drop_versions(self, prefix, keep_urls=()):
+        """Drop every cached entry whose key starts with prefix (the versions of one
+        recording), except those keep_urls serve and pinned ones. Returns how many."""
+        with self._lock:
+            keep = {self._key_for(u) for u in keep_urls}
+            gone = [k for k in self._entries if k[:len(prefix)] == prefix and k not in keep and k not in self._pinned]
+            for k in gone:
+                self._drop(k)
+        return len(gone)
+
     def file_id(self, url):
         """The file id of a URL of this server (ValueError if it serves nothing)."""
         return self._file_of(url)[1]["file"]
@@ -463,14 +493,14 @@ class AudioServer:
                 self._drop(key)
 
     def _evict(self, keep, limit=None):
-        """Drop the oldest decoded entries (never ``keep``, never picked files)
+        """Drop the oldest decoded entries (never ``keep``, never a pinned one, never picked files)
         until the cache holds at most ``limit`` bytes (default: the budget)."""
         limit = self._max if limit is None else limit
         total = sum(e["size"] for e in self._entries.values())
         for key in list(self._entries):
             if total <= limit:
                 break
-            if key != keep and "path" not in self._entries[key]:   # picked files use no cache space
+            if key != keep and key not in self._pinned and "path" not in self._entries[key]:   # picked: no space
                 total -= self._entries[key]["size"]
                 self._drop(key)
 

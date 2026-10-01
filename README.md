@@ -528,6 +528,12 @@ dedicated to the public domain under CC0 1.0 Universal; see
 On x86-64 minimp3 always takes its SSE2 code path, so the same file decodes to
 the same samples on every PC.
 
+The Leveler (`openevp/leveler.py`) is a port of Chromium's Web Audio
+DynamicsCompressor (`third_party/blink/renderer/platform/audio/dynamics_compressor.cc`,
+Copyright (C) 2011 Google Inc.), licensed BSD-3-Clause; the full notice is in
+[`LICENSES/chromium-dynamics-compressor.txt`](LICENSES/chromium-dynamics-compressor.txt),
+which the app bundles (`_internal\LICENSES\`) and the release check verifies.
+
 `vendor/webview2/MicrosoftEdgeWebview2Setup.exe` is Microsoft's Evergreen WebView2
 bootstrapper (Authenticode-signed by Microsoft; the build checks its SHA-256). It is
 redistributable, and the installer runs it only when WebView2 is missing.

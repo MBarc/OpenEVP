@@ -1548,8 +1548,31 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("player-loaded").hidden = false;
   // Playing resumes a suspended context.
   actx.state = "suspended";
-  context.resumeAudio();
+  context.resumeAudio(true);
+  await settle();
   assert.strictEqual(actx.state, "running");
+  assert.ok(!/couldn't start the audio/.test($("banner-text").textContent));
+  // If it stays suspended, or resume() is refused, playing says so plainly (no silent playback).
+  const realResume = actx.resume;
+  actx.state = "suspended";
+  actx.resume = () => Promise.resolve();                                           // resolves, still suspended
+  context.resumeAudio(true);
+  await settle();
+  assert.match($("banner-text").textContent, /Enhance couldn't start the audio.*Click Play again/);
+  assert.strictEqual($("banner-action").textContent, "Try again");
+  context.banner("");
+  actx.resume = () => Promise.reject(new Error("NotAllowedError"));
+  context.resumeAudio(true);
+  await settle();
+  assert.match($("banner-text").textContent, /Enhance couldn't start the audio/);
+  actx.resume = realResume;
+  $("banner-action").onclick();                                                    // Try again: it runs now
+  await settle();
+  assert.strictEqual(actx.state, "running");
+  actx.onstatechange();
+  assert.ok($("banner").hidden || !/couldn't start/.test($("banner-text").textContent));
+  context.resumeAudio(false);                                                      // a change while running: nothing said
+  assert.ok(!/couldn't start/.test($("banner-text").textContent));
   // Remembered settings at the next start: on (and shown on), but "Exports enhanced" not ticked.
   vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: 12, leveler: false, strength: "light", voice: true, rumble: false, hiss: false, hum: "off" } }; setupEnhance();`, context);
   assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, false]);
@@ -1631,6 +1654,14 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(specCalls, [["s3", "http://a/s3.wav"]]);
   await answer(specInfo);
   // Off: gone, and remembered.
+  let specCancels = 0;
+  api.cancel_spectrogram = async () => { specCancels++; return { ok: true }; };
+  loadSp("s5");                                                                    // a request in flight, then unloaded
+  vm.runInContext("loadSpectrogram()", context);
+  vm.runInContext("hideSpectrogram()", context);
+  assert.strictEqual(specCancels, 1, "the backend job is cancelled");
+  vm.runInContext("hideSpectrogram()", context);
+  assert.strictEqual(specCancels, 1, "nothing to cancel");
   loadSp("s4");
   vm.runInContext("loadSpectrogram()", context);
   await answer(specInfo);
@@ -1682,7 +1713,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   // Reduce noise: progress with Cancel, then the noise-reduced audio plays from where it was.
   $("reduce-noise").checked = true; $("reduce-noise").onchange();
   const job1 = vm.runInContext("S.noise.job", context);
-  assert.deepStrictEqual(nCalls[1], ["reduce", "n1", "p1", 40, job1]);
+  assert.deepStrictEqual(nCalls[1], ["reduce", "n1", "p1", 40, job1, "http://a/n1.wav"]);
   assert.strictEqual($("noise-status").textContent, "Reducing the noise…");
   window.onBackendEvent("denoise-progress", { job: job1, done: 25, total: 100 });
   assert.deepStrictEqual([$("banner-text").textContent, $("banner-action").textContent, $("progress-fill").style.width],
@@ -1703,7 +1734,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("noise-amount-value").textContent, "60%");
   $("noise-amount").onchange();
   const job2 = vm.runInContext("S.noise.job", context);
-  assert.deepStrictEqual(nCalls.slice(2), [["reduce", "n1", "p1", 60, job2]]);      // the first had finished: nothing to cancel
+  assert.deepStrictEqual(nCalls.slice(2), [["reduce", "n1", "p1", 60, job2, "http://a/n1-dn.wav"]]);      // the first had finished: nothing to cancel
   nLog.length = 0; nPlaying = false; nTime = 40;
   reduceAnswer({ ok: true, url: "http://a/n1-dn60.wav", peaks: [0.1], duration: 100, rate: 44100, channels: 1 });
   await settle(); await settle();
@@ -1718,7 +1749,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const job2b = vm.runInContext("S.noise.job", context);
   $("noise-amount").value = "30"; $("noise-amount").onchange();                     // changed again while it runs
   const job3 = vm.runInContext("S.noise.job", context);
-  assert.deepStrictEqual(nCalls.slice(-2), [["cancel", job2b], ["reduce", "n1", "p1", 30, job3]]);
+  assert.deepStrictEqual(nCalls.slice(-2), [["cancel", job2b], ["reduce", "n1", "p1", 30, job3, "http://a/n1-dn60.wav"]]);
   nLog.length = 0;
   $("banner-action").onclick();
   assert.deepStrictEqual(nCalls[nCalls.length - 1], ["cancel", job3]);
