@@ -148,7 +148,7 @@ def _own_taskbar_identity():
 # ---- --smoke: the release check's frozen GUI smoke test -------------------------
 # OpenEVP.exe --smoke [REPORT.json] checks that both Sony decoders (LPEC LP and SP
 # for the ICD-ST25 and ICD-ST10, LPEC ST for the ICD-ST10) load with their tables
-# and fast C cores,
+# and fast C cores, that MP3 clips can be encoded (lameenc),
 # starts the backend and the WebView2 page in a hidden window, checks that the page
 # loaded (its scripts, styles and every bundled UI file served) and that the JS
 # bridge answers, then exits: 0 if all is well, 1 if not, with the details in
@@ -296,11 +296,38 @@ def _smoke_decoders(report):
             report["problems"].append(f"LPEC ST (ICD-ST10) decoding failed: {type(e).__name__}: {e}")
 
 
+def _smoke_mp3(report):
+    """Record whether MP3 clips can be encoded: a short 8 kHz clip is cut and encoded
+    (lameenc loads and runs); a problem when it cannot."""
+    from openevp import clips, mp3
+    info = report["mp3"] = {"available": mp3.available(), "version": mp3.version()}
+    if not info["available"]:
+        report["problems"].append(f"MP3 encoding is not available: {mp3.UNAVAILABLE}")
+        return
+    try:
+        import io
+        import wave
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(bytes(16000))
+        clip = clips.make(out.getvalue(), {"start": 0.4, "end": 0.6, "cls": "A", "note": "smoke"}, "mp3")
+        info["bytes"] = len(clip)
+        tag = 10 + sum((b & 0x7F) << (7 * (3 - i)) for i, b in enumerate(clip[6:10])) if clip[:3] == b"ID3" else 0
+        if not tag or clip[tag] != 0xFF or clip[tag + 1] & 0xE0 != 0xE0:     # the ID3 tag, then an MPEG frame
+            report["problems"].append("MP3 encoding gave no MP3")
+    except Exception as e:
+        report["problems"].append(f"MP3 encoding failed: {type(e).__name__}: {e}")
+
+
 def _smoke_main(report_path):
     report = {"ok": False, "version": __version__, "problems": []}
     home = tempfile.mkdtemp(prefix="openevp-smoke-")
     try:
         _smoke_decoders(report)
+        _smoke_mp3(report)
         _run_app(smoke=(report, home))
     except Exception as e:
         report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")

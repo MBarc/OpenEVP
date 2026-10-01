@@ -110,6 +110,22 @@ class MainImportTests(unittest.TestCase):
         self.assertIn("LPEC ST (ICD-ST10) decoding is not available: "
                       "LPEC ST (ICD-ST10) playback is not included in this build", report["problems"])
 
+    def test_smoke_reports_mp3_encoding(self):
+        """--smoke encodes an MP3 clip, so a build without lameenc fails it."""
+        main = self.main()
+        from openevp import mp3
+        report = {"problems": []}
+        main._smoke_mp3(report)
+        if mp3.available():
+            self.assertEqual(report["problems"], [])
+            self.assertTrue(report["mp3"]["available"] and report["mp3"]["bytes"] > 0)
+            self.assertTrue(report["mp3"]["version"])
+        with mock.patch.object(mp3, "lameenc", None):
+            report = {"problems": []}
+            main._smoke_mp3(report)
+        self.assertEqual(report["mp3"], {"available": False, "version": None})
+        self.assertEqual(report["problems"], ["MP3 encoding is not available: " + mp3.UNAVAILABLE])
+
     def test_smoke_lists_every_ui_file(self):
         main = self.main()
         files = main.ui_files(main._ui_dir())
