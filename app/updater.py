@@ -1,7 +1,8 @@
 """Updates from the project's GitHub releases.
 
 check() asks GitHub for the latest release and says whether it is newer than
-this app. download() fetches its installer and refuses it unless the release
+this app; if it is, it also collects the notes of every release the user skips
+over (see release_notes()), for display only. download() fetches its installer and refuses it unless the release
 key signed it: the signature covers the version and the installer's SHA-256,
 so neither a changed file nor an older (validly signed) installer passes.
 launch() starts the installer (it asks Windows for admin rights itself) and the
@@ -25,6 +26,10 @@ from app import ed25519
 
 REPO = "MBarc/OpenEVP"
 LATEST = f"https://api.github.com/repos/{REPO}/releases/latest"
+RELEASES = f"https://api.github.com/repos/{REPO}/releases?per_page=100"
+MAX_PAGES = 3                      # 300 releases: far more than will ever be skipped over
+MAX_RELEASES = 20                  # notes shown at most; older ones are counted ("and N earlier updates")
+MAX_NOTES = 2000                   # characters of one release's notes
 PUBLIC_KEY = bytes.fromhex("578f9dd01e04cddc38bab037959d5f49863dd9ce5a581d8709ccf3579e99cd42")
 MAX_INSTALLER = 400 << 20          # far above any real installer
 MAX_SIG = 1024
@@ -102,9 +107,49 @@ def _open(url, accept=None):
     return _opener.open(urllib.request.Request(url, headers=headers), timeout=TIMEOUT)
 
 
+def _entry(release, version):
+    """One release's notes for the update dialog: {"version", "date", "notes"}."""
+    return {"version": version_text(version), "date": str(release.get("published_at") or "")[:10],
+            "notes": str(release.get("body") or "").strip()[:MAX_NOTES]}
+
+
+def release_notes(mine, latest, latest_release, opener=_open):
+    """The notes of every release newer than `mine` up to and including `latest`,
+    newest first, at most MAX_RELEASES of them; returns (entries, how many more).
+
+    Every published release (not a draft or prerelease) with a plain vX.Y.Z tag
+    counts, with or without an installer: a release that was never offered as an
+    update still changed the app, so its notes belong in "what's new". The notes
+    are display only; the installer and its signature come from `latest_release`
+    alone (see check()). If the list can't be fetched or read, only the latest
+    release's notes are returned: the update is never held up by its notes."""
+    found = {latest: _entry(latest_release, latest)}
+    try:
+        for page in range(1, MAX_PAGES + 1):
+            with opener(f"{RELEASES}&page={page}", "application/vnd.github+json") as r:
+                releases = json.loads(r.read(16 << 20))
+            if not isinstance(releases, list):
+                raise ValueError("not a list of releases")
+            for release in releases:
+                if not isinstance(release, dict) or release.get("draft") or release.get("prerelease"):
+                    continue
+                v = parse_version(release.get("tag_name", ""))
+                if v is not None and mine < v < latest and v not in found:
+                    found[v] = _entry(release, v)
+            if len(releases) < 100:
+                break
+    except Exception:
+        found = {latest: found[latest]}
+    newest_first = [found[v] for v in sorted(found, reverse=True)]
+    return newest_first[:MAX_RELEASES], max(0, len(newest_first) - MAX_RELEASES)
+
+
 def check(current, opener=_open):
     """The latest release if it is newer than `current`, else None.
-    Returns {"version", "notes", "page", "installer", "size", "signature"}."""
+    Returns {"version", "notes", "page", "installer", "size", "signature",
+    "releases", "earlier"}: "notes" are the latest release's, "releases" the notes
+    of every release skipped over (release_notes()) and "earlier" how many more
+    there are than are listed."""
     with opener(LATEST, "application/vnd.github+json") as r:
         release = json.loads(r.read(1 << 20))
     if release.get("draft") or release.get("prerelease"):
@@ -117,9 +162,11 @@ def check(current, opener=_open):
     exe, sig = assets.get(installer_name(version)), assets.get(installer_name(version) + ".sig")
     if not exe or not sig:
         return None                    # a release without a signed installer is not offered
-    return {"version": version, "notes": (release.get("body") or "").strip()[:2000],
+    releases, earlier = release_notes(mine, latest, release, opener)
+    return {"version": version, "notes": releases[0]["notes"],
             "page": release.get("html_url", ""), "installer": exe["browser_download_url"],
-            "size": int(exe.get("size") or 0), "signature": sig["browser_download_url"]}
+            "size": int(exe.get("size") or 0), "signature": sig["browser_download_url"],
+            "releases": releases, "earlier": earlier}
 
 
 def download(info, progress=None, opener=_open, public_key=None, cancelled=None):
