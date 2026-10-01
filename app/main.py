@@ -1,4 +1,5 @@
 """Desktop app entry: wires the device manager, audio server and UI together."""
+import base64
 import ctypes
 import json
 import os
@@ -148,7 +149,7 @@ def _own_taskbar_identity():
 # ---- --smoke: the release check's frozen GUI smoke test -------------------------
 # OpenEVP.exe --smoke [REPORT.json] checks that both Sony decoders (LPEC LP and SP
 # for the ICD-ST25 and ICD-ST10, LPEC ST for the ICD-ST10) load with their tables
-# and fast C cores,
+# and fast C cores, that MP3 clips can be encoded (lameenc),
 # starts the backend and the WebView2 page in a hidden window, checks that the page
 # loaded (its scripts, styles and every bundled UI file served) and that the JS
 # bridge answers, then exits: 0 if all is well, 1 if not, with the details in
@@ -159,16 +160,38 @@ SMOKE_FLAG = "--smoke"
 SMOKE_TIMEOUT = 60                      # seconds for the page to load and answer
 
 # Run in the page: start the checks that need promises (the bridge, fetching each
-# bundled UI file); their results land in window.__openevpSmoke.
+# bundled UI file, and an MP3 clip as the player takes it: the <audio> element it
+# plays through says it can play audio/mpeg, and WebAudio decodes it at its own
+# rate, as wavesurfer does to draw it); their results land in window.__openevpSmoke.
+# (A hidden window never loads media into an <audio> element, WAV or MP3, so
+# that part is canPlayType() only.)
 _SMOKE_START_JS = """
 window.__openevpSmoke = null;
+const smokeMp3 = async (b64) => {
+  if (b64 === null) return null;
+  const timeout = (ms) => new Promise((_, rej) => setTimeout(() => rej(new Error("timed out")), ms));
+  const out = {can_play: document.createElement("audio").canPlayType("audio/mpeg")};
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  try {
+    const ctx = new AudioContext({sampleRate: 8000});
+    try {
+      const buf = await Promise.race([timeout(10000), ctx.decodeAudioData(bytes.buffer.slice(0))]);
+      Object.assign(out, {rate: buf.sampleRate, channels: buf.numberOfChannels, duration: buf.duration});
+    } finally { ctx.close(); }
+    out.ok = true;
+  } catch (e) { out.ok = false; out.error = "WebAudio: " + String(e); }
+  return out;
+};
 Promise.all([
   window.pywebview.api.capabilities(),
-  Promise.all(%s.map(f => fetch(f, {cache: "no-store"}).then(r => [f, r.ok, r.status], e => [f, false, String(e)])))
-]).then(([caps, files]) => { window.__openevpSmoke = JSON.stringify({caps: caps, files: files}); },
+  Promise.all(%s.map(f => fetch(f, {cache: "no-store"}).then(r => [f, r.ok, r.status], e => [f, false, String(e)]))),
+  smokeMp3(%s)
+]).then(([caps, files, mp3]) => { window.__openevpSmoke = JSON.stringify({caps: caps, files: files, mp3: mp3}); },
         e => { window.__openevpSmoke = JSON.stringify({error: String(e)}); });
 "true";
 """
+_smoke_clip = None                      # the MP3 clip _smoke_mp3() made, for the page to play
+
 # Run in the page: what loaded (synchronous).
 _SMOKE_STATE_JS = """JSON.stringify({
   title: document.title,
@@ -222,7 +245,8 @@ def _smoke_check(window, report):
         while time.monotonic() < deadline:
             state = json.loads(window.evaluate_js(_SMOKE_STATE_JS))
             if state["bridge"] and not started:
-                window.evaluate_js(_SMOKE_START_JS % json.dumps(files))
+                clip = base64.b64encode(_smoke_clip).decode("ascii") if _smoke_clip else None
+                window.evaluate_js(_SMOKE_START_JS % (json.dumps(files), json.dumps(clip)))
                 started = True
             elif started and state["smoke"] and state["version_shown"] == want_version:
                 break
@@ -251,6 +275,13 @@ def _smoke_check(window, report):
         for name, ok, status in smoke["files"]:
             if not ok:
                 problems.append(f"the page could not fetch {name} ({status})")
+        page_mp3 = smoke.get("mp3")
+        if page_mp3 is not None:                # MP3 clips play in the library: the page decodes them
+            report.setdefault("mp3", {})["page"] = page_mp3
+            if not page_mp3.get("ok") or not page_mp3.get("can_play"):
+                problems.append(f"the page cannot play an MP3 clip: {page_mp3.get('error') or 'no MP3 support'}")
+            elif not 0.9 <= page_mp3.get("duration", 0) <= 1.3 or page_mp3.get("rate") != 8000:
+                problems.append(f"the page decoded the 1 s MP3 clip wrongly: {page_mp3}")
     except Exception as e:
         problems.append(f"the smoke check failed: {type(e).__name__}: {e}")
     finally:
@@ -296,11 +327,40 @@ def _smoke_decoders(report):
             report["problems"].append(f"LPEC ST (ICD-ST10) decoding failed: {type(e).__name__}: {e}")
 
 
+def _smoke_mp3(report):
+    """Record whether MP3 clips can be encoded: a short 8 kHz clip is cut and encoded
+    (lameenc loads and runs); a problem when it cannot."""
+    from openevp import clips, mp3
+    info = report["mp3"] = {"available": mp3.available(), "version": mp3.version()}
+    if not info["available"]:
+        report["problems"].append(f"MP3 encoding is not available: {mp3.UNAVAILABLE}")
+        return
+    try:
+        import io
+        import wave
+        out = io.BytesIO()
+        with wave.open(out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(8000)
+            w.writeframes(bytes(16000))
+        clip = clips.make(out.getvalue(), {"start": 0.4, "end": 0.6, "cls": "A", "note": "smoke"}, "mp3")
+        info["bytes"] = len(clip)
+        global _smoke_clip
+        _smoke_clip = clip                      # 1 s (0 .. 1.0 s of the WAV); the page plays it too
+        tag = 10 + sum((b & 0x7F) << (7 * (3 - i)) for i, b in enumerate(clip[6:10])) if clip[:3] == b"ID3" else 0
+        if not tag or clip[tag] != 0xFF or clip[tag + 1] & 0xE0 != 0xE0:     # the ID3 tag, then an MPEG frame
+            report["problems"].append("MP3 encoding gave no MP3")
+    except Exception as e:
+        report["problems"].append(f"MP3 encoding failed: {type(e).__name__}: {e}")
+
+
 def _smoke_main(report_path):
     report = {"ok": False, "version": __version__, "problems": []}
     home = tempfile.mkdtemp(prefix="openevp-smoke-")
     try:
         _smoke_decoders(report)
+        _smoke_mp3(report)
         _run_app(smoke=(report, home))
     except Exception as e:
         report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")

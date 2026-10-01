@@ -56,7 +56,10 @@ EVP clips:
 
 21. EVP clips: mark two EVPs on A-001 (one with a note containing `?` and `:`),
     click **Export clips**: "2 clips saved"; **Open folder** shows
-    `Save to\A\Clips` with two WAVs named `…_EVP-<class>_<MMmSS.s>s[_note].wav`.
+    `Save to\A\Clips` with two MP3s (the default **Clip format**) named
+    `…_EVP-<class>_<MMmSS.s>s[_note].mp3`; they play in Windows' player and show
+    the mark as the title and the note as the comment. Switch Clip format to WAV
+    and export again: two WAVs named `…_EVP-<class>_<MMmSS.s>s[_note].wav`.
     Each opens in an audio editor (Audacity, say) as 8 kHz mono, with the EVP
     0.5 s in and its label ("EVP A: …") shown as a marker. Export again: "0 clips
     saved (2 already there)". **Save clip** on one row saves only that one.
@@ -80,3 +83,24 @@ EVP clips:
     investigation folder keeps its `Clips` folder; rename `Clips` itself (it keeps
     its icon), then delete it: the dialog counts its clips, and it goes to the
     Recycle Bin. Delete `.openevp-clips`: its clips count as recordings.
+    MP3 clips: listed with **Clip**, play on a click (waveform drawn, zoom works),
+    the mark tools are off with "MP3 clips can't be marked…"; a selection on it
+    still plays and loops (Loop ticked), including one that ends at the clip's end; Move to… offers only
+    other `Clips` folders; an `.mp3` elsewhere in the library is not listed.
+
+Looping a saved EVP:
+
+25. On a recording with two marks, click one on the waveform: it plays once, as
+    before, and the bar under the waveform shows `EVP <class> · <start> – <end>`
+    with **▶ Play**, **Loop** and **Deselect** (no **Mark EVP**); its row in the
+    marks list is highlighted. Tick **Loop**: it repeats without a gap you would
+    notice. Drag one of its edges while it loops: the next pass uses the new
+    edge. Space pauses it; untick Loop and it stops at the mark's end. Click
+    elsewhere on the waveform (or **Deselect**): the loop stops.
+26. Click a row's 🔁: that mark loops and the button shows as on (Tab reaches it,
+    Enter and Space work); click it again: the loop stops at the mark's end. 🔁
+    on the other row moves the loop there. Drag a new selection while a mark
+    loops: the mark's loop stops and the bar shows the selection. Delete the
+    looping mark, or open another recording: nothing loops on. An imported point
+    marker's 🔁 is greyed out. In a second OpenEVP window (read-only), looping
+    works the same.

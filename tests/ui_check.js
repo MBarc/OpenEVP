@@ -785,6 +785,43 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "The clips export did not start: boom");
 
+  // ---- the clip format: a menu next to Export clips (MP3 by default), one setting for the player and the library ----
+  assert.ok(/<button id="export-clips"[^>]*>Export clips<\/button>\s*<select id="clip-format"[^>]*>\s*<option value="mp3">MP3 \(for sharing\)<\/option>\s*<option value="wav">WAV \(full quality\)<\/option>\s*<\/select>/.test(html),
+            "the Clip format menu sits right after Export clips: MP3 (for sharing) first, then WAV (full quality)");
+  assert.strictEqual($("clip-format").value, "mp3");                                // capabilities() said nothing: MP3
+  assert.match($("export-clips").title, /own short MP3 clip/);
+  const formatCalls = [];
+  api.set_clip_format = async (fmt) => { formatCalls.push(fmt); return { ok: true, format: fmt, remembered: true }; };
+  $("clip-format").value = "wav";
+  await $("clip-format").onchange();
+  assert.deepStrictEqual(formatCalls, ["wav"]);
+  assert.strictEqual(vm.runInContext("S.caps.clip_format", context), "wav");
+  assert.strictEqual($("clip-format").value, "wav");
+  assert.match($("export-clips").title, /own short WAV clip/);
+  rightClick(folderRow("f1").cells[1]);                                            // the library's menu says so too
+  assert.match(menu.children[3].title, /as its own WAV clip$/);
+  press("Escape");
+  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks,
+                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
+  assert.match($("marks-list").children[0].children.find((b) => b.textContent === "Save clip").title, /own WAV clip/);
+  vm.runInContext(`setCurrent(null);`, context);
+  api.set_clip_format = async () => ({ ok: false, error: "Unknown clip format." });   // refused: said, and shown as it was
+  $("clip-format").value = "mp3";
+  await $("clip-format").onchange();
+  assert.strictEqual($("banner-text").textContent, "Unknown clip format.");
+  assert.strictEqual($("clip-format").value, "wav");
+  api.set_clip_format = async (fmt) => ({ ok: true, format: fmt, remembered: false });  // a second window: this session
+  $("clip-format").value = "mp3";
+  await $("clip-format").onchange();
+  assert.strictEqual($("clip-format").value, "mp3");
+  rightClick(folderRow("f1").cells[1]);
+  assert.match(menu.children[3].title, /as its own MP3 clip$/);
+  press("Escape");
+  // The remembered format arrives with capabilities() (startup, or when the store becomes writable).
+  vm.runInContext(`S.caps.clip_format = "wav"; showClipFormat();`, context);
+  assert.strictEqual($("clip-format").value, "wav");
+  vm.runInContext(`S.caps.clip_format = "mp3"; showClipFormat();`, context);
+
   // An ICD-ST10 .dvf in the library, in a build without the LPEC ST decoder: greyed out with its
   // reason (not the ⚠ of a damaged file), and a click says why instead of asking the backend to play it.
   const st10File = { ...libFile("r7", "001_A_001_Unknown.dvf", "root", null), type: "dvf", seconds: 20.1,
@@ -872,7 +909,254 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.lib.flat = true; renderLibrary();`, context);
   assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["r1"]);
   vm.runInContext(`S.lib.flat = false; renderLibrary();`, context);
+
+  // An MP3 clip (the default clip format): listed and playable in the Clips folder; the page loads the
+  // MP3 itself (no server peaks: wavesurfer decodes it at its own rate) and the mark tools are off.
+  const mp3Reason = "MP3 clips can't be marked. Mark the recording itself, or export the clip as WAV to mark it.";
+  vm.runInContext(`S.caps.formats.mp3 = { label: "MP3 clip", playable: true, reason: null };`, context);
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 61, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: clipFolders,
+                                    files: [marked(libFile("r1", "a.wav", "root", "fp1"), 1),
+                                            { ...libFile("c3", "a_EVP-B_00m03.0s_hi.mp3", "fc", null), type: "mp3", clip: true }] });
+  context.openLibraryFolder("root");
+  await context.loadLibrary();
+  await settle();
+  assert.strictEqual(folderRow("fc").cells[1].textContent, "🎞️ Clips Clips1 clip");
+  context.openLibraryFolder("fc");
+  await settle();
+  const mp3Row = recRow("c3");
+  assert.ok(mp3Row.classList.contains("lib-clip") && !mp3Row.classList.contains("unplayable"));
+  assert.strictEqual(mp3Row.cells[5].textContent, "Clip");
+  rightClick(mp3Row.cells[1]);
+  assert.deepStrictEqual(menuItems()[0], ["Play", false]);
+  choose("Move to…");                                          // an MP3 clip stays in a Clips folder
+  assert.ok(pick("f1").disabled && pick("f1").title === "MP3 clips stay in Clips folders");
+  assert.ok(pick("root").disabled);
+  context.closeFolderDialog();
+  assert.ok(vm.runInContext(`mp3StaysInClips("f1", ["c3"]) && !mp3StaysInClips("fc", ["c3"]) && !mp3StaysInClips("f1", ["r1"])`, context));
+  vm.runInContext(`S.wsCalls = []; S.ws = new Proxy(S.ws, { get: (t, k) =>
+    k === "load" ? (...a) => { S.wsCalls.push(["load", ...a]); return Promise.resolve(); }
+    : k === "setOptions" ? (o) => { S.wsCalls.push(["options", o]); } : t[k] });`, context);
+  api.play_library = async (id) => { ops.push(["play", id]);
+    return { ok: true, url: "http://127.0.0.1:1/t/c3.mp3", peaks: [], duration: 4000, rate: 44100, channels: 2, fp: null,
+             compressed: true, rec: "h9", name: "a_EVP-B_00m03.0s_hi.mp3", imported: 0, marks: [], reviewed: false,
+             backup: { status: null, detail: "" }, backup_needed: false, markable: false, mark_reason: mp3Reason }; };
+  ops.length = 0;
+  mp3Row.onclick();
+  await settle();
+  assert.deepStrictEqual(ops, [["play", "c3"]]);
+  const wsCalls = JSON.parse(vm.runInContext("JSON.stringify(S.wsCalls)", context));
+  assert.deepStrictEqual(wsCalls.filter((c) => c[0] === "load"), [["load", "http://127.0.0.1:1/t/c3.mp3"]], "no peaks: decoded in the page");
+  // (even a long one, past the full-detail budget a WAV would be drawn from server peaks for)
+  assert.ok(wsCalls.some((c) => c[0] === "options" && c[1].sampleRate === 44100), "decoded at its own rate");
+  assert.strictEqual(vm.runInContext("S.zoomMax", context), 44100);                  // zooms to the sample
+  assert.ok($("mark-evp").disabled && $("reviewed").disabled);
+  assert.strictEqual($("mark-evp").title, mp3Reason);
+  vm.runInContext(`S.region = { start: 0.1, end: 0.2 }; $("player-loaded").hidden = false;`, context);
+  fire([document], "keydown", { key: "m", target: document.body });                // M: no mark form either
+  assert.ok(!vm.runInContext("S.markForm", context));
+  assert.ok($("export-clips").disabled && $("export-marked").disabled);
+  // Another recording loaded: the tools are back.
+  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks: [],
+                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
+  assert.ok(!$("mark-evp").disabled && $("mark-evp").title !== mp3Reason);
+  vm.runInContext(`setCurrent(null); S.region = null;`, context);
   context.openLibraryFolder("root");
   await settle();
+
+  // ---- looping a saved mark: a click selects it (the bar shows it, with Loop), the row's 🔁 loops it ----
+  // A recording WaveSurfer and regions plugin: what was played, from where, and whether it stops at the end.
+  const wsLog = [];
+  let wsTime = 0, wsPlaying = false;
+  const fakeWs = new Proxy({
+    play: (t, end) => { wsLog.push(["ws.play", t, end]); wsPlaying = true; if (t != null) wsTime = t; },
+    isPlaying: () => wsPlaying, getCurrentTime: () => wsTime, getDuration: () => 3,
+    playPause: () => { wsPlaying = !wsPlaying; }, pause: () => { wsPlaying = false; },
+  }, { get: (t, k) => (k in t ? t[k] : anything) });
+  const madeRegions = [];
+  const fakeRegions = {
+    addRegion: (o) => {
+      const r = { ...o, element: { part: o.id }, removed: false,
+                  play(stop) { wsLog.push(["play", this.id, stop]); wsPlaying = true; wsTime = this.start; },
+                  remove() { this.removed = true; }, setOptions(x) { Object.assign(this, x); } };
+      madeRegions.push(r);
+      return r;
+    },
+    getRegions: () => madeRegions.filter((r) => !r.removed), on() {},
+  };
+  context.__ws = fakeWs; context.__regions = fakeRegions;
+  const realPlayer = vm.runInContext("[S.ws, S.regions]", context);
+  vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
+  context.confirm = () => true;
+  api.delete_mark = async () => ({ ok: true });
+  api.get_marks = async () => ({ ok: true, marks: [], reviewed: false, backup: { status: null, detail: "" } });
+  const loopMarks = [{ id: "m1", start: 1, end: 1.5, cls: "A", note: "hi" }, { id: "m2", start: 2, end: 2.4, cls: "B", note: "" },
+                     { id: "m3", start: 2.8, end: 2.8, cls: "C", note: "imported" }];
+  const loadMarked = (rec, marks = loopMarks) => {
+    vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec, duration: 3, fp: null, marks,
+                                                          backup: { status: null, detail: "" }, reviewed: false })});
+                     drawMarks(S.playSeq);`, context);
+  };
+  const reg = (id) => vm.runInContext("S.markRegions", context).get(id);
+  const markRowEl = (i) => $("marks-list").children[i];
+  const loopBtn = (i) => markRowEl(i).loopButton;
+  const looping = () => JSON.parse(vm.runInContext("JSON.stringify([S.activeMark, S.markLoop])", context));
+  const ev = { stopPropagation() {} };
+  const lastPlay = () => wsLog[wsLog.length - 1];
+  $("player-loaded").hidden = false;
+  loadMarked("h1");
+  assert.ok($("mark-controls").hidden && !$("selection-hint").hidden, "nothing selected yet");
+
+  // A click on a mark on the waveform: it plays once, as before, and the bar shows it with Loop (no Mark EVP).
+  context.regionClicked(reg("m1"), ev);
+  assert.deepStrictEqual(lastPlay(), ["play", "mark-m1", true]);
+  assert.ok(!$("mark-controls").hidden && $("selection-controls").hidden && $("selection-hint").hidden);
+  assert.strictEqual($("active-mark-label").textContent, "EVP A · 0:01.0 – 0:01.5");
+  assert.ok(!$("loop-mark").checked && !$("loop-mark").disabled);
+  assert.ok(markRowEl(0).classList.contains("active") && !markRowEl(1).classList.contains("active"));
+  assert.deepStrictEqual(looping(), ["m1", false]);
+  context.regionOut(reg("m1"));                                     // not looping: it just ends
+  assert.deepStrictEqual(lastPlay(), ["play", "mark-m1", true]);
+  // Loop ticked while it plays: it carries on (the stop at its end dropped), and region-out replays it.
+  $("loop-mark").checked = true; $("loop-mark").onchange();
+  assert.deepStrictEqual(lastPlay(), ["ws.play", 1, undefined]);
+  assert.deepStrictEqual(looping(), ["m1", true]);
+  assert.strictEqual(loopBtn(0).getAttribute("aria-pressed"), "true");
+  assert.strictEqual(loopBtn(0).title, "Stop looping this EVP");
+  wsLog.length = 0;
+  context.regionOut(reg("m1"));
+  assert.deepStrictEqual(lastPlay(), ["play", "mark-m1", undefined]);   // from its start, on past its end
+  context.regionOut(reg("m2"));                                     // another mark: no replay
+  assert.strictEqual(wsLog.length, 1);
+  // Its edges dragged while it loops: the bar and the loop use the new bounds at once.
+  Object.assign(reg("m1"), { start: 0.5, end: 1.2 });
+  context.regionUpdated(reg("m1"));
+  assert.strictEqual($("active-mark-label").textContent, "EVP A · 0:00.5 – 0:01.2");
+  context.regionOut(reg("m1"));
+  assert.strictEqual(wsTime, 0.5);
+  assert.deepStrictEqual(looping(), ["m1", true]);
+  // A click on the mark itself keeps it; anywhere else on the waveform deselects it (and its loop).
+  context.waveformClick({ composedPath: () => [{}, reg("m1").element, {}] });
+  assert.deepStrictEqual(looping(), ["m1", true]);
+  context.waveformClick({ composedPath: () => [{}] });
+  assert.deepStrictEqual(looping(), [null, false]);
+  assert.ok($("mark-controls").hidden && !$("selection-hint").hidden);
+  wsLog.length = 0;
+  context.regionOut(reg("m1"));
+  assert.strictEqual(wsLog.length, 0, "no loop after deselecting");
+
+  // The row's 🔁: loops that mark (the active one, Loop ticked); again: stops it, this pass ending at its end.
+  wsPlaying = false;
+  loopBtn(1).onclick(ev);
+  assert.deepStrictEqual(looping(), ["m2", true]);
+  assert.deepStrictEqual(lastPlay(), ["play", "mark-m2", false]);
+  assert.ok($("loop-mark").checked && markRowEl(1).classList.contains("active"));
+  assert.deepStrictEqual([loopBtn(0).getAttribute("aria-pressed"), loopBtn(1).getAttribute("aria-pressed")], ["false", "true"]);
+  assert.strictEqual(loopBtn(1).getAttribute("aria-label"), "Stop looping this EVP");
+  assert.strictEqual(loopBtn(1).tagName, "BUTTON", "a button: Tab and Enter/Space reach it");
+  loopBtn(1).onclick(ev);
+  assert.deepStrictEqual(looping(), ["m2", false]);
+  assert.deepStrictEqual(lastPlay(), ["ws.play", 2, 2.4]);
+  assert.strictEqual(loopBtn(1).getAttribute("aria-label"), "Loop this EVP");
+  wsLog.length = 0;
+  context.regionOut(reg("m2"));
+  assert.strictEqual(wsLog.length, 0);
+  loopBtn(1).onclick(ev);
+  assert.deepStrictEqual(looping(), ["m2", true]);
+  // A point marker has nothing to loop.
+  assert.ok(loopBtn(2).disabled && /no length to loop/.test(loopBtn(2).title));
+  // A click on a row selects it (a note being edited does not).
+  markRowEl(0).onclick({ target: markRowEl(0).children[1] });
+  assert.deepStrictEqual(looping(), ["m1", false]);
+  markRowEl(1).onclick({ target: { tagName: "INPUT" } });
+  assert.deepStrictEqual(looping(), ["m1", false]);
+
+  // The selection and a mark never loop at the same time.
+  loopBtn(1).onclick(ev);
+  const sel = fakeRegions.addRegion({ id: "sel", start: 0.1, end: 0.3 });
+  context.regionCreated(sel);
+  assert.deepStrictEqual(looping(), [null, false], "a new selection takes the bar and the loop");
+  assert.ok(!$("selection-controls").hidden && $("mark-controls").hidden);
+  $("loop-selection").checked = true;
+  wsLog.length = 0;
+  context.regionOut(reg("m2"));
+  context.regionOut(sel);
+  assert.deepStrictEqual(wsLog, [["play", "sel", undefined]]);
+  context.regionClicked(reg("m2"), ev);                             // a mark clicked: the selection goes
+  assert.ok(vm.runInContext("S.region === null", context) && sel.removed && !$("loop-selection").checked);
+  assert.deepStrictEqual(looping(), ["m2", false]);
+  context.regionCreated(fakeRegions.addRegion({ id: "sel2", start: 0.1, end: 0.3 }));
+  $("loop-selection").checked = true;
+  loopBtn(0).onclick(ev);                                           // the row's 🔁 too
+  assert.ok(vm.runInContext("S.region === null", context) && !$("loop-selection").checked);
+  assert.deepStrictEqual(looping(), ["m1", true]);
+
+  // The mark form takes the bar while open; then the active mark is back.
+  vm.runInContext(`openMarkForm(S.marks[0])`, context);
+  assert.ok($("mark-controls").hidden && !$("mark-form").hidden);
+  context.closeMarkForm();
+  assert.ok(!$("mark-controls").hidden);
+  assert.deepStrictEqual(looping(), ["m1", true]);
+
+  // Deleting the looping mark ends its loop.
+  await context.deleteMark(vm.runInContext("S.marks[0]", context));
+  assert.deepStrictEqual(looping(), [null, false]);
+  assert.ok($("mark-controls").hidden);
+  // So does loading another recording.
+  loadMarked("h1");
+  loopBtn(1).onclick(ev);
+  const oldRegion = reg("m2");
+  loadMarked("h2");
+  assert.deepStrictEqual(looping(), [null, false]);
+  assert.ok($("mark-controls").hidden);
+  wsLog.length = 0;
+  context.regionOut(oldRegion);
+  assert.strictEqual(wsLog.length, 0);
+
+  // A read-only store (a second window): looping is playback only, so it still works.
+  vm.runInContext(`S.caps = { ...S.caps, marks_read_only: true }; renderMarkTools();`, context);
+  loadMarked("h3");
+  assert.ok(markRowEl(1).children.find((b) => b.textContent === "✎").disabled);
+  assert.ok(!loopBtn(1).disabled);
+  loopBtn(1).onclick(ev);
+  assert.deepStrictEqual(looping(), ["m2", true]);
+  wsLog.length = 0;
+  context.regionOut(reg("m2"));
+  assert.deepStrictEqual(wsLog, [["play", "mark-m2", undefined]]);
+  context.regionClicked(reg("m1"), ev);
+  assert.deepStrictEqual([looping(), lastPlay()], [["m1", false], ["play", "mark-m1", true]]);
+  $("loop-mark").checked = true; $("loop-mark").onchange();
+  assert.deepStrictEqual(looping(), ["m1", true]);
+  vm.runInContext(`S.caps = { ...S.caps, marks_read_only: false }; renderMarkTools(); setCurrent(null);`, context);
+  assert.deepStrictEqual(looping(), [null, false]);
+
+  // An MP3 clip (it can't be marked): no marks, no 🔁 rows, the mark tools off; the selection's own Loop
+  // still works (playback only), and the end of the file replays only a looping selection.
+  vm.runInContext(`setCurrent("x_EVP-B_00m01.0s.mp3", ${JSON.stringify({ rec: "h4", duration: 3, fp: null, marks: [],
+    backup: { status: null, detail: "" }, reviewed: false, markable: false, mark_reason: mp3Reason, compressed: true })});
+    drawMarks(S.playSeq);`, context);
+  assert.ok($("marks-list").hidden && $("marks-list").children.length === 0 && $("mark-controls").hidden);
+  assert.ok($("mark-evp").disabled && $("mark-evp").title === mp3Reason);
+  $("loop-mark").checked = true; $("loop-mark").onchange();                       // no active mark: nothing loops
+  assert.deepStrictEqual(looping(), [null, false]);
+  wsLog.length = 0;
+  context.playbackFinished();                                                      // the clip just ends
+  assert.deepStrictEqual(wsLog, []);
+  const mp3Sel = fakeRegions.addRegion({ id: "sel3", start: 0.2, end: 0.9 });
+  context.regionCreated(mp3Sel);
+  assert.ok(!$("selection-controls").hidden && $("mark-controls").hidden);
+  $("loop-selection").checked = true;
+  context.regionOut(mp3Sel);
+  context.playbackFinished();                                                      // a selection that ends at the end
+  assert.deepStrictEqual(wsLog, [["play", "sel3", undefined], ["play", "sel3", undefined]]);
+  $("loop-selection").checked = false;
+  wsLog.length = 0;
+  context.regionOut(mp3Sel);
+  context.playbackFinished();
+  assert.deepStrictEqual(wsLog, []);
+  vm.runInContext(`clearSelection(); setCurrent(null);`, context);
+  assert.ok(!$("mark-evp").title.includes("MP3"));
+  context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
+  vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -1,2 +1,3 @@
 numpy==2.3.5
 pywebview==6.2.1
+lameenc==1.8.4

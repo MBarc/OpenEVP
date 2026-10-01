@@ -30,6 +30,7 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
                    subTokens: new Map(), subToken: 0 },   // key -> token of the subMarks fetch that may still answer
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
+            activeMark: null, markLoop: false,               // the mark clicked (its id), shown in the bar; is it looping?
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
             backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
             moves: new Map(),                                // mark id -> {busy, next}: one update_mark move in flight per mark
@@ -211,7 +212,8 @@ function showPlayerLoaded(label) {
 const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;
 
 function fullDetail(r) {                          // drawn from the audio itself?
-  return !!r.rate && r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES;
+  // An MP3 clip (r.compressed) always is: the server has no peaks for it, the page decodes it.
+  return !!r.rate && (!!r.compressed || r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES);
 }
 
 function maxZoom(r) {                             // px per second: one pixel per sample at the deepest zoom
@@ -951,6 +953,11 @@ function clipsOnly(folderId, ids) {
   const d = S.lib.folderById.get(folderId);
   return !!(d && d.in_clips) && !ids.every((id) => { const f = S.lib.byId.get(id); return f && f.clip; });
 }
+// An MP3 clip is listed only in a Clips folder: moved anywhere else it would vanish from the library.
+function mp3StaysInClips(folderId, ids) {
+  const d = S.lib.folderById.get(folderId);
+  return !(d && d.in_clips) && ids.some((id) => { const f = S.lib.byId.get(id); return f && f.type === "mp3"; });
+}
 function canRenameRecording(g) { return libraryToolsReady() && groupPickIds(g).length > 0; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
@@ -1254,6 +1261,7 @@ function applyPlayerMarks(r) {
   const ids = new Set(S.marks.map((m) => m.id));
   for (const [id, region] of S.markRegions) if (!ids.has(id)) { region.remove(); S.markRegions.delete(id); }
   if (S.markForm && S.markForm.id && !ids.has(S.markForm.id)) closeMarkForm();
+  if (S.activeMark && !ids.has(S.activeMark)) deselectMark();   // deleted elsewhere: its loop ends
   const drawn = !!S.ws.getDuration();                           // otherwise drawMarks adds them on "ready"
   for (const m of S.marks) {
     const region = S.markRegions.get(m.id);
@@ -1636,8 +1644,10 @@ function moveDialog(ids = [...S.lib.selected]) {
     b.folderId = d.id;
     // The folder every picked file is in already (the folder shown, in the folder view).
     const here = ids.every((id) => L.byId.get(id).folder_id === d.id);
-    b.disabled = here || clipsOnly(d.id, ids);
+    const mp3 = mp3StaysInClips(d.id, ids);
+    b.disabled = here || clipsOnly(d.id, ids) || mp3;
     if (here) b.title = "They are in this folder already";
+    else if (mp3) b.title = "MP3 clips stay in Clips folders";
     else if (b.disabled) b.title = "A Clips folder is for EVP clips only";
     b.onclick = () => {
       target = d.id;
@@ -1713,6 +1723,7 @@ function dropTarget(e) {
   const el = e.target.closest("tr.lib-folder, #library-crumbs button.crumb");
   if (!el || !L.folderById.has(el.folderId) || el.folderId === L.folderId) return null;
   if (clipsOnly(el.folderId, S.drag.ids)) return null;   // a Clips folder takes clips only
+  if (mp3StaysInClips(el.folderId, S.drag.ids)) return null;   // and an MP3 clip stays in one
   return el;
 }
 
@@ -1796,7 +1807,7 @@ function libraryMenuItems(target) {
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
       { label: "Export clips", disabled: !canExportClips() || inClips,
-        title: inClips ? "These are clips already" : clipsTip("Save every EVP in this folder (and its folders) as its own WAV clip"),
+        title: inClips ? "These are clips already" : clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ folder: id }, L.folderById.get(id).name || "the library") },
     ];
   }
@@ -1816,7 +1827,7 @@ function libraryMenuItems(target) {
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
       // Export clips is for the row clicked (its files: the copies of one recording), ticked or not.
       { label: "Export clips", disabled: !canExportClips() || !groupMarked(g),
-        title: clipsTip(g.clip ? "This is a clip already" : groupMarked(g) ? "Save each EVP of this recording as its own WAV clip"
+        title: clipsTip(g.clip ? "This is a clip already" : groupMarked(g) ? `Save each EVP of this recording as its own ${clipLabel()} clip`
                                                                              : "No EVPs marked in this recording"),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
     ];
@@ -2071,21 +2082,19 @@ function setupSelection() {
   S.regions = S.ws.registerPlugin(WaveSurfer.Regions.create());
   S.regions.enableDragSelection({ color: "rgba(108, 195, 167, 0.28)" });
   S.region = null;
-  S.regions.on("region-created", (r) => {
-    if (isMark(r)) return;                                  // marks live beside the selection
-    for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
-    S.region = r; showSelection();
-  });
-  S.regions.on("region-updated", (r) => {
-    if (r === S.region) showSelection();
-    else if (isMark(r)) scheduleMarkMove(r);
-  });
-  S.regions.on("region-out", (r) => {
-    if (r === S.region && $("loop-selection").checked) r.play();
-  });
-  S.regions.on("region-clicked", (r, e) => { e.stopPropagation(); isMark(r) ? r.play(true) : r.play(); });
+  S.regions.on("region-created", regionCreated);
+  S.regions.on("region-updated", regionUpdated);
+  S.regions.on("region-out", regionOut);
+  S.regions.on("region-clicked", regionClicked);
+  S.ws.on("finish", playbackFinished);
+  // A click on the waveform anywhere but the active mark (another mark, or a seek) deselects it:
+  // in the capture phase, before the seek (and its region-out) happens.
+  $("waveform").addEventListener("click", waveformClick, true);
   $("play-selection").onclick = () => { if (S.region) S.region.play(); };
   $("clear-selection").onclick = clearSelection;
+  $("play-mark").onclick = playActiveMark;
+  $("loop-mark").onchange = () => setMarkLoop($("loop-mark").checked);
+  $("deselect-mark").onclick = deselectMark;
   document.addEventListener("keydown", (e) => {
     if (e.code !== "Space" || $("player-loaded").hidden || /INPUT|SELECT|BUTTON|TEXTAREA/.test(e.target.tagName)) return;
     e.preventDefault();
@@ -2093,11 +2102,128 @@ function setupSelection() {
   });
 }
 
+// Playback that reaches the end of the file never leaves a region that ends there: loop it from here.
+// Nothing else happens at the end (an MP3 clip, say, which has no marks: only its selection can loop).
+function playbackFinished() {
+  const r = S.region && $("loop-selection").checked ? S.region : S.markLoop ? activeRegion() : null;
+  if (r) r.play();
+}
+
+function regionCreated(r) {
+  if (isMark(r)) return;                                    // marks live beside the selection
+  for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
+  S.region = r;
+  if (S.activeMark) deselectMark();                         // the bar (and the loop) is the selection's now
+  showSelection();
+}
+
+function regionUpdated(r) {
+  if (r === S.region) showSelection();
+  else if (isMark(r)) {
+    scheduleMarkMove(r);
+    if (markId(r) === S.activeMark) showSelection();        // the bar shows the new times; a loop uses them at once
+  }
+}
+
+function regionOut(r) {
+  if (r === S.region && $("loop-selection").checked) r.play();
+  else if (S.markLoop && isMark(r) && markId(r) === S.activeMark) r.play();
+}
+
+// Clicking a mark selects it and plays it (once, or from its start round and round while looping).
+function regionClicked(r, e) {
+  e.stopPropagation();
+  if (!isMark(r)) { r.play(); return; }
+  selectMark(markId(r));
+  playActiveMark();
+}
+
+function waveformClick(e) {
+  if (!S.activeMark) return;
+  const r = activeRegion(), path = e.composedPath ? e.composedPath() : [e.target];
+  if (r && r.element && path.includes(r.element)) return;
+  deselectMark();
+}
+
+// The bar under the waveform: the selection, the active mark, or the mark form (which takes it while open).
 function showSelection() {
-  const r = S.region;
-  $("selection-hint").hidden = !!r || !!S.markForm;       // the mark form takes the bar while open
+  const r = S.region, m = r ? null : activeMarkData();
+  $("selection-hint").hidden = !!r || !!m || !!S.markForm;
   $("selection-controls").hidden = !r || !!S.markForm;
+  $("mark-controls").hidden = !m || !!S.markForm;
   if (r) $("selection-range").textContent = `${fmtPrecise(r.start)} – ${fmtPrecise(r.end)} (${(r.end - r.start).toFixed(1)} s)`;
+  renderActiveMark();
+}
+
+// ---- the active mark: a mark clicked (on the waveform or in the list), shown in the bar, maybe looping ----
+// One thing at a time has the bar, and so the loop: the selection or the active mark.
+function markId(r) { return r.id.slice("mark-".length); }
+function activeMarkData() { return S.activeMark ? S.marks.find((m) => m.id === S.activeMark) || null : null; }
+function activeRegion() { return S.activeMark ? S.markRegions.get(S.activeMark) || null : null; }
+function activeBounds() {                                   // where the mark is now (a band being dragged: there)
+  const r = activeRegion(), m = activeMarkData();
+  return r ? { start: r.start, end: r.end } : m ? { start: m.start, end: m.end } : null;
+}
+
+function selectMark(id) {
+  if (S.region) clearSelection();
+  if (S.activeMark !== id) { S.activeMark = id; S.markLoop = false; }
+  showSelection();
+}
+
+function deselectMark() {                                   // stops its loop too
+  if (!S.activeMark && !S.markLoop) return;
+  S.activeMark = null; S.markLoop = false;
+  showSelection();
+}
+
+// Play the active mark from its start: once (stopping at its end), or on past its end while
+// looping, where region-out brings it back to the start.
+function playActiveMark() {
+  const m = activeMarkData(), r = activeRegion();
+  if (!m) return;
+  if (r) r.play(!S.markLoop);
+  else S.ws.play(m.start, isPoint(m) || S.markLoop ? undefined : m.end);
+}
+
+// Loop on: it plays round and round (from where it is, if it is playing inside the mark already).
+// Loop off: this pass ends at the mark's end.
+function setMarkLoop(on) {
+  const m = activeMarkData(), b = activeBounds();
+  S.markLoop = !!on && !!m && !isPoint(m);
+  if (m) {
+    const t = S.ws.getCurrentTime(), inside = S.ws.isPlaying() && t >= b.start && t < b.end;
+    if (S.markLoop) { if (inside) S.ws.play(t); else playActiveMark(); }   // play(t) drops the stop at its end
+    else if (inside && !isPoint(m)) S.ws.play(t, b.end);
+  }
+  renderActiveMark();
+}
+
+// The row's 🔁: loop this mark (it becomes the active one), or stop looping it.
+function toggleMarkLoop(m) {
+  if (S.activeMark === m.id && S.markLoop) { setMarkLoop(false); return; }
+  selectMark(m.id);
+  setMarkLoop(true);
+}
+
+function renderActiveMark() {
+  const m = activeMarkData(), b = activeBounds();
+  if (m) {
+    const point = isPoint(m);
+    $("active-mark-label").textContent = `EVP ${m.cls} · ` +
+      (point ? fmtPrecise(b.start) : `${fmtPrecise(b.start)} – ${fmtPrecise(b.end)}`);
+    $("loop-mark").checked = S.markLoop;
+    $("loop-mark").disabled = point;
+    $("loop-mark-label").title = point ? NO_LOOP_TIP : "Repeat this EVP";
+  }
+  for (const row of $("marks-list").children) {
+    const on = row.dataset.id === S.activeMark, looping = on && S.markLoop, b2 = row.loopButton;
+    row.classList.toggle("active", on);
+    if (!b2 || b2.disabled) continue;
+    b2.setAttribute("aria-pressed", String(looping));
+    b2.title = looping ? "Stop looping this EVP" : "Loop this EVP";
+    b2.setAttribute("aria-label", b2.title);
+  }
 }
 
 function clearSelection() {                                 // the selection only: marks stay
@@ -2125,12 +2251,16 @@ const MARK_COLORS = { A: "rgba(220, 60, 60, .30)", B: "rgba(230, 150, 30, .30)",
 const MIN_MARK = 0.05;                        // seconds; the backend refuses shorter marks
 const READ_ONLY_TIP = "Marks can't be changed right now.";   // only if the backend gave no reason
 const NO_MARKS_TIP = "Marks are not available here.";
+const NO_LOOP_TIP = "A point marker has no length to loop.";
 
 function isMark(r) { return r.id.startsWith("mark-"); }
-function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
+// Marks can be changed: the store is writable, and the recording loaded can be marked (an MP3 clip can't).
+function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only && !(S.current && S.current.markReason); }
 // Why the store is read-only, in the backend's words (another OpenEVP, or its lock file could not be opened).
 function readOnlyTip() { return S.caps.marks_read_only_reason || READ_ONLY_TIP; }
-function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? readOnlyTip() : ""; }
+function marksTip() {
+  return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? readOnlyTip() : (S.current && S.current.markReason) || "";
+}
 function showing(rec) { return !!S.current && S.current.rec === rec; }   // is this handle's recording still in the player?
 function backupEventsSeen(rec) { return S.backupEvents.get(rec) || 0; }
 function isPoint(m) { return m.end <= m.start; }        // imported point markers: no length to drag
@@ -2158,8 +2288,10 @@ async function storeWritable() {
   if (!S.started || S.caps.marks_read_only) return;
   renderMarkTools();
   renderLibraryBar();
+  showClipFormat();                            // the remembered clip format applies now
   if (S.current) {
     closeMarkForm();
+    deselectMark();                                                  // the store changed mode: nothing loops on
     for (const region of S.markRegions.values()) region.remove();   // redrawn draggable
     S.markRegions.clear();
     if (S.ws.getDuration()) for (const m of S.marks) addMarkRegion(m);
@@ -2192,19 +2324,24 @@ function setupMarks() {
   $("retry-backup").onclick = () => retryBackup(S.current && S.current.rec);
   $("export-marked").onclick = exportMarked;
   $("export-clips").onclick = () => exportClips(null);
+  $("clip-format").onchange = setClipFormat;
+  showClipFormat();
 }
 
 // The recording now in the player (its label and the backend's audio result), or none (null).
 function setCurrent(label, r) {
   closeMarkForm();
+  S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
-  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null } : null;
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null,
+                    markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
   S.backupNeeded = !!(r && r.backup_needed);
   S.backupRunning = false;
   $("reviewed").checked = !!(r && r.reviewed);
+  renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
   renderMarks();
 }
 
@@ -2349,6 +2486,7 @@ function renderMarks() {
   list.innerHTML = "";
   list.hidden = !S.marks.length;
   for (const m of S.marks) list.appendChild(markRow(m));
+  showSelection();                                           // the bar's mark (its class, times) and the rows' states
   $("marks-empty").hidden = S.marks.length > 0;
   $("export-marked").disabled = !S.marks.length || savingAudio();
   $("export-clips").disabled = !S.marks.length || savingAudio();
@@ -2367,6 +2505,10 @@ function markButton(text, title, run, enabled = true) {
 function markRow(m) {
   const row = document.createElement("div");
   row.className = "mark-row";
+  row.dataset.id = m.id;
+  row.title = "Click to select this EVP";
+  // A click on the row (not its buttons, nor a note being edited) makes it the active mark.
+  row.onclick = (e) => { if (e.target === row || !/BUTTON|INPUT/.test(e.target.tagName)) selectMark(m.id); };
   const chip = document.createElement("span");
   chip.className = `cls-chip cls-${m.cls}`; chip.textContent = m.cls; chip.title = `Class ${m.cls}`;
   const time = document.createElement("span");
@@ -2378,19 +2520,25 @@ function markRow(m) {
   note.dataset.id = m.id;
   note.textContent = m.note || (writable ? "Add a note" : "No note");
   note.title = writable ? (m.note ? `${m.note}\n(click to edit)` : "Click to add a note") : [m.note, tip].filter(Boolean).join("\n");
-  if (writable) note.onclick = () => editNoteInline(note, m);
+  if (writable) note.onclick = (e) => { e.stopPropagation(); editNoteInline(note, m); };
+  const point = isPoint(m);
+  row.loopButton = markButton("🔁", point ? NO_LOOP_TIP : "Loop this EVP", () => toggleMarkLoop(m), !point);
+  row.loopButton.className = "mark-loop";
+  row.loopButton.setAttribute("aria-label", row.loopButton.title);
+  row.loopButton.setAttribute("aria-pressed", "false");
   row.append(chip, time, note,
     markButton("▶", "Play this EVP", () => playMark(m)),
-    markButton("Save clip", "Save this EVP as its own WAV clip (in a Clips folder)", () => exportClips(m),
+    row.loopButton,
+    markButton("Save clip", `Save this EVP as its own ${clipLabel()} clip (in a Clips folder)`, () => exportClips(m),
                !savingAudio()),
     markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
     markButton("✕", tip || "Delete this mark", () => deleteMark(m), writable));
   return row;
 }
 
-function playMark(m) {
-  const region = S.markRegions.get(m.id);
-  if (region) region.play(true); else S.ws.play(m.start, isPoint(m) ? undefined : m.end);
+function playMark(m) {                         // the row's ▶: it becomes the active mark, and plays
+  selectMark(m.id);
+  playActiveMark();
 }
 
 // Click a note to edit it in place: Enter or leaving the field saves, Escape cancels.
@@ -2440,6 +2588,7 @@ async function deleteMark(m) {
   S.markRegions.delete(m.id);
   S.marks = S.marks.filter((x) => x.id !== m.id);
   if (S.markForm && S.markForm.id === m.id) closeMarkForm();
+  if (S.activeMark === m.id) deselectMark();                 // its loop ends with it
   renderMarks();
 }
 
@@ -2519,7 +2668,24 @@ async function exportMarked() {
   loadLibrary();
 }
 
-// ---- EVP clips: each mark as its own short WAV, in a Clips folder beside the WAV with marks ----
+// ---- EVP clips: each mark as its own short MP3 or WAV, in a Clips folder beside the WAV with marks ----
+// The clip format (capabilities().clip_format, "mp3" by default): one setting for the player's
+// Export clips and Save clip and the library's Export clips, picked next to Export clips.
+function clipFormat() { return S.caps.clip_format === "wav" ? "wav" : "mp3"; }
+function clipLabel() { return clipFormat() === "wav" ? "WAV" : "MP3"; }
+function showClipFormat() {
+  $("clip-format").value = clipFormat();
+  $("export-clips").title = `Save each EVP as its own short ${clipLabel()} clip (in a Clips folder)`;
+}
+async function setClipFormat() {
+  const fmt = $("clip-format").value;
+  let r;
+  try { r = await api().set_clip_format(fmt); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (r.ok) S.caps.clip_format = r.format;
+  else showError(r);
+  showClipFormat(); renderMarks();
+}
+
 // "3 clips saved (1 already there)", what was skipped and why, and Open folder when there is one.
 function clipsSummary(p) {
   const parts = [];

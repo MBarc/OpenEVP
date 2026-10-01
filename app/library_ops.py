@@ -41,6 +41,7 @@ CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library l
                      b"counts them as EVPs while this file is here; delete this file to treat them as "
                      b"recordings.\r\n")
 CLIPS_ONLY = "A Clips folder is for EVP clips only. Move recordings to another folder."
+MP3_STAYS = "MP3 clips stay in Clips folders: the EVP Library lists MP3 files only there."
 CLIPS_AGAIN = "That is an EVP clip (or a folder of them); clips are not cut from clips."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
@@ -113,6 +114,17 @@ def _make_clips_folder(path):
 def _kind_format(kind):
     """The Format of a library file kind ("dvf", "wav": its extension without the dot)."""
     return formats.by_ext("." + kind)
+
+
+CLIP_KINDS = ("mp3",)       # file kinds that are only clips: listed in Clips folders OpenEVP made, nowhere else
+MP3_NO_MARKS = "MP3 clips can't be marked. Mark the recording itself, or export the clip as WAV to mark it."
+
+
+def _listed_kind(kind, in_clips):
+    """Does the library list files of this kind (in a Clips folder OpenEVP made, or not)?
+    A recording format anywhere; an MP3 only as a clip. An MP3 is never a recording:
+    never fingerprinted, indexed or marked (the player plays it as it is)."""
+    return bool(kind) and (_kind_format(kind) is not None or (in_clips and kind in CLIP_KINDS))
 
 
 def _decoder_problem(fmt):
@@ -361,10 +373,10 @@ class LibraryOps:
                 info["bytes"] += st.st_size
                 kind = os.path.splitext(e.name)[1].lower()[1:]
                 fmt = _kind_format(kind) if kind else None
-                if e.name.startswith(".") or fmt is None:
+                if e.name.startswith(".") or not _listed_kind(kind, in_clips):
                     info["other_files"] += 1
                     continue
-                if in_clips:                    # a clip: not a recording, never read
+                if in_clips:                    # a clip (a WAV, or an MP3): not a recording, never read
                     info["clips"] += 1
                     continue
                 info["recordings"] += 1
@@ -717,6 +729,9 @@ class LibraryOps:
             # (and its markers would never be imported). Clips may move between them.
             if _under_clips(target, root) and not all(_is_clip(p, root) for p in paths.values()):
                 return _fail(CLIPS_ONLY)
+            # An MP3 is listed only as a clip: moved out of the Clips folders it would vanish from the library.
+            if not _under_clips(target, root) and any(p.lower().endswith(".mp3") for p in paths.values()):
+                return _fail(MP3_STAYS)
             for path in paths.values():             # the folders the files come from
                 try:
                     pins.chain(root, os.path.dirname(os.path.abspath(path)))

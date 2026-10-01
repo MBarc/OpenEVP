@@ -128,6 +128,21 @@ class UiBundleTests(unittest.TestCase):
             self.assertIn("no UI folder", release_check.ui_bundle_problems(src, os.path.join(built, "no"))[0][0])
 
 
+class ExtensionBundleTests(unittest.TestCase):
+    """release_check: lameenc (MP3 clips) must be bundled as an extension module."""
+
+    def test_lameenc_is_looked_for_by_name(self):
+        self.assertIn("lameenc", release_check.EXTENSIONS)
+        with tempfile.TemporaryDirectory() as built:
+            self.assertEqual(release_check.extension_problems(built),
+                             ["the built app has no lameenc extension module (_internal/lameenc.*.pyd)"])
+            open(os.path.join(built, "lameenc.txt"), "wb").close()               # not an extension module
+            self.assertEqual(len(release_check.extension_problems(built)), 1)
+            open(os.path.join(built, "lameenc.cp312-win_amd64.pyd"), "wb").close()
+            self.assertEqual(release_check.extension_problems(built), [])
+        self.assertEqual(len(release_check.extension_problems(os.path.join(built, "gone"))), 1)
+
+
 class GuiSmokeCheckTests(unittest.TestCase):
     """release_check.check_gui reads OpenEVP.exe --smoke's exit code and report."""
 
@@ -143,7 +158,12 @@ class GuiSmokeCheckTests(unittest.TestCase):
             return release_check.check_gui()
 
     def test_a_good_report_passes(self):
-        self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"}}), [])
+        self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"},
+                                            "mp3": {"available": True, "version": "1.8.4", "bytes": 9000}}), [])
+
+    def test_a_report_without_mp3_encoding_fails(self):
+        self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"}}),
+                         ["GUI smoke: the report says nothing about MP3 encoding"])
 
     def test_failures_are_reported(self):
         self.assertEqual(self.run_check(1, {"ok": False, "problems": ["app.js did not load in the page"]}),

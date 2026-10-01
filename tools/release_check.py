@@ -12,11 +12,13 @@ Automated (exits non-zero if any fails):
      synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/ and openevp/ is frozen
      into it, and both decoders' tables (LPEC LP, SP and ST) and DLLs, libusb, the icon and the driver
-     files (with the manifest) are bundled, identical to the sources; so is every
+     files (with the manifest) are bundled, identical to the sources, and so is
+     the MP3 encoder (lameenc's extension module); so is every
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
      the favicon, vendor/...), with nothing else in the bundled UI folder;
   4. the built app starts (OpenEVP.exe --smoke): both decoders load with their
-     tables and fast C cores, the backend and the WebView2 page start in a
+     tables and fast C cores, an MP3 clip is encoded (lameenc) and the page
+     plays and decodes it (MP3 clips play in the library), the backend and the WebView2 page start in a
      hidden window, the page loads its scripts and styles and can fetch every
      bundled UI file, and the JS bridge answers capabilities().
 
@@ -286,6 +288,22 @@ BUNDLED = (   # (file in _internal, its source)
 )
 
 
+# Extension modules (.pyd in _internal) the app needs: PyInstaller copies them as
+# binaries, not into the PYZ, so they are looked for by name.
+EXTENSIONS = ("lameenc",)          # MP3 clips (openevp.mp3)
+
+
+def extension_problems(internal, names=EXTENSIONS):
+    """[problem] for each extension module not bundled in _internal (name.*.pyd)."""
+    try:
+        present = os.listdir(internal)
+    except OSError:
+        present = []
+    return [f"the built app has no {name} extension module (_internal/{name}.*.pyd)"
+            for name in names
+            if not any(f.startswith(name + ".") and f.endswith(".pyd") for f in present)]
+
+
 UI_SOURCE = os.path.join(REPO, "app", "ui")
 UI_BUILT = os.path.join(INTERNAL, "app", "ui")
 
@@ -346,6 +364,10 @@ def check_app():
             problems.append(f"_internal/{bundled} differs from {source}")
     if not any(p.startswith("_internal/") for p in problems):
         print(f"   {len(BUNDLED)} bundled files present and identical to their sources")
+    missing_ext = extension_problems(INTERNAL)
+    if not missing_ext:
+        print(f"   extension modules bundled: {', '.join(EXTENSIONS)}")
+    problems += missing_ext
     ui_problems, checked = ui_bundle_problems(UI_SOURCE, UI_BUILT)
     if not ui_problems:
         print(f"   {checked} UI files (app/ui) present and identical, nothing extra")
@@ -379,10 +401,21 @@ def check_gui():
     for name, d in sorted(report.get("decoders", {}).items()):
         print(f"   decoder {name}: {'available' if d.get('available') else 'NOT available'}"
               f"{', ' + d['status'] if d.get('status') else ''}")
+    m = report.get("mp3", {})
+    print(f"   MP3 encoding: {'available' if m.get('available') else 'NOT available'}"
+          f"{' (lameenc ' + m['version'] + ')' if m.get('version') else ''}"
+          f"{', test clip ' + str(m['bytes']) + ' bytes' if m.get('bytes') else ''}")
+    pm = m.get("page")
+    if pm:
+        print(f"   MP3 clip in the page: {'plays' if pm.get('ok') else 'FAILS'} (audio element "
+              f"{pm.get('can_play')!r}; WebAudio {pm.get('rate')} Hz, "
+              f"{pm.get('channels')} ch, {pm.get('duration')} s)")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
           f"version {report.get('capabilities', {}).get('version')!r}, "
           f"wav {report.get('capabilities', {}).get('wav')!r}")
     problems = [f"GUI smoke: {p}" for p in report.get("problems", [])]
+    if report.get("ok") and "mp3" not in report:          # a report from before MP3 clips
+        problems.append("GUI smoke: the report says nothing about MP3 encoding")
     if code != 0 and not problems:
         problems.append(f"OpenEVP.exe --smoke exited {code}")
     if code == 0 and not report.get("ok"):

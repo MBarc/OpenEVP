@@ -83,6 +83,11 @@ foreach ($t in $tables) {
 python tools\make_driver_manifest.py
 if ($LASTEXITCODE -ne 0) { throw "making the driver manifest failed" }
 
+# The app's requirements (pywebview, numpy, lameenc for MP3 clips) before the tests:
+# the release gate fails the MP3 clip tests without lameenc.
+python -m pip install -r requirements-app.txt
+if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+
 # The release gate (tests/release_gate.py): the decoder's golden tests must run,
 # so missing or damaged tables or a DLL that doesn't load fail the tests instead
 # of skipping them. Not for a -NoLpecTables development build, which has no tables.
@@ -100,11 +105,13 @@ if ((Get-PeMachine "dist\openevp-st25.exe") -ne $AMD64) { throw "the built .exe 
 Get-FileHash dist\openevp-st25.exe -Algorithm SHA256
 
 # Desktop app: one-folder build (starts faster and trips antivirus less than one-file).
-python -m pip install -r requirements-app.txt
-if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+# lameenc (MP3 clips, openevp.mp3; LGPL; installed before the tests above) is an
+# extension module: named as a hidden import so a build never silently loses MP3
+# export, with its metadata (its version for --smoke, and its license file).
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OpenEVP" `
     --icon assets\st25.ico --add-binary "$dll;." --add-data "app/ui;app/ui" `
-    --add-data "assets/st25.ico;assets" --add-data "app/driver;driver" @decoder st25-app.py
+    --add-data "assets/st25.ico;assets" --add-data "app/driver;driver" `
+    --hidden-import lameenc --copy-metadata lameenc @decoder st25-app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller (app) failed" }
 if ((Get-PeMachine "dist\OpenEVP\OpenEVP.exe") -ne $AMD64) { throw "the built app is not x64" }
 foreach ($f in "install-winusb.ps1", "uninstall-winusb.ps1", "manifest.ps1", "models.json") {
