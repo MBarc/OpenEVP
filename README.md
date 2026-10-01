@@ -384,8 +384,13 @@ with **Open folder**.
   mark, clips are left out of **Has EVPs** (and the other filters), the folder
   counts, the library total and the EVP chips, and **All recordings** leaves
   them out (they are copies of parts of recordings). You can still mark a clip
-  in the player; the mark is kept, but it doesn't count either. Export clips
-  never cuts clips from clips.
+  in the player; the mark is kept, but it doesn't count either.
+- **Clips from a clip**: load a clip (WAV or MP3), mark the part you want and
+  use Export clips or Save clip, or right-click the clip in the library and
+  choose **Export clips**. The new clips go into the same `Clips` folder as the
+  clip they were cut from (never a `Clips` folder inside it), named after it,
+  e.g. `001_A_003_EVP-A_00m12.4s_EVP-A_00m00.8s.mp3`. A folder's Export clips
+  (and Export clips on a `Clips` folder itself) never cuts clips from clips.
 - MP3 clips are clips exactly like WAV clips: listed, played and markable, never
   counted, and they can be moved out of the `Clips` folder (then they are
   ordinary recordings). An MP3 anywhere else in the library is a recording.

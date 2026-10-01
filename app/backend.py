@@ -56,7 +56,9 @@ the audio server) is computed here from the audio the player plays; whether it i
 shown is a setting (spectrogram; set_spectrogram()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
-counts them as EVPs and never cuts clips from them again.
+counts them as EVPs, and a folder's Export clips job never cuts them again.
+Clips cut from one clip (the player's, or the library's on that clip) go into the
+Clips folder that clip is in, never into a Clips folder inside it.
 
 Library folders can be created, renamed and deleted (to the Recycle Bin only),
 and recordings moved between them: see app/library_ops.py (mixed into Api) and
@@ -269,7 +271,7 @@ def _scan_library(folder, clips=None):
     "._x.wav" companions, temp files, hidden folders) and folders Windows marks
     hidden or system (AppData, $RECYCLE.BIN...) are skipped. The Clips folders
     OpenEVP made (they hold its marker file) are skipped too when clips is None
-    (an Export clips job: clips are never cut again); with a set, they are walked
+    (a folder's Export clips job: its clips are never cut again); with a set, they are walked
     and clips gets the folder_rel of each of them and of every folder inside one
     (its files are clips: listed and playable, never counted as EVPs). complete is
     False when a folder could not be read (its files are missing from the
@@ -1238,7 +1240,8 @@ class Api(LibraryOps):
     def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True, heard=None):
         """Save each mark of the loaded recording (or only the mark mark_id) as its
         own clip (clip_format(): MP3 or WAV) into the Clips subfolder of the folder
-        export_marked() would use: see openevp.clips. Never replaces a file (identical bytes count as
+        export_marked() would use (a clip's clips: into its own Clips folder,
+        _clips_outdir()): see openevp.clips. Never replaces a file (identical bytes count as
         already saved). Admitted, locked and waited for exactly as export_marked().
         {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}.
         speed, keep_pitch, heard: clips at the player's speed and as heard (see
@@ -1571,8 +1574,6 @@ class Api(LibraryOps):
 
     def _export_clips(self, entry, mark_id, at=NORMAL, heard=None):
         src = entry["source"]
-        if src.get("kind") == "file" and _is_clip(src["path"], self._library_path()):
-            return _fail(CLIPS_AGAIN)                    # never a Clips folder inside a Clips folder
         marks = self._store.marks(entry["fp"])
         if mark_id is not None:
             marks = [m for m in marks if m.get("id") == mark_id]
@@ -1593,12 +1594,24 @@ class Api(LibraryOps):
         wav, outdir, stem = got
         del got
         outdir = os.path.join(outdir, CLIPS)
+        if src.get("kind") == "file":
+            outdir = self._clips_outdir(src["path"], outdir)
         try:
             saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at, heard, noise)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
+
+    def _clips_outdir(self, path, outdir, library=None):
+        """Where the clips of the file path go: outdir (the Clips folder beside its
+        WAV with marks), or, for a clip (a file in a Clips folder OpenEVP made), the
+        very folder that clip is in: clips cut from a clip sit beside it, never in
+        a Clips folder inside a Clips folder. library: the library folder to use
+        (default: the current one)."""
+        if _is_clip(path, self._library_path() if library is None else library):
+            return os.path.dirname(os.path.abspath(path))
+        return outdir
 
     def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL, heard=None, noise=None):
         """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"), at
@@ -1659,16 +1672,14 @@ class Api(LibraryOps):
                 return _fail(LIB_CHANGED)
             if path not in paths:
                 paths.append(path)
-        root = self._library_path()
-        paths = [p for p in paths if not _is_clip(p, root)]       # clips are never cut again
-        if not paths:
-            return _fail(CLIPS_AGAIN)
+        # A clip's clips go beside it, in its own Clips folder (see _clips_outdir).
         return self._start_clips(lambda: [(p, "") for p in paths], None, job)
 
     def export_clips_folder(self, folder_id, job):
         """Export the clips of every marked recording in a library folder and all its
         subfolders as a background job (the Clips folders OpenEVP made are left out:
-        clips are never cut again; a Clips folder itself is refused); see _clips_job."""
+        a folder's clips are never all cut again; a Clips folder itself is refused,
+        though one clip can be cut from: export_clips_files()); see _clips_job."""
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1779,7 +1790,8 @@ class Api(LibraryOps):
                     skipped.append(f"{name} ({got})")
                 elif got is not None:
                     wav, fp, marks = got
-                    outdir = os.path.join(self._marked_folder(path, dest, library), CLIPS)
+                    outdir = self._clips_outdir(path, os.path.join(self._marked_folder(path, dest, library), CLIPS),
+                                                library)
                     key = (fp, os.path.normcase(os.path.abspath(outdir)))
                     if key not in done_keys:
                         done_keys.add(key)

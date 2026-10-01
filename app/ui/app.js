@@ -1811,7 +1811,7 @@ function libraryMenuItems(target) {
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
       { label: "Export clips", disabled: !canExportClips() || inClips,
-        title: inClips ? "These are clips already" : clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
+        title: inClips ? "A folder of clips: right-click one clip to cut clips from it" : clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ folder: id }, L.folderById.get(id).name || "the library") },
     ];
   }
@@ -1831,8 +1831,9 @@ function libraryMenuItems(target) {
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
       // Export clips is for the row clicked (its files: the copies of one recording), ticked or not.
       { label: "Export clips", disabled: !canExportClips() || !groupMarked(g),
-        title: clipsTip(g.clip ? "This is a clip already" : groupMarked(g) ? `Save each EVP of this recording as its own ${clipLabel()} clip`
-                                                                             : "No EVPs marked in this recording"),
+        title: clipsTip(!groupMarked(g) ? `No EVPs marked in this ${g.clip ? "clip" : "recording"}`
+                        : g.clip ? `Save each EVP marked in this clip as its own ${clipLabel()} clip (in the same Clips folder)`
+                        : `Save each EVP of this recording as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
     ];
   }
@@ -3421,7 +3422,8 @@ function clipsTip(tip) {
   if (S.lib.op || S.exporting) return "Wait for the operation to finish";
   return tip;
 }
-function groupMarked(g) { return !g.clip && g.marks.A + g.marks.B + g.marks.C > 0; }
+// Marked: a recording's EVPs, or a clip's own marks (cut into clips beside it; never counted).
+function groupMarked(g) { return g.marks.A + g.marks.B + g.marks.C > 0; }
 
 // A folder (and its folders) or one recording's files, as a background job: progress, Cancel.
 async function exportLibraryClips(what, name) {

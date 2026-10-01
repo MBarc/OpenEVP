@@ -899,7 +899,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
 
   // A Clips folder OpenEVP made: listed with its own icon and "Clips" tag, its clips counted apart and
   // playable, but never EVPs (even one marked in the player): no chips, no filter, no count, not in the
-  // All recordings view; Export clips is off for it and its clips; recordings can't be moved into it.
+  // All recordings view; Export clips is off for the folder (no bulk re-clipping) but on for a marked clip;
+  // recordings can't be moved into it.
   const clipFolders = [...libFolders, { id: "fc", name: "Clips", rel: ["Clips"], parent: "root", clips: true, in_clips: true }];
   const marked = (f, A) => ({ ...f, marks: { A, B: 0, C: 0 } });
   api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 60, exists: true, truncated: false, indexing: false,
@@ -920,7 +921,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(folderRow("f1").cells[1].textContent, "📁 Old MillNo recordings");
   rightClick(clipsRow.cells[1]);
   assert.deepStrictEqual(menuItems(), [["Open", false], ["Rename…", false], ["Delete…", false], ["Export clips", true]]);
-  assert.strictEqual(menu.children[3].title, "These are clips already");
+  assert.strictEqual(menu.children[3].title, "A folder of clips: right-click one clip to cut clips from it");
   press("Escape");
   // "Has EVPs": the recording, not the folder of (marked) clips.
   vm.runInContext(`S.lib.filter = "evp"; renderLibrary();`, context);
@@ -936,7 +937,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(context.dropTarget({ target: clipsRow.cells[1] }), null);
   assert.strictEqual(context.dropTarget({ target: folderRow("f1").cells[1] }), folderRow("f1"));
   vm.runInContext(`S.drag = null;`, context);
-  // Inside it: the clips, each "Clip" in the EVP column; one plays; Export clips is off.
+  // Inside it: the clips, each "Clip" in the EVP column; one plays; Export clips is on for a marked one
+  // (its clips go beside it, in the same Clips folder) and off for an unmarked one.
   context.openLibraryFolder("fc");
   await settle();
   assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["c1", "c2"]);
@@ -946,8 +948,21 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.match(clipRow.cells[5].title, /2 marks of its own, not counted as EVPs/);
   assert.strictEqual(recRow("c2").cells[5].textContent, "Clip");
   rightClick(clipRow.cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
-  assert.strictEqual(menu.children[3].title, "This is a clip already");
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Rename…", false], ["Move to…", false], ["Export clips", false]]);
+  assert.match(menu.children[3].title, /^Save each EVP marked in this clip as its own (MP3|WAV) clip \(in the same Clips folder\)$/);
+  api.export_clips_files = async (ids, job) => { clipCalls.push(["files", ids, job]); return { ok: true, job }; };
+  choose("Export clips");
+  await settle();
+  [what, ids, job] = JSON.parse(JSON.stringify(clipCalls.pop()));
+  assert.deepStrictEqual([what, ids], ["files", ["c1"]]);
+  assert.match($("banner-text").textContent, /^Exporting the clips of a_EVP-A_00m01\.0s\.wav…/);
+  window.onBackendEvent("clips-done", { job, saved: 2, already: 0, recordings: 1, notes: [], folder: "D:/lib/Clips",
+                                        skipped: [], cancelled: false });
+  assert.ok(!vm.runInContext("S.clips.running", context));
+  assert.strictEqual($("banner-text").textContent, "✓ 2 clips saved.");
+  rightClick(recRow("c2").cells[1]);
+  assert.deepStrictEqual(menuItems()[3], ["Export clips", true]);
+  assert.strictEqual(menu.children[3].title, "No EVPs marked in this clip");
   press("Escape");
   ops.length = 0;
   clipRow.onclick();
@@ -999,6 +1014,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(vm.runInContext("S.zoomMax", context), 400);
   assert.ok(!$("mark-evp").disabled && !$("reviewed").disabled);                 // marked like any clip
   assert.ok(!/MP3/.test($("mark-evp").title));
+  // Marked, the MP3 clip is cut into clips like any recording: Export clips and Save clip.
+  api.export_clips = async (rec, id) => { clipCalls.push(["clips", rec, id]);
+    return { ok: true, saved: 1, already: 0, names: [], notes: [], folder: "D:/lib/Clips" }; };
+  const m7 = [{ id: "m7", start: 0.5, end: 0.9, cls: "B", note: "" }];
+  api.get_marks = async () => ({ ok: true, marks: m7, reviewed: false, backup: { status: null, detail: "" } });
+  vm.runInContext(`S.marks = ${JSON.stringify(m7)}; renderMarks();`, context);
+  assert.ok(!$("export-clips").disabled);
+  await $("export-clips").onclick();
+  assert.deepStrictEqual(clipCalls.pop(), ["clips", "h9", null]);
+  assert.strictEqual($("banner-text").textContent, "✓ 1 clip saved.");
+  const clipSave = $("marks-list").children[0].children.find((b) => b.textContent === "Save clip");
+  assert.ok(!clipSave.disabled);
+  clipSave.onclick({ stopPropagation() {} });
+  await settle();
+  assert.deepStrictEqual(clipCalls.pop(), ["clips", "h9", "m7"]);
+  delete api.get_marks;
+  vm.runInContext(`S.marks = []; renderMarks();`, context);
   vm.runInContext(`setCurrent(null); S.region = null;`, context);
   context.openLibraryFolder("root");
   await settle();

@@ -76,8 +76,11 @@ EVP clips:
     shows **Clip** in the EVP column and plays on a click, with no marks imported
     (the marks list stays empty). Mark one in the player: the mark stays, but no
     count, chip or "Has EVPs" changes. **All recordings** shows no clips. Export
-    clips is greyed out on the `Clips` folder and on a clip; Export clips on the
-    investigation cuts nothing from the clips. Moving a recording into `Clips`
+    clips is greyed out on the `Clips` folder; Export clips on the investigation
+    cuts nothing from the clips. Clips from a clip: with the marked clip loaded,
+    **Export clips** and **Save clip** save `<clip>_EVP-…` into that same `Clips`
+    folder (no `Clips\Clips`); right-click the clip → **Export clips** does the
+    same, for a WAV and an MP3 clip. The new clips count nothing either. Moving a recording into `Clips`
     is not offered (and dragging onto it does nothing). The `Clips` folder holds a
     hidden `.openevp-clips` file (Explorer: show hidden items). Renaming the
     investigation folder keeps its `Clips` folder; rename `Clips` itself (it keeps
