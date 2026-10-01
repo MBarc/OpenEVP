@@ -232,9 +232,21 @@ or the investigation's folder for a file in the library). Those marks are standa
 `cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
 read (none has been verified with OpenEVP yet).
 
+### The player's settings
+
+Right of the waveform, three small tabs hold the player's settings: **View**
+(Zoom, Height, Spectrogram), **Speed** (speed, Keep pitch, Exports at …×) and
+**Enhance** (the listening aids, Reduce noise, Exports enhanced). Click a tab or
+use the arrow keys on it (Home and End for the first and last); the last one
+you picked is shown again next time. A tab with something changed from its
+default shows a dot (**Speed •** while the speed isn't 1×, **Enhance •** while
+anything there is on, **View •** with the spectrogram off or the height raised),
+and its tooltip says what, so a setting is never hidden behind another tab. The
+keyboard shortcuts (`[` `]` `\`, M, Space) work whichever tab is shown.
+
 ### Playback speed
 
-**Speed**, next to Zoom and Height, plays at 0.25× to 2× (`[` slower, `]`
+**Speed**, on the Speed tab, plays at 0.25× to 2× (`[` slower, `]`
 faster, `\` or a double-click back to 1×). With **Keep pitch** ticked (the
 default) speech slows down at its normal pitch; untick it to hear it like a
 tape, deeper when slower. The speed and Keep pitch are remembered.
@@ -251,7 +263,7 @@ seconds (a progress bar shows how far it is).
 
 ### Enhance
 
-**Enhance**, under the speed, opens a small panel of listening aids. They change
+The **Enhance** tab holds the listening aids. They change
 only what you hear, live while it plays; the recording itself and its marks are
 never touched:
 
@@ -266,9 +278,9 @@ never touched:
   harmonics.
 - **Reset** turns everything off.
 
-The settings are remembered. While any of them is on, the button reads
-**Enhance: on** and an **Enhanced** tag sits above the waveform, so it is never
-left on unnoticed. **Exports enhanced** then shows under it: like **Exports at
+The settings are remembered. While any of them is on, the tab reads
+**Enhance •** and an **Enhanced** tag sits above the waveform, so it is never
+left on unnoticed. **Exports enhanced** then shows on the tab: like **Exports at
 0.5×** it is ticked only when you turn enhancement on in this session, and it
 makes the player's Export WAV with marks, Export clips and Save clip save what
 you hear, named `…_enhanced` (`…_0.5x_enhanced.wav` with a speed: the speed is
@@ -289,7 +301,8 @@ position, so its marks stay put).
 To take steady background noise down (hiss, fans, air conditioning, traffic),
 drag across a stretch with **only** that noise in it (no voices, at least a
 quarter of a second; a second or two is better) and click **Learn noise** under
-the waveform. Then tick **Reduce noise** in **Enhance**. OpenEVP makes a
+the waveform. Then tick **Reduce noise** on the **Enhance** tab (hover it to see
+where the noise was learnt from). OpenEVP makes a
 noise-reduced copy of the recording's audio (a progress bar with Cancel shows
 while it does; a 30-minute ICD-ST25 recording takes about 5 seconds) and the
 player switches to it where it was, playing on. Its **amount** sets how far the
@@ -316,7 +329,7 @@ cause of the "musical noise" of simple spectral subtraction).
 
 ### Spectrogram
 
-**Spectrogram** (under Height) is on unless you untick it: it shows under the waveform, time across,
+**Spectrogram** (on the View tab) is on unless you untick it: it shows under the waveform, time across,
 pitch up (0 Hz at the bottom, labelled in kHz), loudness as colour from black
 through purple and red to pale yellow. A voice shows as stacked bright bands
 (its harmonics) shaped by its formants, which is often easier to spot than in

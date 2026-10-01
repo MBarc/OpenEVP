@@ -1434,7 +1434,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
 
   // ---- Enhance: Boost, Leveler, filters, Hum remover through Web Audio; never on unnoticed ----
   // The real media element (ours, asking for CORS) went to WaveSurfer.create().
-  assert.ok(/<button id="enhance-toggle"[^>]*aria-controls="enhance-panel"/.test(html));
+  assert.ok(/<button type="button" role="tab" id="tab-enhance" data-tab="enhance" aria-controls="panel-enhance"/.test(html));
   assert.ok(/id="export-heard-label" hidden/.test(html) && /id="enhanced-tag"[^>]*hidden/.test(html));
   assert.ok(html.includes('<input id="boost" type="range" min="0" max="24" step="1" value="0">'));
   for (const id of ["leveler", "leveler-strength", "voice-filter", "cut-rumble", "cut-hiss", "hum", "enhance-reset"]) {
@@ -1443,21 +1443,13 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.setSpeed(1); await speedSaved();
   // Startup with nothing remembered: all off, the plain label, no audio graph at all.
   const enh = () => JSON.parse(vm.runInContext("JSON.stringify(S.enh.settings)", context));
-  const enhShown = () => [$("enhance-toggle").textContent, $("enhance-toggle").classList.contains("on"), $("enhanced-tag").hidden,
+  // [the Enhance tab marked as changed, the "Enhanced" tag hidden, "Exports enhanced" hidden, ticked]
+  const enhShown = () => [$("tab-enhance").classList.contains("changed") && $("tab-enhance").dataset.on === "1", $("enhanced-tag").hidden,
                           $("export-heard-label").hidden, $("export-heard").checked];
   assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
-  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, false]);
+  assert.deepStrictEqual(enhShown(), [false, true, true, false]);
   assert.strictEqual(audioContexts.length, 0, "no AudioContext until something is on");
-  // The panel opens from the button and closes with Escape or a click elsewhere.
-  $("enhance-toggle").onclick();
-  assert.ok(!$("enhance-panel").hidden && $("enhance-toggle")["aria-expanded"] === "true");
-  key("Escape");
-  assert.ok($("enhance-panel").hidden);
-  $("enhance-toggle").onclick();
-  fire([window], "pointerdown", { target: $("enhance-panel") });
-  assert.ok(!$("enhance-panel").hidden, "a click inside keeps it open");
-  fire([window], "pointerdown", { target: document.body });
-  assert.ok($("enhance-panel").hidden);
+  assert.strictEqual($("tab-enhance").title, "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed)");
   // A player with a media element playing at 0.5×, Keep pitch, mid-play.
   const enhMedia = { playbackRate: 0.5, defaultPlaybackRate: 0.5, preservesPitch: true };
   let enhPlaying = true;
@@ -1480,7 +1472,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(actx.nodes.find((n) => n.kind === "source").media, enhMedia);
   assert.deepStrictEqual(audioChain(actx), [["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
   assert.ok(actx.resumes >= 1 && actx.state === "running", "resumed (autoplay rules)");
-  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);   // turned on by the user: exports follow
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);   // turned on by the user: exports follow
   assert.strictEqual($("boost-value").textContent, "+6 dB");
   assert.deepStrictEqual([enhMedia.playbackRate, enhMedia.preservesPitch, enhPlaying], [0.5, true, true]);
   // The limiter's curve: linear to 0.8, then soft towards 1 (the WaveShaper's input is scaled by 1/64).
@@ -1495,6 +1487,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("hum").value = "60"; $("hum").onchange();
   $("leveler").checked = true; $("leveler").onchange();
   $("leveler-strength").value = "strong"; $("leveler-strength").onchange();
+  assert.strictEqual($("tab-enhance").title, "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed). " +
+                     "On now: Leveler (strong), Boost +6 dB, Voice filter, Cut rumble, Hum remover 60 Hz.");
   assert.deepStrictEqual(audioChain(actx), [["highpass", 120, -3.01], ["highpass", 300, -3.01], ["lowpass", 3400, -3.01],
                                             ["notch", 60, 12], ["notch", 120, 24], ["notch", 180, 36], ["notch", 240, 48],
                                             ["compressor", -42, 6, 8, 0.003, 0.2], ["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
@@ -1535,11 +1529,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("enhance-reset").onclick();
   assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
   assert.deepStrictEqual(audioChain(actx), []);
-  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, false]);
+  assert.deepStrictEqual(enhShown(), [false, true, true, false]);
   assert.strictEqual(context.exportHeard(), null);
   // On again from all off: ticked again (as "Exports at 0.5×" is when the speed leaves 1×).
   $("hum").value = "50"; $("hum").onchange();
-  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);
   assert.deepStrictEqual(audioChain(actx).map((st) => st[1]), [50, 100, 150, 200]);
   $("boost").value = "0"; fire([$("boost")], "dblclick", { target: $("boost") });
   // A player that is not shown exports as recorded.
@@ -1575,7 +1569,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!/couldn't start/.test($("banner-text").textContent));
   // Remembered settings at the next start: on (and shown on), but "Exports enhanced" not ticked.
   vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: 12, leveler: false, strength: "light", voice: true, rumble: false, hiss: false, hum: "off" } }; setupEnhance();`, context);
-  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, false]);
+  assert.deepStrictEqual(enhShown(), [true, false, false, false]);
   assert.strictEqual(context.exportHeard(), null);
   vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: "lots", voice: 3, hum: "50" } }; setupEnhance();`, context);   // damaged: field by field
   assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "50" });
@@ -1592,6 +1586,109 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.banner("");
   vm.runInContext(`setCurrent(null);`, context);
 
+  // ---- The player's settings as tabs: View, Speed, Enhance ----
+  for (const [t, label] of [["view", "View"], ["speed", "Speed"], ["enhance", "Enhance"]]) {
+    assert.ok(new RegExp(`role="tab" id="tab-${t}" data-tab="${t}" aria-controls="panel-${t}"`).test(html), t);
+    assert.ok(new RegExp(`<div id="panel-${t}" class="tab-panel[^"]*" role="tabpanel" aria-labelledby="tab-${t}"`).test(html), t);
+    assert.ok(html.includes(`>${label}<span class="tab-dot" hidden aria-hidden="true">•</span></button>`), label);
+  }
+  assert.ok(/<div id="player-tabs" role="tablist" aria-label="Player settings">/.test(html));
+  // Each control is in its tab's panel.
+  const inPanel = (id, panel) => html.indexOf(`id="${id}"`) > html.indexOf(`<div id="panel-${panel}"`) &&
+    (panel === "enhance" || html.indexOf(`id="${id}"`) < html.indexOf(`<div id="panel-${{ view: "speed", speed: "enhance" }[panel]}"`));
+  for (const id of ["zoom", "height", "spectrogram"]) assert.ok(inPanel(id, "view"), id);
+  for (const id of ["speed", "speed-value", "keep-pitch", "export-speed"]) assert.ok(inPanel(id, "speed"), id);
+  for (const id of ["boost", "leveler", "leveler-strength", "voice-filter", "cut-rumble", "cut-hiss", "hum", "reduce-noise",
+                    "noise-amount", "export-heard", "enhance-reset"]) assert.ok(inPanel(id, "enhance"), id);
+  const shownTab = () => ["view", "speed", "enhance"].filter((t) => !$(`panel-${t}`).hidden);
+  const selected = () => ["view", "speed", "enhance"].filter((t) => $(`tab-${t}`)["aria-selected"] === "true");
+  const tabMarked = () => ["view", "speed", "enhance"].filter((t) => $(`tab-${t}`).dataset.on === "1");
+  const wsBeforeTabs = vm.runInContext("S.ws", context);
+  context.__ws = spWs;
+  vm.runInContext("S.ws = __ws;", context);
+  // Startup with nothing remembered: View; the tabs reached with Tab are only the selected one.
+  const stored = {};
+  const realStorage = { get: window.localStorage.getItem, set: window.localStorage.setItem };
+  window.localStorage.getItem = (k) => (k in stored ? stored[k] : null);
+  window.localStorage.setItem = (k, v) => { stored[k] = String(v); };
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual([shownTab(), selected(), $("tab-view").tabIndex, $("tab-speed").tabIndex], [["view"], ["view"], 0, -1]);
+  // A click picks a tab (and it is remembered); the arrow keys move along (round), Home and End to the ends.
+  $("tab-speed").onclick();
+  assert.deepStrictEqual([shownTab(), selected(), document.activeElement, stored["openevp.player-tab"]],
+                         [["speed"], ["speed"], $("tab-speed"), "speed"]);
+  const tabKey = (k) => fire([$("player-tabs")], "keydown", { key: k, target: document.activeElement });
+  let tk = tabKey("ArrowRight");
+  assert.ok(tk.defaultPrevented);
+  assert.deepStrictEqual([shownTab(), document.activeElement], [["enhance"], $("tab-enhance")]);
+  tabKey("ArrowRight");
+  assert.deepStrictEqual(shownTab(), ["view"]);                                     // round
+  tabKey("ArrowLeft");
+  assert.deepStrictEqual(shownTab(), ["enhance"]);
+  tabKey("Home");
+  assert.deepStrictEqual(shownTab(), ["view"]);
+  tabKey("End");
+  assert.deepStrictEqual([shownTab(), $("tab-enhance").tabIndex, $("tab-view").tabIndex], [["enhance"], 0, -1]);
+  tk = tabKey("x");
+  assert.ok(!tk.defaultPrevented && shownTab()[0] === "enhance");
+  // Remembered: the next start opens on it; a damaged value falls back to View.
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual(shownTab(), ["enhance"]);
+  stored["openevp.player-tab"] = "nonsense";
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual(shownTab(), ["view"]);
+  // Shortcuts work whichever tab is shown: with Enhance shown, ] changes the speed and the Speed tab
+  // gets its dot (and says what is on); \ takes it back.
+  $("tab-enhance").onclick();
+  context.setSpeed(1); await speedSaved();
+  vm.runInContext(`S.keepPitch = true; showSpeed();`, context);
+  assert.ok(!tabMarked().includes("speed"));
+  key("]");
+  assert.deepStrictEqual([speedState()[0], shownTab()], [1.25, ["enhance"]]);
+  assert.ok(tabMarked().includes("speed"));
+  assert.strictEqual($("tab-speed").title, "Playback speed and Keep pitch. On now: Speed 1.25×.");
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  assert.strictEqual($("tab-speed").title, "Playback speed and Keep pitch. On now: Speed 1.25×, Keep pitch off.");
+  $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  key(BACKSLASH);
+  assert.ok(!tabMarked().includes("speed") && $("tab-speed").title === "Playback speed and Keep pitch");
+  await speedSaved();
+  // With View shown: the Enhance tab's dot says Boost is on; M still opens the mark form; Space still plays.
+  $("tab-view").onclick();
+  loadMarked("htab", [{ id: "t1", start: 1, end: 1.5, cls: "A", note: "" }]);
+  $("boost").value = "3"; $("boost").oninput();
+  assert.ok(tabMarked().includes("enhance") && $("tab-enhance").title.endsWith("On now: Boost +3 dB."));
+  assert.deepStrictEqual(shownTab(), ["view"], "a change never switches the tab");
+  $("enhance-reset").onclick();
+  assert.ok(!tabMarked().includes("enhance"));
+  const tabSel = fakeRegions.addRegion({ id: "tabsel", start: 2, end: 2.5 });
+  context.regionCreated(tabSel);
+  key("m");
+  assert.ok(vm.runInContext("!!S.markForm", context), "M opens the mark form with View shown");
+  context.closeMarkForm();
+  const spaceBefore = spPlaying;
+  fire([document], "keydown", { code: "Space", key: " ", target: document.body });
+  assert.strictEqual(spPlaying, !spaceBefore, "Space plays/pauses with View shown");
+  fire([document], "keydown", { code: "Space", key: " ", target: document.body });
+  // The mark loop works with the Speed tab shown.
+  $("tab-speed").onclick();
+  loopBtn(0).onclick(ev);
+  assert.ok(vm.runInContext("S.markLoop && S.activeMark === 't1'", context));
+  loopBtn(0).onclick(ev);
+  // View's dot: the spectrogram turned off, or Height raised (zoom is navigation: no dot).
+  vm.runInContext(`S.spec.on = true; showTabMarks();`, context);
+  $("zoom").value = "500";
+  assert.ok(!tabMarked().includes("view"));
+  $("height").value = "20"; $("height").oninput();
+  assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Height raised."));
+  $("height").value = "1"; $("height").oninput();
+  vm.runInContext(`S.spec.on = false; showTabMarks();`, context);
+  assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Spectrogram off."));
+  vm.runInContext(`S.spec.on = true; showTabMarks(); clearSelection(); setCurrent(null); S.enh.exportHeard = false; showEnhance();`, context);
+  window.localStorage.getItem = realStorage.get; window.localStorage.setItem = realStorage.set;
+  $("tab-view").onclick();
+  context.__ws = wsBeforeTabs;
+  vm.runInContext("S.ws = __ws;", context);
   // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
   assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
   // On by default: capabilities() said nothing (a new user), so it is on; only an explicit false turns it off.
@@ -1757,7 +1854,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle(); await settle();
   assert.deepStrictEqual(nLog, [["load", "http://a/n1-dn.wav", [[0.2]], 100], ["setTime", 12.5], ["play"]]);
   assert.strictEqual(vm.runInContext("S.current.playing", context), "http://a/n1-dn.wav");
-  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);     // on, and exports follow (turned on now)
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);     // on, and exports follow (turned on now)
   assert.ok($("banner").hidden && $("progress").hidden);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(context.exportHeard())), { denoise: { profile: "p1", amount: 40 } });
   assert.strictEqual(vm.runInContext("S.current.fp", context), "fp-n1", "marks stay the recording's");
@@ -1790,7 +1887,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(nLog, [["load", "http://a/n1.wav", [[0.5]], 100], ["setTime", 40]]);
   reduceAnswer({ ok: false, cancelled: true, error: "Stopped." });
   await settle();
-  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, true]);
+  assert.deepStrictEqual(enhShown(), [false, true, true, true]);
   assert.strictEqual(context.exportHeard(), null);
   // A failure says why and turns it off.
   $("reduce-noise").checked = true; $("reduce-noise").onchange();

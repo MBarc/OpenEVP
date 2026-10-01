@@ -125,44 +125,48 @@
     </div>
     <span id="time">0:00 / 0:00</span>
     <div id="view-controls">
-      <label title="Stretch the waveform sideways (or scroll the mouse wheel over it)">Zoom
-        <input id="zoom" type="range" min="0" max="1000" step="any" value="0"></label>
-      <label title="Make quiet parts taller (or hold Shift and scroll over the waveform)">Height
-        <input id="height" type="range" min="1" max="100" step="any" value="1"></label>
-      <label id="spectrogram-label" title="Show a spectrogram under the waveform: time across, pitch up (0 Hz at the bottom), loudness as colour (dark: quiet, yellow: loud). Voices show as stacked bright bands.">
-        <input id="spectrogram" type="checkbox"> Spectrogram</label>
-      <label id="speed-label" title="Playback speed: [ slower, ] faster, \ back to 1× (or double-click the slider)"><span>Speed <span id="speed-value">1×</span></span>
-        <input id="speed" type="range" min="0" max="6" step="1" value="3"></label>
-      <label id="keep-pitch-label" title="On: slower or faster speech at its normal pitch. Off: like a tape, the pitch changes with the speed.">
-        <input id="keep-pitch" type="checkbox" checked> Keep pitch</label>
-      <label id="export-speed-label" hidden title="The player's Export WAV with marks, Export clips and Save clip at this speed (named …_0.5x, or …_0.5x-tape without Keep pitch). The library's Export clips stays at normal speed.">
-        <input id="export-speed" type="checkbox"> <span id="export-speed-text">Exports at 1×</span></label>
-      <button id="enhance-toggle" type="button" aria-expanded="false" aria-controls="enhance-panel"
-              title="Boost, level and filter what you hear. The recording itself is never changed.">Enhance</button>
-      <label id="export-heard-label" hidden title="The player's Export WAV with marks, Export clips and Save clip as you hear them, enhanced (named …_enhanced; with a speed, …_0.5x_enhanced). The library's Export clips stays as recorded.">
-        <input id="export-heard" type="checkbox"> Exports enhanced</label>
-    </div>
-    <div id="enhance-panel" class="enhance-panel" role="group" aria-label="Enhance" hidden>
-      <div class="enhance-head"><strong>Enhance</strong> <span class="muted">what you hear; the file is never changed</span>
-        <button id="enhance-close" type="button" class="link" title="Close (Esc)">✕</button></div>
-      <label title="Make the recording louder (double-click the slider for 0 dB). A soft limiter keeps it from clipping.">Boost
-        <input id="boost" type="range" min="0" max="24" step="1" value="0"> <span id="boost-value">0 dB</span></label>
-      <span class="enhance-row"><label title="Evens out the level: quiet parts come up, loud ones go down."><input type="checkbox" id="leveler"> Leveler</label>
-        <select id="leveler-strength" aria-label="Leveler strength" title="How strongly the Leveler evens out the level">
-          <option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></span>
-      <label title="Keep the voice band, about 300 to 3400 Hz, and lower what is below and above it"><input type="checkbox" id="voice-filter"> Voice filter</label>
-      <label title="Lower everything below about 120 Hz: handling noise, wind, traffic rumble"><input type="checkbox" id="cut-rumble"> Cut rumble</label>
-      <label id="cut-hiss-label" title="Lower everything above 5 kHz (hiss)"><input type="checkbox" id="cut-hiss"> Cut hiss</label>
-      <label title="Remove mains hum (and its next three harmonics): 60 Hz in the Americas, 50 Hz in most other places">Hum remover
-        <select id="hum"><option value="off">Off</option><option value="60">60 Hz</option><option value="50">50 Hz</option></select></label>
-      <div class="enhance-noise">
-        <span class="enhance-row"><label title="Lower the background noise learnt with Learn noise. Keep the amount low: strong noise reduction leaves watery, warbling artefacts that can sound like whispers or voices."><input type="checkbox" id="reduce-noise"> Reduce noise</label>
+      <div id="player-tabs" role="tablist" aria-label="Player settings">
+        <button type="button" role="tab" id="tab-view" data-tab="view" aria-controls="panel-view" aria-selected="true">View<span class="tab-dot" hidden aria-hidden="true">•</span></button>
+        <button type="button" role="tab" id="tab-speed" data-tab="speed" aria-controls="panel-speed" aria-selected="false" tabindex="-1">Speed<span class="tab-dot" hidden aria-hidden="true">•</span></button>
+        <button type="button" role="tab" id="tab-enhance" data-tab="enhance" aria-controls="panel-enhance" aria-selected="false" tabindex="-1">Enhance<span class="tab-dot" hidden aria-hidden="true">•</span></button>
+      </div>
+      <div class="tab-panels">
+      <div id="panel-view" class="tab-panel" role="tabpanel" aria-labelledby="tab-view">
+        <label title="Stretch the waveform sideways (or scroll the mouse wheel over it)">Zoom
+          <input id="zoom" type="range" min="0" max="1000" step="any" value="0"></label>
+        <label title="Make quiet parts taller (or hold Shift and scroll over the waveform)">Height
+          <input id="height" type="range" min="1" max="100" step="any" value="1"></label>
+        <label id="spectrogram-label" class="end" title="Show a spectrogram under the waveform: time across, pitch up (0 Hz at the bottom), loudness as colour (dark: quiet, yellow: loud). Voices show as stacked bright bands.">
+          <input id="spectrogram" type="checkbox"> Spectrogram</label>
+      </div>
+      <div id="panel-speed" class="tab-panel" role="tabpanel" aria-labelledby="tab-speed" hidden>
+        <label id="speed-label" title="Playback speed: [ slower, ] faster, \ back to 1× (or double-click the slider)"><span>Speed <span id="speed-value">1×</span></span>
+          <input id="speed" type="range" min="0" max="6" step="1" value="3"></label>
+        <label id="keep-pitch-label" class="end" title="On: slower or faster speech at its normal pitch. Off: like a tape, the pitch changes with the speed.">
+          <input id="keep-pitch" type="checkbox" checked> Keep pitch</label>
+        <label id="export-speed-label" class="end" hidden title="The player's Export WAV with marks, Export clips and Save clip at this speed (named …_0.5x, or …_0.5x-tape without Keep pitch). The library's Export clips stays at normal speed.">
+          <input id="export-speed" type="checkbox"> <span id="export-speed-text">Exports at 1×</span></label>
+      </div>
+      <div id="panel-enhance" class="tab-panel enhance-tab" role="tabpanel" aria-labelledby="tab-enhance" hidden>
+        <label title="Make the recording louder (double-click the slider for 0 dB). A soft limiter keeps it from clipping. Enhance changes only what you hear; the file is never changed.">Boost
+          <input id="boost" type="range" min="0" max="24" step="1" value="0"> <span id="boost-value">0 dB</span></label>
+        <span class="enhance-row"><label title="Evens out the level: quiet parts come up, loud ones go down."><input type="checkbox" id="leveler"> Leveler</label>
+          <select id="leveler-strength" aria-label="Leveler strength" title="How strongly the Leveler evens out the level">
+            <option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></span>
+        <span class="enhance-row"><label title="Keep the voice band, about 300 to 3400 Hz, and lower what is below and above it"><input type="checkbox" id="voice-filter"> Voice filter</label>
+          <label title="Lower everything below about 120 Hz: handling noise, wind, traffic rumble"><input type="checkbox" id="cut-rumble"> Cut rumble</label></span>
+        <span class="enhance-row"><label id="cut-hiss-label" title="Lower everything above 5 kHz (hiss)"><input type="checkbox" id="cut-hiss"> Cut hiss</label>
+          <label title="Remove mains hum (and its next three harmonics): 60 Hz in the Americas, 50 Hz in most other places">Hum
+            <select id="hum"><option value="off">Off</option><option value="60">60 Hz</option><option value="50">50 Hz</option></select></label></span>
+        <span class="enhance-row" id="noise-row"><label title="Lower the background noise learnt with Learn noise (select background noise only, then Learn noise under the waveform). Keep the amount low: strong noise reduction leaves watery, warbling artefacts that can sound like whispers or voices."><input type="checkbox" id="reduce-noise"> Reduce noise</label>
           <input id="noise-amount" type="range" min="0" max="100" step="5" value="40" aria-label="Noise reduction amount"
                  title="How much to lower the noise (40% lowers it by 12 dB, 100% by 30 dB). More is not better: strong reduction leaves watery artefacts that can sound like voices.">
-          <span id="noise-amount-value">40%</span></span>
-        <span id="noise-status" class="muted"></span>
+          <span id="noise-amount-value">40%</span><span id="noise-status" class="visually-hidden"></span></span>
+        <span class="enhance-row"><label id="export-heard-label" hidden title="The player's Export WAV with marks, Export clips and Save clip as you hear them, enhanced (named …_enhanced; with a speed, …_0.5x_enhanced). The library's Export clips stays as recorded.">
+          <input id="export-heard" type="checkbox"> Exports enhanced</label>
+          <button id="enhance-reset" type="button" title="Turn every enhancement (and Reduce noise) off">Reset</button></span>
       </div>
-      <div class="enhance-foot"><button id="enhance-reset" type="button" title="Turn every enhancement off">Reset</button></div>
+      </div>
     </div>
     <button id="open-wav-2" class="link" title="Open another WAV or MP3 file">Open audio file…</button>
   </div>

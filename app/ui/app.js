@@ -2049,7 +2049,8 @@ function setupPlayer() {
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
   $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
-  $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
+  $("height").oninput = () => { S.ws.setOptions({ barHeight: Number($("height").value) }); showTabMarks(); };
+  setupTabs();
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSpeed();
   setupEnhance();
@@ -2094,6 +2095,84 @@ function wheelZoom(e) {
   if (next) S.ws.setScroll(t * next - x);
 }
 
+// ---- The player's settings: View, Speed and Enhance tabs (a tablist, as WAI-ARIA describes) ----
+// One tab is shown at a time; the last one picked is remembered for this viewer. A tab whose
+// settings differ from their defaults shows a dot, and its tooltip says what is on, so nothing
+// changed is ever hidden behind another tab. Keyboard shortcuts don't depend on the tab shown.
+const PLAYER_TABS = ["view", "speed", "enhance"];
+const PLAYER_TAB_KEY = "openevp.player-tab";
+const TAB_TIPS = { view: "Zoom, Height and the spectrogram", speed: "Playback speed and Keep pitch",
+                   enhance: "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed)" };
+
+function setupTabs() {
+  let saved = null;
+  try { saved = localStorage.getItem(PLAYER_TAB_KEY); } catch (e) { /* not kept */ }
+  for (const name of PLAYER_TABS) $(`tab-${name}`).onclick = () => selectTab(name, true);
+  $("player-tabs").addEventListener("keydown", tabKeys);
+  selectTab(PLAYER_TABS.includes(saved) ? saved : "view", false);
+}
+
+function selectTab(name, focus) {
+  if (!PLAYER_TABS.includes(name)) return;
+  for (const t of PLAYER_TABS) {
+    const tab = $(`tab-${t}`), on = t === name;
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(`panel-${t}`).hidden = !on;
+  }
+  S.tab = name;
+  try { localStorage.setItem(PLAYER_TAB_KEY, name); } catch (e) { /* not kept */ }
+  if (focus) $(`tab-${name}`).focus();
+}
+
+// Left / Right move to the previous / next tab (round), Home / End to the first / last.
+function tabKeys(e) {
+  const at = PLAYER_TABS.indexOf(S.tab);
+  let next = null;
+  if (e.key === "ArrowRight") next = PLAYER_TABS[(at + 1) % PLAYER_TABS.length];
+  else if (e.key === "ArrowLeft") next = PLAYER_TABS[(at + PLAYER_TABS.length - 1) % PLAYER_TABS.length];
+  else if (e.key === "Home") next = PLAYER_TABS[0];
+  else if (e.key === "End") next = PLAYER_TABS[PLAYER_TABS.length - 1];
+  if (next === null) return;
+  e.preventDefault();
+  selectTab(next, true);
+}
+
+// What differs from the defaults, per tab ([] when nothing does). Zoom is not counted: it is
+// navigation, and the waveform itself shows it.
+function tabChanges() {
+  const view = [], speed = [], enhance = [];
+  if (S.spec && !S.spec.on) view.push("Spectrogram off");
+  if (Number($("height").value) > 1) view.push("Height raised");
+  if (S.speed !== 1) speed.push(`Speed ${S.speed}×`);
+  if (S.speed !== 1 && !S.keepPitch) speed.push("Keep pitch off");
+  const e = S.enh && S.enh.settings;
+  if (e) {
+    for (const st of enhanceGraph(e, enhRate())) {
+      if (st.type === "gain") enhance.push(`Boost +${st.db} dB`);
+      else if (st.type === "compressor") enhance.push(`Leveler (${st.preset})`);
+    }
+    if (e.voice) enhance.push("Voice filter");
+    if (e.rumble) enhance.push("Cut rumble");
+    if (e.hiss && hissAvailable(enhRate())) enhance.push("Cut hiss");
+    if (e.hum !== "off") enhance.push(`Hum remover ${e.hum} Hz`);
+  }
+  if (typeof noiseOn === "function" && noiseOn()) enhance.push(`Reduce noise ${S.noise.used}%`);
+  return { view, speed, enhance };
+}
+
+function showTabMarks() {
+  const changes = tabChanges();
+  for (const t of PLAYER_TABS) {
+    const tab = $(`tab-${t}`), on = changes[t].length > 0;
+    tab.classList.toggle("changed", on);
+    const dot = tab.querySelector ? tab.querySelector(".tab-dot") : null;
+    if (dot) dot.hidden = !on;
+    tab.dataset.on = on ? "1" : "";
+    tab.title = on ? `${TAB_TIPS[t]}. On now: ${changes[t].join(", ")}.` : TAB_TIPS[t];
+  }
+}
+
 // ---- Playback speed: 0.25× to 2×, keeping the pitch (on by default) or tape-style ----
 // The media element plays at S.speed: wavesurfer's cursor, time, region-out and the stop at a
 // region's end all follow the media's own clock, so they stay right at any speed. A change applies
@@ -2115,6 +2194,7 @@ function showSpeed() {
   $("speed").value = String(speedIndex(S.speed));
   $("speed-value").textContent = `${S.speed}×`;
   $("speed-label").classList.toggle("changed", S.speed !== 1);
+  showTabMarks();
   $("keep-pitch").checked = S.keepPitch;
   $("export-speed-label").hidden = S.speed === 1;
   $("export-speed").checked = S.exportAtSpeed;
@@ -2346,13 +2426,12 @@ function showEnhance() {
   $("cut-hiss-label").title = hiss ? "Lower everything above 5 kHz (hiss)"
     : "This recording has nothing above 4 kHz, so there is no hiss band to cut (it needs a sample rate of 12 kHz or more).";
   $("hum").value = s.hum;
-  // Never on unnoticed: the button, and a tag above the waveform.
-  $("enhance-toggle").classList.toggle("on", on);
-  $("enhance-toggle").textContent = on ? "Enhance: on" : "Enhance";
+  // Never on unnoticed: the Enhance tab's dot, and a tag above the waveform.
   $("enhanced-tag").hidden = !on;
   $("export-heard-label").hidden = !on;
   $("export-heard").checked = S.enh.exportHeard;
   showNoise();
+  showTabMarks();
 }
 
 // A change from the panel: applied at once, shown, remembered (one save at a time, the latest last).
@@ -2382,17 +2461,11 @@ function saveEnhance() {
   return S.enh.save;
 }
 
-function openEnhancePanel(open) {
-  $("enhance-panel").hidden = !open;
-  $("enhance-toggle").setAttribute("aria-expanded", String(open));
-}
 
 function setupEnhance() {
   S.enh.settings = normEnhance(S.caps.enhance);               // the remembered ones; "Exports enhanced" unticked
   S.enh.exportHeard = false;
   applyEnhance(); showEnhance();
-  $("enhance-toggle").onclick = () => openEnhancePanel($("enhance-panel").hidden);
-  $("enhance-close").onclick = () => openEnhancePanel(false);
   $("boost").oninput = () => setEnhance({ boost: Number($("boost").value) });
   $("boost").addEventListener("dblclick", () => setEnhance({ boost: 0 }));
   $("leveler").onchange = () => setEnhance({ leveler: $("leveler").checked });
@@ -2404,14 +2477,6 @@ function setupEnhance() {
   $("enhance-reset").onclick = resetEnhance;
   $("export-heard").onchange = () => { S.enh.exportHeard = $("export-heard").checked; };
   setupNoise();
-  // The panel closes with Escape or a click elsewhere.
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("enhance-panel").hidden) { openEnhancePanel(false); $("enhance-toggle").focus(); }
-  });
-  window.addEventListener("pointerdown", (e) => {
-    if ($("enhance-panel").hidden || $("enhance-panel").contains(e.target) || $("enhance-toggle").contains(e.target)) return;
-    openEnhancePanel(false);
-  }, true);
 }
 
 function resetEnhance() { setNoise(false); setEnhance({ ...ENH_DEFAULT }); }
@@ -2444,6 +2509,7 @@ function showNoise() {
   $("noise-status").textContent = S.noise.running ? "Reducing the noise…"
     : prof ? `Noise learnt from ${fmtPrecise(prof.start)} – ${fmtPrecise(prof.end)}.`
     : "Select a stretch of background noise only (no voices), then click Learn noise under the waveform.";
+  $("noise-row").title = $("noise-status").textContent;          // the panel is small: said on hover
 }
 const LEARN_TIP = "Learn the background noise from the selected part (it should hold noise only, no voices) for Reduce noise in Enhance";
 
@@ -2458,7 +2524,7 @@ async function learnNoise() {
   if (!r.ok) { showError(r); return; }
   S.noise.profiles.set(cur.fp, { id: r.profile, start, end });
   banner(`✓ Noise learnt from ${fmtPrecise(start)} – ${fmtPrecise(end)}. Turn on Reduce noise in Enhance to hear it.`, "ok",
-         { label: "Enhance", run: () => openEnhancePanel(true) });
+         { label: "Enhance", run: () => selectTab("enhance", true) });
   if (S.noise.on) reduceNoise(); else showNoise();
 }
 
@@ -2542,6 +2608,7 @@ const SPEC_HEIGHT = 120;
 function setupSpectrogram() {
   S.spec.on = S.caps.spectrogram !== false;                  // on unless turned off (the backend's default too)
   $("spectrogram").checked = S.spec.on;
+  showTabMarks();
   $("spectrogram").onchange = () => setSpectrogram($("spectrogram").checked);
   for (const ev of ["zoom", "scroll", "redraw"]) S.ws.on(ev, queueSpectrogram);
 }
@@ -2549,6 +2616,7 @@ function setupSpectrogram() {
 function setSpectrogram(on) {
   S.spec.on = !!on;
   $("spectrogram").checked = S.spec.on;
+  showTabMarks();
   if (S.spec.on) loadSpectrogram(); else hideSpectrogram();
   S.spec.dirty = true;
   if (!S.spec.save) {
