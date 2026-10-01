@@ -87,6 +87,12 @@
           <span id="selection-range" class="muted"></span>
           <button id="clear-selection" class="link">Clear</button>
         </span>
+        <span id="mark-controls" hidden>
+          <span id="active-mark-label"></span>
+          <button id="play-mark" title="Play this EVP">▶ Play</button>
+          <label id="loop-mark-label" title="Repeat this EVP"><input type="checkbox" id="loop-mark"> Loop</label>
+          <button id="deselect-mark" class="link" title="Deselect this EVP (stops its loop)">Deselect</button>
+        </span>
         <span id="mark-form" hidden>
           <span id="mark-form-label"></span>
           <span class="cls-toggle" role="group" aria-label="EVP class">
