@@ -7,18 +7,24 @@ Two ways, as the player plays it:
   - keep pitch (keep_pitch=True): a time stretch by WSOLA (waveform-similarity
     overlap-add), tuned for speech: 30 ms Hann frames at 50% overlap, each one
     taken from within +-12 ms of where it would nominally be, at the offset whose
-    waveform best continues the previous frame (cross-correlation, by FFT). A
-    stereo (or wider) recording is aligned on its mid signal and every channel
-    uses the same offsets, so the channels stay in lockstep. The output is
-    normalised by the windows' sum, so every sample is a weighted mean of input
-    samples: never louder than the input, never clipped.
+    waveform best continues the previous frame (cross-correlation). A stereo (or
+    wider) recording is aligned on its mid signal and every channel uses the same
+    offsets, so the channels stay in lockstep. The input is padded by reflection
+    at both ends and every output sample gets two frames whose windows sum to 1,
+    so the level holds to the first and the last sample; every sample is a
+    weighted mean of input samples: never louder than the input, never clipped.
 
 Both work on the WAV's own sample format (8/16/24/32-bit PCM, 32/64-bit float)
 and give it back in that format at the same rate: only the data chunk changes
 (any marker chunks are dropped; a caller writes the marks back, scaled). Output
 is deterministic (numpy, no randomness, no threads), so a second export of the
-same thing gives identical bytes. Long recordings are processed in blocks, so
-memory is the input and the output, not a float copy of the output.
+same thing gives identical bytes.
+
+Memory, besides the caller's own copy of the input: the output file (one
+bytearray, written once), the input as float32 samples (decoded a block at a
+time; WSOLA pads that same array), for WSOLA on two or more channels a float32
+mid signal (one sample per frame), and a few blocks of BLOCK samples. For a
+16-bit input that is about 2x (mono) to 3x (stereo) the input, plus the output.
 """
 import math
 import struct
@@ -29,7 +35,7 @@ from . import clips
 
 FRAME = 0.030               # seconds: WSOLA frame (Hann window)
 TOLERANCE = 0.012           # seconds: how far a frame may move to line up
-BLOCK = 1 << 18             # output samples processed per block
+BLOCK = 1 << 16             # samples processed per block
 
 _PCM, _FLOAT, _EXTENSIBLE = 1, 3, 0xFFFE
 
@@ -38,9 +44,10 @@ class Cancelled(Exception):
     """should_stop() said stop."""
 
 
-def suffix(speed):
-    """The file-name suffix for an export at speed: 0.5 -> "_0.5x", 2.0 -> "_2x"."""
-    return f"_{float(speed):g}x"
+def suffix(speed, keep_pitch=True):
+    """The file-name suffix for an export at speed: 0.5 -> "_0.5x", 2.0 -> "_2x";
+    tape-style (keep_pitch False) -> "_0.5x-tape"."""
+    return f"_{float(speed):g}x" + ("" if keep_pitch else "-tape")
 
 
 def _format(fmt):
@@ -60,22 +67,36 @@ def _format(fmt):
     raise ValueError(f"this WAV format can't be slowed down or sped up ({tag}, {bits}-bit)")
 
 
+def _decode_into(dest, raw, kind, width, channels):
+    """PCM bytes -> float32 samples in [-1, 1), written into dest (frames, channels)
+    a block at a time, so no full-length temporary is made."""
+    frames = dest.shape[0]
+    for f0 in range(0, frames, BLOCK):
+        f1 = min(frames, f0 + BLOCK)
+        part = raw[f0 * channels * width:f1 * channels * width]
+        if kind == "float":
+            x = np.nan_to_num(np.frombuffer(part, "<f4" if width == 4 else "<f8").astype(np.float32))
+        elif kind == "uint":
+            x = np.frombuffer(part, np.uint8).astype(np.float32)
+            x -= 128.0
+            x *= 1.0 / 128.0
+        elif width == 3:
+            b = np.frombuffer(part, np.uint8).reshape(-1, 3).astype(np.int32)
+            v = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
+            v = np.where(v >= 1 << 23, v - (1 << 24), v)
+            x = v.astype(np.float32)
+            x *= 1.0 / float(1 << 23)
+        else:
+            x = np.frombuffer(part, "<i2" if width == 2 else "<i4").astype(np.float32)
+            x *= 1.0 / float(1 << (8 * width - 1))             # a power of two: exact
+        dest[f0:f1] = x.reshape(-1, channels)
+
+
 def _to_float(raw, kind, width, channels):
     """PCM bytes -> float32 samples in [-1, 1), shape (frames, channels)."""
-    if kind == "float":
-        x = np.frombuffer(raw, "<f4" if width == 4 else "<f8").astype(np.float32)
-        x = np.nan_to_num(x)
-    elif kind == "uint":
-        x = (np.frombuffer(raw, np.uint8).astype(np.float32) - 128.0) / 128.0
-    elif width == 3:
-        b = np.frombuffer(raw, np.uint8).reshape(-1, 3).astype(np.int32)
-        v = b[:, 0] | (b[:, 1] << 8) | (b[:, 2] << 16)
-        v = np.where(v >= 1 << 23, v - (1 << 24), v)
-        x = v.astype(np.float32) / float(1 << 23)
-    else:
-        x = np.frombuffer(raw, "<i2" if width == 2 else "<i4").astype(np.float64) / float(1 << (8 * width - 1))
-        x = x.astype(np.float32)
-    return x.reshape(-1, channels)
+    x = np.empty((len(raw) // (width * channels), channels), np.float32)
+    _decode_into(x, raw, kind, width, channels)
+    return x
 
 
 def _to_bytes(y, kind, width):
@@ -109,20 +130,28 @@ def _tape(x, speed, emit, should_stop, report):
     n = x.shape[0]
     total = out_frames(n, speed)
     last = n - 1
-    cols = [np.ascontiguousarray(x[:, c]) for c in range(x.shape[1])]
     for at in range(0, total, BLOCK):
         if should_stop():
             raise Cancelled()
         i = np.arange(at, min(total, at + BLOCK), dtype=np.float64) * speed
         lo = np.minimum(i.astype(np.int64), last)
-        frac = (i - lo).astype(np.float32)
-        hi = np.minimum(lo + 1, last)
-        y = np.empty((lo.size, len(cols)), np.float32)
-        for c, col in enumerate(cols):
-            a = col[lo]
-            y[:, c] = a + (col[hi] - a) * frac
+        frac = (i - lo).astype(np.float32)[:, None]
+        a = x[lo]
+        y = x[np.minimum(lo + 1, last)]
+        y -= a
+        y *= frac
+        y += a
         emit(y)
         report(min(total, at + BLOCK), total)
+
+
+def _reflect_index(t, n):
+    """Indices t (any integers) folded into [0, n) by reflection about both ends."""
+    if n == 1:
+        return np.zeros_like(t)
+    period = 2 * (n - 1)
+    t = np.abs(t) % period
+    return np.where(t >= n, period - t, t)
 
 
 def _sliding_corr(region, template):
@@ -130,41 +159,47 @@ def _sliding_corr(region, template):
     return np.correlate(region, template, "valid")
 
 
-def _wsola(x, rate, speed, emit, should_stop, report):
-    """x (frames, channels) time-stretched by WSOLA to len/speed frames, pitch kept.
+def _wsola(raw, kind, width, channels, rate, speed, emit, should_stop, report):
+    """The PCM samples raw time-stretched by WSOLA to len/speed frames, pitch kept.
 
-    Frame k goes to output k * hop (hop = half a frame: 50% overlap) and is read
-    from the input near k * hop * speed, at the offset (within +-tol) whose mid
-    signal best matches how the previous frame's input goes on. Above ~16 kHz the
-    search runs on the mid signal averaged down to ~8 kHz first, then is refined
-    at the full rate within one coarse step. Overlap-add is done afterwards, in
-    blocks of frames: a frame's first half adds to output segment k, its second
-    half to segment k + 1, each divided by the windows' sum there."""
-    n, channels = x.shape
+    Frame k (from k = -1) goes to output k * hop (hop = half a frame: 50% overlap)
+    and is read from the input near k * hop * speed, at the offset (within +-tol)
+    whose mid signal best matches how the previous frame's input goes on; frames
+    -1 and 0 are one hop apart in the input (so output segment 0 is the input
+    itself) and frame 0 is where it nominally is. Above ~16 kHz the search runs on the
+    mid signal averaged down to ~8 kHz first, then is refined at the full rate
+    within one coarse step. Overlap-add is done afterwards, in blocks of frames:
+    output segment k is the first half of frame k plus the second half of frame
+    k - 1, divided by the windows' sum there (1 for a periodic Hann)."""
+    n = len(raw) // (width * channels)
     total = out_frames(n, speed)
     size = max(4, 2 * int(round(FRAME * rate / 2)))            # even
     hop = size // 2
     tol = max(1, int(round(TOLERANCE * rate)))
     win = (np.sin(np.pi * np.arange(size) / size) ** 2).astype(np.float32)   # periodic Hann
-    frames = -(-total // hop) + 1                              # segments 0..frames-1 cover the output
+    frames = -(-total // hop)                                  # segments 0..frames-1 cover the output
     front = tol + size                                         # input index i is padded index i + front
-    reach = front + int(math.ceil((frames - 1) * hop * speed)) + tol + 2 * size + 2
-    xp = np.zeros((max(reach, front + n + size), channels), np.float32)
-    xp[front:front + n] = x
-    mid = xp.mean(axis=1, dtype=np.float64) if channels > 1 else xp[:, 0].astype(np.float64)
+    end = max(front + n, front + int(math.ceil(frames * hop * speed)) + tol + 2 * size + 2)
+    xp = np.empty((end, channels), np.float32)                 # the input, padded by reflection
+    _decode_into(xp[front:front + n], raw, kind, width, channels)
+    xp[:front] = xp[front + _reflect_index(np.arange(-front, 0), n)]
+    xp[front + n:] = xp[front + _reflect_index(np.arange(n, end - front), n)]
+    mid = xp[:, 0] if channels == 1 else xp.mean(axis=1, dtype=np.float32)
     d = max(1, rate // 8000)                                   # coarse search step
     if d > 1:
-        md = mid[:mid.size // d * d].reshape(-1, d).mean(axis=1)
+        md = mid[:mid.size // d * d].reshape(-1, d).mean(axis=1, dtype=np.float64)
         sd = size // d
-    starts = np.empty(frames, np.int64)
+    starts = np.empty(frames + 1, np.int64)                    # starts[k + 1]: frame k's, from k = -1
     prev = None
-    for k in range(frames):
+    for k in range(-1, frames):
         if k % 2048 == 0:
             if should_stop():
                 raise Cancelled()
             report(k * hop // 2, total)                        # the search: the first half of the work
         nominal = front + int(round(k * hop * speed))
-        if prev is None:
+        if k == -1:
+            start = front - hop                                # frame 0 goes straight on from it: segment 0
+        elif k == 0:                                           # is the input itself, from sample 0
             start = nominal
         else:
             t0 = prev + hop                                    # how the previous frame goes on
@@ -176,32 +211,33 @@ def _wsola(x, rate, speed, emit, should_stop, report):
                 lo, hi = max(lo, c - d), min(hi, c + d)
                 if lo > hi:
                     lo = hi = min(max(c, nominal - tol), nominal + tol)
-            corr = _sliding_corr(mid[lo:hi + size], mid[t0:t0 + size])
+            corr = _sliding_corr(mid[lo:hi + size].astype(np.float64), mid[t0:t0 + size].astype(np.float64))
             start = lo + int(np.argmax(corr))
-        starts[k] = prev = start
-    first, second = win[:hop], win[hop:]
-    norm0 = np.where(first > 1e-6, first, np.float32(1.0))[:, None]   # segment 0: the first half alone
-    norm = (first + second)[:, None]
+        starts[k + 1] = prev = start
+    del mid
+    if d > 1:
+        del md
+    norm = (win[:hop] + win[hop:])[:, None]
     offs = np.arange(size)
-    carry = np.zeros((hop, channels), np.float32)              # the previous frame's second half
     step = max(1, BLOCK // hop)
+    carry = xp[starts[0] + offs[hop:]] * win[hop:, None]       # frame -1's second half
     done = 0
     for k0 in range(0, frames, step):
         if should_stop():
             raise Cancelled()
-        ks = starts[k0:k0 + step]
-        g = xp[ks[:, None] + offs] * win[None, :, None]        # (m, size, channels)
-        seg = g[:, :hop].copy()
-        seg[0] += carry
+        g = xp[starts[1 + k0:1 + k0 + step, None] + offs]      # (m, size, channels)
+        g *= win[None, :, None]
+        seg = g[:, :hop]                                       # a view: summed in place
+        last = g[-1, hop:].copy()
         seg[1:] += g[:-1, hop:]
-        carry = g[-1, hop:]
+        seg[0] += carry
+        carry = last
         seg /= norm
-        if k0 == 0:
-            seg[0] = g[0, :hop] / norm0
         y = seg.reshape(-1, channels)[:max(0, total - done)]
         if y.size:
             emit(y)
             done += y.shape[0]
+        del g, seg, y
         report(total // 2 + done // 2, total)
     report(total, total)
 
@@ -211,7 +247,8 @@ def change_speed(wav_bytes, speed, keep_pitch=True, should_stop=None, progress=N
     wav_bytes at speed (0 < speed; 1 gives the audio unchanged), pitch kept or
     tape-style. progress(done, total) is called now and then (output frames);
     should_stop() is checked as it goes (raises Cancelled). Raises ValueError when
-    the WAV cannot be read or its sample format is not supported."""
+    the WAV cannot be read or its sample format is not supported, MemoryError when
+    there is not enough memory (see the module's note)."""
     if not speed > 0:
         raise ValueError("the speed must be above 0")
     should_stop = should_stop or (lambda: False)
@@ -243,15 +280,14 @@ def change_speed(wav_bytes, speed, keep_pitch=True, should_stop=None, progress=N
     if frames == 0:
         pass
     elif speed == 1:
-        emit_raw = bytes(raw)
-        out[pos[0]:pos[0] + len(emit_raw)] = emit_raw
-        pos[0] += len(emit_raw)
+        out[pos[0]:pos[0] + len(raw)] = raw
+        pos[0] += len(raw)
+    elif keep_pitch:
+        _wsola(raw, kind, width, channels, rate, float(speed), emit, should_stop, report)
     else:
         x = _to_float(raw, kind, width, channels)
-        if keep_pitch:
-            _wsola(x, rate, float(speed), emit, should_stop, report)
-        else:
-            _tape(x, float(speed), emit, should_stop, report)
+        _tape(x, float(speed), emit, should_stop, report)
+        del x
     if pos[0] != len(head) + data_len:
         raise AssertionError("the output length is not what was planned")
     return out

@@ -3,12 +3,16 @@ WSOLA time stretch that keeps the pitch), clips cut at a speed (openevp.clips),
 and the backend's Export WAV with marks / Export clips / library clips job at a
 speed: names ending in the speed, marks moved to match, identical bytes the
 second time (so the identical-skip rule still applies)."""
+import inspect
 import io
+import math
 import os
 import struct
 import sys
+import tracemalloc
 import unittest
 import wave
+from unittest import mock
 
 import numpy as np
 
@@ -39,6 +43,15 @@ def sine_wav(freq=440.0, seconds=1.0, rate=8000, channels=1, amp=0.5, width=2, f
     else:
         tag, raw = 1, np.round(x * 32767).astype("<i2").tobytes()
     fmt = struct.pack("<HHIIHH", tag, channels, rate, rate * channels * width, channels * width, 8 * width)
+    body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(raw)) + raw
+    return b"RIFF" + struct.pack("<I", len(body)) + body
+
+
+def float_wav(x, rate):
+    """A 32-bit float WAV of samples x (frames, channels)."""
+    channels = x.shape[1]
+    raw = np.asarray(x, "<f4").tobytes()
+    fmt = struct.pack("<HHIIHH", 3, channels, rate, rate * channels * 4, channels * 4, 32)
     body = b"WAVE" + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", len(raw)) + raw
     return b"RIFF" + struct.pack("<I", len(body)) + body
 
@@ -137,13 +150,63 @@ class WsolaTests(unittest.TestCase):
             stretch.change_speed(wav, 0.5, keep_pitch=False, should_stop=lambda: True)
 
 
+class EdgeTests(unittest.TestCase):
+    """The level holds from the first sample to the last, at every speed, both ways."""
+
+    def test_a_constant_level_holds_to_the_last_sample(self):
+        for rate, channels in ((8000, 1), (44100, 2)):
+            n = rate // 2
+            dc = np.full((n, channels), 0.5)
+            for speed in backend.SPEEDS:
+                for keep in (True, False):
+                    out = stretch.change_speed(float_wav(dc, rate), speed, keep)
+                    _r, y = samples(out)
+                    self.assertEqual(len(y), round(n / speed))
+                    np.testing.assert_allclose(y, 0.5, rtol=0.01, err_msg=f"{rate} {speed} {keep}")
+
+    def test_a_steady_tone_keeps_its_level_at_both_ends(self):
+        rate = 8000
+        wav = sine_wav(440.0, seconds=1.0, rate=rate, amp=0.5)
+        for speed in backend.SPEEDS:
+            for keep in (True, False):
+                _r, y = samples(stretch.change_speed(wav, speed, keep))
+                edge = int(0.02 * rate)                                         # the first and last 20 ms
+                for part in (y[:edge, 0], y[-edge:, 0]):
+                    rms = float(np.sqrt(np.mean(part ** 2)))
+                    self.assertAlmostEqual(rms, 0.5 / math.sqrt(2), delta=0.5 / math.sqrt(2) * 0.06,
+                                           msg=f"{speed} {keep}")
+                self.assertGreater(abs(y[0, 0]) + abs(y[1, 0]), 0.0 if speed == 1 else 0.01)
+
+
+class MemoryTests(unittest.TestCase):
+    """Peak memory (tracemalloc: numpy's buffers are counted) stays near the output size."""
+
+    def test_peak_memory_is_bounded(self):
+        cases = ((sine_wav(440.0, seconds=120.0, rate=8000), "mono"),
+                 (sine_wav(seconds=20.0, rate=44100, channels=2, freqs=[440.0, 660.0]), "stereo"))
+        for wav, label in cases:
+            for speed in (0.25, 0.5, 2.0):
+                for keep in (True, False):
+                    tracemalloc.start()
+                    try:
+                        out = stretch.change_speed(wav, speed, keep)
+                        peak = tracemalloc.get_traced_memory()[1]
+                    finally:
+                        tracemalloc.stop()
+                    bound = 6 * len(wav) + len(out)
+                    self.assertLessEqual(peak, bound, f"{label} {speed}x keep={keep}: {peak / 1e6:.1f} MB")
+                    del out
+
+
 class ClipTests(unittest.TestCase):
     def test_names_end_in_the_speed(self):
         m = {"start": 12.4, "end": 13.0, "cls": "A", "note": "hi"}
         self.assertEqual(clips.name("x", m, fmt="mp3", speed=0.5), "x_EVP-A_00m12.4s_hi_0.5x.mp3")
         self.assertEqual(clips.name("x", m, speed=2.0), "x_EVP-A_00m12.4s_hi_2x.wav")
         self.assertEqual(clips.name("x", m, speed=1.0), "x_EVP-A_00m12.4s_hi.wav")
-        self.assertEqual(stretch.suffix(0.25), "_0.25x")
+        self.assertEqual(clips.name("x", m, fmt="mp3", speed=0.5, keep_pitch=False), "x_EVP-A_00m12.4s_hi_0.5x-tape.mp3")
+        self.assertEqual(clips.name("x", m, speed=1.0, keep_pitch=False), "x_EVP-A_00m12.4s_hi.wav")
+        self.assertEqual((stretch.suffix(0.25), stretch.suffix(2.0, False)), ("_0.25x", "_2x-tape"))
 
     def test_a_clip_at_half_speed(self):
         wav = sine_wav(440.0, seconds=4.0)
@@ -189,10 +252,10 @@ class ExportAtSpeedTests(unittest.TestCase):
         progress = [p for e, p in self.events if e == "speed-progress"]
         self.assertTrue(progress and progress[-1] == {"done": 32000, "total": 32000})
         self.assertEqual(api.export_marked(rec, 0.5, True)["already"], True)       # identical bytes: skipped
-        r = api.export_marked(rec, 0.5, False)                                      # tape: other bytes, a new name
-        self.assertEqual((r["saved"], r["name"]), (True, "take_0.5x (2).wav"))
+        r = api.export_marked(rec, 0.5, False)                                      # tape: its own name
+        self.assertEqual((r["saved"], r["name"]), (True, "take_0.5x-tape.wav"))
         r = api.export_marked(rec, 2, False)
-        self.assertEqual(r["name"], "take_2x.wav")
+        self.assertEqual(r["name"], "take_2x-tape.wav")
         self.assertEqual(scaled(wavinfo.read_markers(os.path.join(self.dest, r["name"])), 2), [(0.1, 0.15), (0.5, 0.55)])
         r = api.export_marked(rec)                                                  # 1x: as before
         self.assertEqual(r["name"], "take.wav")
@@ -214,13 +277,26 @@ class ExportAtSpeedTests(unittest.TestCase):
         self.assertEqual((r["saved"], r["already"]), (0, 1))
         self.assertEqual(api.export_clips(rec, None, 5, True)["error"], backend.BAD_SPEED)
 
+    def test_out_of_memory_is_said_plainly(self):
+        api, rec = self.picked(sine_wav(440.0, seconds=3.0))
+        api.set_clip_format("wav")
+        api.add_mark(rec, 1.0, 1.4, "B", "")
+        with mock.patch.object(stretch, "change_speed", side_effect=MemoryError()):
+            r = api.export_clips(rec, None, 0.5, True)
+            self.assertEqual((r["ok"], r["saved"]), (True, 0), r)
+            self.assertEqual(r["notes"], ["take: the EVP at 00m01.0s was not cut "
+                                          "(not enough memory; close other programs and try again)"])
+            r = api.export_marked(rec, 0.5, True)
+            self.assertEqual((r["ok"], r["error"]), (False, "There is not enough memory to save take.wav at 0.5x."))
+            self.assertIn("Close other programs", r["advice"])
+
     @release_gate.require(mp3.available(), "lameenc is not installed (pip install -r requirements-app.txt)")
     def test_an_mp3_clip_at_half_speed(self):
         api, rec = self.picked(sine_wav(440.0, seconds=3.0))
         api.set_clip_format("mp3")
         api.add_mark(rec, 1.0, 1.4, "A", "")
         r = api.export_clips(rec, None, 0.5, False)
-        self.assertEqual((r["saved"], r["names"]), (1, ["take_EVP-A_00m01.0s_0.5x.mp3"]), r)
+        self.assertEqual((r["saved"], r["names"]), (1, ["take_EVP-A_00m01.0s_0.5x-tape.mp3"]), r)
         with open(os.path.join(r["folder"], r["names"][0]), "rb") as f:
             rate, _channels, seconds = mp3.info(f.read())
         self.assertEqual(rate, 8000)
@@ -228,38 +304,19 @@ class ExportAtSpeedTests(unittest.TestCase):
         self.assertEqual(api.export_clips(rec, None, 0.5, False)["already"], 1)     # deterministic
 
 
-class LibraryClipsAtSpeedTests(unittest.TestCase):
+class LibraryClipsTests(unittest.TestCase):
+    """The library's Export clips (a folder, or a recording's files) is always at normal speed."""
     setUp = tl.LibraryTests.setUp
     new_api = tl.LibraryTests.new_api
     write = tl.LibraryTests.write
     index = tl.LibraryTests.index
 
-    def run_job(self, start):
-        r = start()
-        self.assertTrue(r["ok"], r)
-        with self.events.cond:
-            ok = self.events.cond.wait_for(
-                lambda: any(n in ("clips-done", "clips-failed") and p["job"] == r["job"] for n, p in self.events.items),
-                WAIT)
-        self.assertTrue(ok, self.events.items)
-        return next((n, p) for n, p in self.events.items if n in ("clips-done", "clips-failed") and p["job"] == r["job"])
-
-    def test_folder_job_at_double_speed(self):
-        one = sine_wav(440.0, seconds=2.0)
-        self.write("Case/one.wav", one)
-        self.store.add_mark(wavinfo.wav_fingerprint(io.BytesIO(one)), 0.5, 0.7, "A", "", name="x", duration=2.0)
+    def test_no_speed_for_the_library_job(self):
         api = self.new_api()
-        api.set_clip_format("wav")
-        self.index(api)
-        self.assertEqual(api.export_clips_folder("root", 1, 3, True)["error"], backend.BAD_SPEED)
-        event, p = self.run_job(lambda: api.export_clips_folder("root", 2, 2, False))
-        self.assertEqual((event, p["saved"]), ("clips-done", 1), p)
-        folder = os.path.join(self.lib, "Case", backend.CLIPS)
-        self.assertEqual(sorted(os.listdir(folder)), [library_ops.CLIPS_MARKER, "one_EVP-A_00m00.5s_2x.wav"])
-        with wave.open(os.path.join(folder, "one_EVP-A_00m00.5s_2x.wav")) as w:
-            self.assertEqual(w.getnframes(), round(1.2 * 8000 / 2))
-        event, p = self.run_job(lambda: api.export_clips_folder("root", 3, 2, False))
-        self.assertEqual((p["saved"], p["already"]), (0, 1))
+        for method in (api.export_clips_folder, api.export_clips_files):
+            self.assertEqual(list(inspect.signature(method).parameters), [
+                "folder_id" if method == api.export_clips_folder else "file_ids", "job"])
+        self.assertEqual(list(inspect.signature(api._clips_job).parameters)[-1], "fmt")
 
 
 if __name__ == "__main__":

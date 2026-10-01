@@ -8,7 +8,7 @@ const $ = (id) => document.getElementById(id);
 // and textContent, and handed back to the backend as they came.
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             speed: 1, keepPitch: true, speedSave: null, speedDirty: false,   // the player's speed (one of SPEEDS), Keep pitch
-            exportAtSpeed: true,                          // "Exports at 0.5×": ticked whenever the speed leaves 1×
+            exportAtSpeed: false,                         // "Exports at 0.5×": ticked when the user leaves 1× (this session)
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -2108,8 +2108,10 @@ function showSpeed() {
   $("export-speed-text").textContent = `Exports at ${S.speed}×`;
 }
 
-// The exports at the player's speed (Export WAV with marks, Export clips, Save clip, the library's
-// Export clips): [speed, keep pitch] while "Exports at …×" shows and is ticked, else [1, true].
+// The player's exports at its speed (Export WAV with marks, Export clips, a row's Save clip; never
+// the library's Export clips): [speed, keep pitch] while "Exports at …×" shows and is ticked, else
+// [1, true]. Never ticked at startup, even when the remembered speed isn't 1×: only once the user
+// moves the speed off 1× in this session.
 function exportSpeed() {
   const on = S.speed !== 1 && S.exportAtSpeed && !$("player-loaded").hidden;
   return on ? [S.speed, S.keepPitch] : [1, true];
@@ -2120,7 +2122,7 @@ function atSpeed() { const [sp] = exportSpeed(); return sp === 1 ? "" : ` at ${s
 function setSpeed(speed, keepPitch = S.keepPitch) {
   speed = SPEEDS[speedIndex(speed)];
   const changed = speed !== S.speed || keepPitch !== S.keepPitch;
-  if (S.speed === 1 && speed !== 1) S.exportAtSpeed = true;    // leaving 1×: exports follow it again
+  if (S.speed === 1 && speed !== 1) S.exportAtSpeed = true;    // the user left 1×: exports follow it
   S.speed = speed; S.keepPitch = !!keepPitch;
   applySpeed(); showSpeed();
   if (changed) saveSpeed();
@@ -2150,6 +2152,7 @@ function stepSpeed(by) { setSpeed(SPEEDS[Math.max(0, Math.min(SPEEDS.length - 1,
 function setupSpeed() {
   S.speed = SPEEDS[speedIndex(S.caps.playback_speed)];      // the remembered ones (or 1×, Keep pitch)
   S.keepPitch = S.caps.keep_pitch !== false;
+  S.exportAtSpeed = false;                                   // a remembered speed never ticks "Exports at …×"
   applySpeed(); showSpeed();
   $("speed").oninput = () => setSpeed(SPEEDS[Number($("speed").value)]);
   $("speed").addEventListener("dblclick", () => setSpeed(1));
@@ -2828,13 +2831,13 @@ function groupMarked(g) { return !g.clip && g.marks.A + g.marks.B + g.marks.C > 
 // A folder (and its folders) or one recording's files, as a background job: progress, Cancel.
 async function exportLibraryClips(what, name) {
   if (!canExportClips()) return;
-  const job = ++S.clips.job, at = exportSpeed();
-  S.clips.running = true; S.clips.name = name; S.clips.cancelling = false; S.clips.at = atSpeed();
+  const job = ++S.clips.job;
+  S.clips.running = true; S.clips.name = name; S.clips.cancelling = false;
   renderMarks(); updateExport(); scheduleLibraryRender();
   clipsRunning(0, null);
   let r;
   try {
-    r = what.folder ? await api().export_clips_folder(what.folder, job, ...at) : await api().export_clips_files(what.files, job, ...at);
+    r = what.folder ? await api().export_clips_folder(what.folder, job) : await api().export_clips_files(what.files, job);
   } catch (e) {                                 // the call itself failed: nothing is running
     r = { ok: false, error: `The clips export did not start: ${(e && e.message) || e}` };
   }
@@ -2847,7 +2850,7 @@ async function exportLibraryClips(what, name) {
 function clipsRunning(done, total) {
   progress(done, total === null ? 1 : total);
   const count = total ? ` ${done} of ${total}` : "";
-  banner(`Exporting the clips of ${S.clips.name || "the recordings"}${S.clips.at || ""}…${count}`, "ok",
+  banner(`Exporting the clips of ${S.clips.name || "the recordings"}…${count}`, "ok",
          { label: "Cancel", run: () => { S.clips.cancelling = true; $("banner-action").disabled = true; api().cancel_clips(S.clips.job); } });
   $("banner-action").disabled = !!S.clips.cancelling;             // asked once: it stops after the recording it is on
 }

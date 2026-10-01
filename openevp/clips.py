@@ -115,11 +115,15 @@ def stamp(seconds):
     return f"{tenths // 600:02d}m{(tenths % 600) // 10:02d}.{tenths % 10}s"
 
 
-def name(stem, mark, with_note=True, fmt="wav", speed=1):
-    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>][_<speed>x].<fmt> (the
-    speed only when it is not 1; the time is where the mark is in the recording)."""
+def name(stem, mark, with_note=True, fmt="wav", speed=1, keep_pitch=True):
+    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>][_<speed>x[-tape]].<fmt>
+    (the speed only when it is not 1, "-tape" when the pitch was not kept; the time
+    is where the mark is in the recording)."""
     note = safe_note(mark.get("note")) if with_note else ""
-    tail = f"_{float(speed):g}x" if speed != 1 else ""
+    tail = ""
+    if speed != 1:
+        from . import stretch
+        tail = stretch.suffix(speed, keep_pitch)
     return f"{stem}_EVP-{mark['cls']}_{stamp(mark['start'])}" + (f"_{note}" if note else "") + f"{tail}.{fmt}"
 
 

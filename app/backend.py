@@ -38,8 +38,9 @@ EVP clips (one MP3 or WAV per mark, openevp.clips) go into a Clips subfolder of 
 folder a WAV with marks goes into: export_clips() for the loaded recording (like
 export_marked()), and a background job for library recordings or folders. Their
 format is a setting (clip_format: "mp3" by default, or "wav"; set_clip_format()).
-Both, and export_marked(), can save at the player's speed (speed, keep_pitch:
-openevp.stretch; the names end in the speed); the player's speed and Keep pitch
+The player's export_clips() and export_marked() can save at the player's speed
+(speed, keep_pitch: openevp.stretch; the names end in the speed, "-tape" without
+Keep pitch; the library's clips job never does); the player's speed and Keep pitch
 are settings too (playback_speed / keep_pitch; set_playback_speed()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
@@ -984,7 +985,8 @@ class Api(LibraryOps):
 
         At a speed other than 1 (one of SPEEDS) the WAV is slowed down or sped up
         (openevp.stretch: keep_pitch, or tape-style), its marks moved to match, and
-        its name ends in the speed (<stem>_0.5x.wav); "speed-progress" events
+        its name ends in the speed (<stem>_0.5x.wav, <stem>_0.5x-tape.wav without
+        keep_pitch); "speed-progress" events
         ({"done", "total"}) report how far that is."""
         at = _export_speed(speed, keep_pitch)
         if at is None:
@@ -1174,7 +1176,7 @@ class Api(LibraryOps):
         speed, keep_pitch = at
         out_name = stem + ".wav"
         if speed != 1:
-            out_name = stem + stretch.suffix(speed) + ".wav"
+            out_name = stem + stretch.suffix(speed, keep_pitch) + ".wav"
             try:
                 wav = stretch.change_speed(wav, speed, keep_pitch, should_stop=self._stop.is_set,
                                            progress=self._speed_progress())
@@ -1183,7 +1185,9 @@ class Api(LibraryOps):
             except ValueError as e:
                 return _fail(f"Could not change the speed of {entry['name']}: {e}")
             except MemoryError:
-                return _fail(f"{entry['name']} is too long to save at {speed:g}x.")
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} at {speed:g}x.",
+                             "Close other programs and try again, or save it at normal speed.")
             except Exception as e:
                 return _error(e)
             marks = stretch.scale_marks(marks, speed)
@@ -1257,9 +1261,13 @@ class Api(LibraryOps):
             except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue
-            name = clips.name(stem, m, fmt=fmt, speed=at[0])
+            except MemoryError:
+                notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut "
+                             "(not enough memory; close other programs and try again)")
+                continue
+            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1])
             if folders.too_long(os.path.join(outdir, name)):
-                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0])   # the note is what can go
+                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1])   # the note can go
                 if folders.too_long(os.path.join(outdir, name)):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")
@@ -1273,13 +1281,9 @@ class Api(LibraryOps):
                 saved += 1
         return saved, already, names, notes
 
-    def export_clips_files(self, file_ids, job, speed=1, keep_pitch=True):
+    def export_clips_files(self, file_ids, job):
         """Export the clips of library recordings (by file id: the copies of one
-        recording, say) as a background job; see _clips_job. speed, keep_pitch: at
-        the player's speed (see export_marked())."""
-        at = _export_speed(speed, keep_pitch)
-        if at is None:
-            return _fail(BAD_SPEED)
+        recording, say) as a background job; see _clips_job."""
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1296,16 +1300,12 @@ class Api(LibraryOps):
         paths = [p for p in paths if not _is_clip(p, root)]       # clips are never cut again
         if not paths:
             return _fail(CLIPS_AGAIN)
-        return self._start_clips(lambda: [(p, "") for p in paths], None, job, at)
+        return self._start_clips(lambda: [(p, "") for p in paths], None, job)
 
-    def export_clips_folder(self, folder_id, job, speed=1, keep_pitch=True):
+    def export_clips_folder(self, folder_id, job):
         """Export the clips of every marked recording in a library folder and all its
         subfolders as a background job (the Clips folders OpenEVP made are left out:
-        clips are never cut again; a Clips folder itself is refused); see _clips_job.
-        speed, keep_pitch: at the player's speed (see export_marked())."""
-        at = _export_speed(speed, keep_pitch)
-        if at is None:
-            return _fail(BAD_SPEED)
+        clips are never cut again; a Clips folder itself is refused); see _clips_job."""
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1324,7 +1324,7 @@ class Api(LibraryOps):
             # A folder's WAV copies first: a .dvf with a WAV copy beside it is then never decoded.
             files.sort(key=lambda f: (tuple(p.casefold() for p in f[5]), f[2] != "wav", f[1].casefold()))
             return [(f[3], f[2]) for f in files]
-        return self._start_clips(work, os.path.basename(os.path.normpath(path)) or "the library", job, at)
+        return self._start_clips(work, os.path.basename(os.path.normpath(path)) or "the library", job)
 
     def cancel_clips(self, job):
         """Stop a clips job after the recording it is on (a long decode stops at once)."""
@@ -1345,7 +1345,7 @@ class Api(LibraryOps):
             return _fail(CLOSING)
         return self._clip_format_refused(self.clip_format())
 
-    def _start_clips(self, work, where, job, at=NORMAL):
+    def _start_clips(self, work, where, job):
         refused = self._clips_refused()
         if refused:
             return refused
@@ -1355,7 +1355,7 @@ class Api(LibraryOps):
             dest = self._dest
         library = self._library_path()
         fmt = self.clip_format()
-        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library, fmt, at),
+        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library, fmt),
                                   name="clips")
         with self._workers_lock:              # admitted, started and registered in one step against shutdown()
             if self._stop.is_set():
@@ -1375,14 +1375,14 @@ class Api(LibraryOps):
         """True while a library clips job runs (the close prompt says so)."""
         return self._clips_running is not None
 
-    def _clips_job(self, work, where, job, cancel, dest, library, fmt="wav", at=NORMAL):
+    def _clips_job(self, work, where, job, cancel, dest, library, fmt="wav"):
         """Cut the clips of each marked recording in work() ([(path, kind)]): copies
         of one recording (the same fingerprint) are exported once per destination.
         Unmarked recordings are passed over; ones that cannot be read or decoded are
         skipped and reported. Events: "clips-progress", then "clips-done" (also when
         cancelled or closing) or "clips-failed" (a clip could not be written), sent
         once _busy is free again. dest, library: the Save-to and library folders
-        when the job started; fmt: the clip format then; at: (speed, keep_pitch)."""
+        when the job started; fmt: the clip format then. Always at normal speed."""
         saved = already = recordings = 0
         skipped, notes, outdirs, done_keys = [], [], [], set()
         outcome = []
@@ -1421,7 +1421,7 @@ class Api(LibraryOps):
                     if key not in done_keys:
                         done_keys.add(key)
                         try:
-                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0], fmt, at)
+                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0], fmt)
                         except OSError as e:
                             finish("clips-failed", error=f"Could not save the clips of {name}: {_plain(e)}",
                                    advice=DISK)
