@@ -84,9 +84,11 @@ EVP clips:
     its icon), then delete it: the dialog counts its clips, and it goes to the
     Recycle Bin. Delete `.openevp-clips`: its clips count as recordings.
     MP3 clips: listed with **Clip**, play on a click (waveform drawn, zoom works),
-    the mark tools are off with "MP3 clips can't be marked…"; a selection on it
-    still plays and loops (Loop ticked), including one that ends at the clip's end; Move to… offers only
-    other `Clips` folders; an `.mp3` elsewhere in the library is not listed.
+    can be marked (not counted), and move like WAV clips (out of `Clips` they are
+    recordings). An `.mp3` elsewhere in the library is a recording: listed, indexed,
+    plays, marks count; Save with marks writes a WAV, Export clips cuts from it.
+    A WhatsApp `.mpeg` (an MP3) is listed and plays; an `.mpeg` video is not listed.
+    **Open audio file…** opens a WAV, an `.mp3` or a WhatsApp `.mpeg`.
 
 Looping a saved EVP:
 

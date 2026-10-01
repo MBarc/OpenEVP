@@ -103,8 +103,15 @@ def st_core_problem():
     return _dll_problem(_core)
 
 
+def mp3_core_problem():
+    """Why mp3_core.dll (the MP3 decoder, minimp3) can't be used, or None. It has no
+    pure-Python fallback: without it MP3 files cannot be played at all."""
+    from openevp.decoders.mp3 import _core
+    return _dll_problem(_core)
+
+
 def decoder_problem():
-    """What keeps the decoders' golden tests (LPEC LP, SP and ST) from running, or None."""
+    """What keeps the decoders' golden tests (LPEC LP, SP and ST, MP3) from running, or None."""
     problems = [p for p in (tables_problem(), sp_tables_problem(), core_problem(), st_tables_problem(),
-                            st_core_problem()) if p]
+                            st_core_problem(), mp3_core_problem()) if p]
     return "; ".join(problems) or None

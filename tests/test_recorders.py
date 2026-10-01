@@ -205,7 +205,9 @@ class FormatTests(unittest.TestCase):
         self.assertIs(formats.by_ext(".DVF"), formats.by_ext(".dvf"))
         self.assertEqual(formats.by_ext(".dvf").label, "Sony original")
         self.assertEqual(formats.by_ext(".wav").ext, ".wav")
-        self.assertIsNone(formats.by_ext(".mp3"))
+        self.assertIs(formats.by_ext(".MP3"), formats.MP3)
+        self.assertEqual([formats.by_ext(e).label for e in (".mpeg", ".mpga", ".mp2", ".m2a")], ["MP3"] * 4)
+        self.assertIsNone(formats.by_ext(".ogg"))
         self.assertIsNone(formats.by_ext("dvf"))
         self.assertEqual([f.ext for f in formats.all()][:2], [".wav", ".dvf"])
 

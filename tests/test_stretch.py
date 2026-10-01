@@ -23,6 +23,7 @@ import test_library as tl  # noqa: E402
 import test_marks_api as tm  # noqa: E402
 from app import backend, library_ops  # noqa: E402
 from openevp import clips, mp3, stretch, wavinfo  # noqa: E402
+from openevp.decoders import mp3 as mp3dec  # noqa: E402
 
 WAIT = 60
 
@@ -291,6 +292,7 @@ class ExportAtSpeedTests(unittest.TestCase):
             self.assertIn("Close other programs", r["advice"])
 
     @release_gate.require(mp3.available(), "lameenc is not installed (pip install -r requirements-app.txt)")
+    @release_gate.require(mp3dec.available(), f"the MP3 decoder is not built: {mp3dec.reason()}")
     def test_an_mp3_clip_at_half_speed(self):
         api, rec = self.picked(sine_wav(440.0, seconds=3.0))
         api.set_clip_format("mp3")
@@ -298,7 +300,7 @@ class ExportAtSpeedTests(unittest.TestCase):
         r = api.export_clips(rec, None, 0.5, False)
         self.assertEqual((r["saved"], r["names"]), (1, ["take_EVP-A_00m01.0s_0.5x-tape.mp3"]), r)
         with open(os.path.join(r["folder"], r["names"][0]), "rb") as f:
-            rate, _channels, seconds = mp3.info(f.read())
+            rate, _channels, seconds = mp3dec.seconds(f.read())
         self.assertEqual(rate, 8000)
         self.assertAlmostEqual(seconds, 2.8, delta=0.2)                             # 1.4 s at 0.5x (+ the encoder's frames)
         self.assertEqual(api.export_clips(rec, None, 0.5, False)["already"], 1)     # deterministic

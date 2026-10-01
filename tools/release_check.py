@@ -11,14 +11,15 @@ Automated (exits non-zero if any fails):
      --check-wav on the 10-minute test vector, the 1-minute LPEC SP vector and a
      synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/ and openevp/ is frozen
-     into it, and both decoders' tables (LPEC LP, SP and ST) and DLLs, libusb, the icon and the driver
+     into it, and both decoders' tables (LPEC LP, SP and ST) and DLLs, the MP3 decoder's
+     DLL (mp3_core.dll, minimp3), libusb, the icon and the driver
      files (with the manifest) are bundled, identical to the sources, and so is
      the MP3 encoder (lameenc's extension module); so is every
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
      the favicon, vendor/...), with nothing else in the bundled UI folder;
   4. the built app starts (OpenEVP.exe --smoke): both decoders load with their
-     tables and fast C cores, an MP3 clip is encoded (lameenc) and the page
-     plays and decodes it (MP3 clips play in the library), the backend and the WebView2 page start in a
+     tables and fast C cores, an MP3 clip is encoded (lameenc) and decoded back
+     (mp3_core.dll), the backend and the WebView2 page start in a
      hidden window, the page loads its scripts and styles and can fetch every
      bundled UI file, and the JS bridge answers capabilities().
 
@@ -50,7 +51,7 @@ SP_SECONDS = 938 * 1024 / 16000             # 938 frames x 1024 samples at 16000
 # decoders through the formats, the CLI, the app and the library, the release
 # gate's own presence check).
 DECODER_MODULES = ("test_lpec_bitstream", "test_lpec_core", "test_lpec_vectors", "test_lpec_sp_vectors",
-                   "test_lpec_st_bitstream", "test_lpec_st_core", "test_lpec_st_vectors")
+                   "test_lpec_st_bitstream", "test_lpec_st_core", "test_lpec_st_vectors", "test_mp3_decoder")
 DECODER_TESTS = (
     "test_audio_server.RealDecoderFingerprintTests.test_fp_matches_real_decoded_audio_and_survives_markers",
     "test_wavinfo.GoldenFingerprintTests.test_fingerprint_of_the_decoded_vector",
@@ -279,6 +280,7 @@ BUNDLED = (   # (file in _internal, its source)
     ("openevp/decoders/sony_lpec/lpec_core.dll", "openevp/decoders/sony_lpec/lpec_core.dll"),
     ("openevp/decoders/sony_lpec_st/data/lpec_st_tables.json", "openevp/decoders/sony_lpec_st/data/lpec_st_tables.json"),
     ("openevp/decoders/sony_lpec_st/lpec_st_core.dll", "openevp/decoders/sony_lpec_st/lpec_st_core.dll"),
+    ("openevp/decoders/mp3/mp3_core.dll", "openevp/decoders/mp3/mp3_core.dll"),
     ("libusb-1.0.dll", "vendor/libusb-1.0.30/libusb-1.0.dll"),
     ("assets/st25.ico", "assets/st25.ico"),
     ("driver/install-winusb.ps1", "app/driver/install-winusb.ps1"),
@@ -405,17 +407,17 @@ def check_gui():
     print(f"   MP3 encoding: {'available' if m.get('available') else 'NOT available'}"
           f"{' (lameenc ' + m['version'] + ')' if m.get('version') else ''}"
           f"{', test clip ' + str(m['bytes']) + ' bytes' if m.get('bytes') else ''}")
-    pm = m.get("page")
-    if pm:
-        print(f"   MP3 clip in the page: {'plays' if pm.get('ok') else 'FAILS'} (audio element "
-              f"{pm.get('can_play')!r}; WebAudio {pm.get('rate')} Hz, "
-              f"{pm.get('channels')} ch, {pm.get('duration')} s)")
+    d = m.get("decoded")
+    print(f"   MP3 decoding: {'available' if m.get('decoder') else 'NOT available'}"
+          f"{', test clip ' + str(d['seconds']) + ' s at ' + str(d['rate']) + ' Hz' if d else ''}")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
           f"version {report.get('capabilities', {}).get('version')!r}, "
           f"wav {report.get('capabilities', {}).get('wav')!r}")
     problems = [f"GUI smoke: {p}" for p in report.get("problems", [])]
     if report.get("ok") and "mp3" not in report:          # a report from before MP3 clips
         problems.append("GUI smoke: the report says nothing about MP3 encoding")
+    elif report.get("ok") and "decoder" not in report["mp3"]:   # a report from before MP3 decoding
+        problems.append("GUI smoke: the report says nothing about MP3 decoding")
     if code != 0 and not problems:
         problems.append(f"OpenEVP.exe --smoke exited {code}")
     if code == 0 and not report.get("ok"):
