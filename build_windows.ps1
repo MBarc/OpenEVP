@@ -114,7 +114,7 @@ Get-FileHash dist\openevp-st25.exe -Algorithm SHA256
 # export, with its metadata (its version for --smoke, and its license file).
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OpenEVP" `
     --icon assets\st25.ico --add-binary "$dll;." --add-data "app/ui;app/ui" `
-    --add-data "assets/st25.ico;assets" --add-data "app/driver;driver" `
+    --add-data "assets/st25.ico;assets" --add-data "app/driver;driver" --add-data "LICENSES;LICENSES" `
     --hidden-import lameenc --copy-metadata lameenc @decoder st25-app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller (app) failed" }
 if ((Get-PeMachine "dist\OpenEVP\OpenEVP.exe") -ne $AMD64) { throw "the built app is not x64" }

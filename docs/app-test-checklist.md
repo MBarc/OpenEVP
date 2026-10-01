@@ -109,7 +109,7 @@ Looping a saved EVP:
 
 Playback speed:
 
-27. Next to **Zoom** and **Height**: **Speed 1×** and **Keep pitch** (ticked). Play
+27. On the **Speed** tab: **Speed 1×** and **Keep pitch** (ticked). Play
     a recording with speech and drag Speed to 0.5×: it slows down at once, from
     where it was (no restart), and the label turns highlighted; the voice keeps
     its normal pitch. Untick **Keep pitch**: still 0.5×, now deeper, like a slow
@@ -120,7 +120,8 @@ Playback speed:
     Open another recording, and an MP3 clip: the speed stays. Close and start
     OpenEVP again: speed and Keep pitch are as you left them. In a second OpenEVP
     window, a change applies there for that session only.
-28. Set Speed to 0.5×: **Exports at 0.5×** appears under Keep pitch, ticked (it
+28. Set Speed to 0.5×: **Exports at 0.5×** appears under Keep pitch, ticked, and
+    the tab reads **Speed •** (it
     is hidden at 1×). On a marked recording, **Export WAV with marks**: a
     progress bar and percentage show while it slows down, and it saves
     `<name>_0.5x.wav`; open it in an audio editor: twice as long, the voice at
@@ -134,3 +135,82 @@ Playback speed:
     speed is still 0.5× but **Exports at 0.5×** is unticked until you move the
     speed to 1× and back. Time Export WAV with marks at 0.5× (Keep pitch)
     on a 30-minute ICD-ST25 recording and a few-minute ICD-ST10 stereo one.
+
+Enhance:
+
+29. Open the **Enhance** tab. Play a recording with speech and drag **Boost** to
+    +12 dB: it gets louder at once, without a restart or a click of the cursor,
+    and loud parts do not crackle (the limiter). The tab reads **Enhance •** (its
+    tooltip lists what is on) and an **Enhanced** tag shows above the waveform.
+    One at a time, listen to each: **Leveler** Light / Medium / Strong (quiet
+    parts come up), **Voice filter** (thinner, telephone-like), **Cut rumble**
+    (handling thumps and wind go), **Hum remover** 60 Hz and 50 Hz on a recording
+    with mains hum (the hum goes, the voice stays), **Cut hiss** on an ICD-ST10
+    recording (greyed out, with a reason, on an ICD-ST25 one). With each on, set
+    Speed to 0.5× and 2×, with and without Keep pitch: speed and pitch behave
+    as before; the cursor, a selection's loop and a mark's loop stay right.
+    **Reset**: everything off, the dot and the tag gone.
+30. Turn Boost on: **Exports enhanced** appears, ticked. Export WAV with marks:
+    `<name>_enhanced.wav`, which sounds like what you heard; again: "already
+    saved". With Speed 0.5×: `<name>_0.5x_enhanced.wav`. Export clips and Save
+    clip: `…_enhanced.mp3`. Untick it: plain names. The library's Export clips:
+    plain names. Close and start OpenEVP: the settings are still on (**Enhance •**,
+    tag shown), **Exports enhanced** unticked. A second OpenEVP window keeps its
+    own changes for that session only.
+
+Spectrogram:
+
+31. On a fresh install (or a PC where it was never unticked), **Spectrogram**
+    (on the View tab) is ticked. Open a recording: the waveform appears as quickly as
+    without it and plays at once; within a couple of seconds the spectrogram fills
+    in under the waveform, labelled 1, 2, 3 kHz on
+    an ICD-ST25 recording (up to 8 kHz on an ICD-ST10 one); speech shows as
+    bright stacked bands. Zoom in with the wheel: it stays lined up with the
+    waveform and gets sharper (harmonics visible); scroll along: the labels stay
+    at the left edge; the cursor, the marks and a drag selection cover it; a click
+    on it seeks. Zoom right out on the longest recording (30 minutes): no freeze,
+    the whole length drawn. Open another recording: its own spectrogram; an MP3
+    recording or clip has one too. Untick it: gone, the player its usual height. Close
+    and start OpenEVP: still off, and opening recordings asks for none. Tick it
+    again: it is back, and stays on after a restart.
+
+Noise reduction:
+
+32. On a recording with steady background noise, drag across a second of noise
+    only and click **Learn noise**: a banner says it was learnt (with an
+    **Enhance** button that opens the Enhance tab). Hovering the Reduce noise
+    line says where it was learnt from. Tick **Reduce noise** while playing: a progress bar with
+    **Cancel** shows, then playback goes on from where it was, quieter between
+    words; the voices sound the same. Hover Reduce noise and its slider: both
+    warn about watery artefacts. Move the amount to 100%: it is made again and
+    sounds watery (that is the warning); back to 40%. Marks, a selection's loop,
+    a mark's loop, the speed (0.5×, Keep pitch on and off) and the other
+    enhancements all work on it; the spectrogram shows the noise-reduced audio.
+    Add a mark while it is on: the mark is listed under the recording in the
+    EVP Library (not under anything new); the library shows no new file.
+    Untick it: the original plays on from where it was.
+33. On the 30-minute recording, time Reduce noise; Cancel halfway: it stops,
+    and Reduce noise is unticked. Load another recording: Reduce noise is off and
+    greyed (no profile); go back: the profile is still there. An MP3
+    recording and an MP3 clip: Learn noise, Reduce noise, the spectrogram,
+    Enhance and exports at a speed or enhanced all work as on a WAV.
+34. With Reduce noise on, **Exports enhanced** is ticked: Export WAV with marks
+    saves `<name>_enhanced.wav` that sounds like what you heard; with Speed 0.5×
+    and Boost too: `<name>_0.5x_enhanced.wav`; Save clip: `…_enhanced.mp3`.
+    Export again: "already saved".
+
+Player settings tabs:
+
+35. Right of the waveform: **View**, **Speed** and **Enhance** tabs, no taller than
+    the old column of controls (the player is not taller than before). Click each:
+    View has Zoom, Height, Spectrogram; Speed has the speed, Keep pitch and
+    "Exports at …×"; Enhance has Boost, Leveler, the filters, Hum, Reduce noise,
+    "Exports enhanced" and Reset. The box keeps its size when switching. Tab
+    reaches the selected tab only; the arrow keys, Home and End move between
+    tabs (with a screen reader: announced as tabs, "selected"). Set Speed to
+    0.5× and Boost on, then show View: **Speed •** and **Enhance •** show dots,
+    and their tooltips say "On now: Speed 0.5×" / "On now: Boost +6 dB". With
+    the View tab shown, `]` `[` `\` change the speed (the Speed tab's dot follows),
+    M marks a selection, Space plays and pauses, a mark's 🔁 loops. Untick
+    Spectrogram: **View •**. Close and start OpenEVP: the tab you last picked is
+    shown.

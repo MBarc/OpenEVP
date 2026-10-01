@@ -22,6 +22,11 @@ new place, and its URL keeps working.
 
 Every file reaches the page as a PCM WAV: a .dvf or an MP3 is decoded here
 (prepare(), into the cache), never by the page, so there is one playback path.
+
+The listening tools read the audio a URL serves (open_audio(): the cached
+decode, or the user's file, refused once it changed on disk), and the player's
+spectrogram is served from here too: add_spectrogram() keeps the last few
+(openevp.spectrogram) and serves their tiles as PNG images.
 """
 import errno
 import hashlib
@@ -38,6 +43,11 @@ import numpy as np
 
 from openevp import wavinfo
 
+# Sent with every response (Handler.end_headers): any origin may read it (only this machine can connect,
+# and every URL carries the per-run token); the page may read the range headers of a partial answer.
+CORS_HEADERS = (("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges"))
+SPECTROGRAMS = 3                       # spectrograms kept (a 30-minute ICD-ST25 one is about 60 MB)
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
 MAX_PEAKS = 400_000                    # longer files get fewer per second (keeps the page responsive)
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -57,13 +67,14 @@ def _samples(data, width):
     return np.frombuffer(data, dtype={2: "<i2", 4: "<i4"}[width]).astype(np.int64)
 
 
-def _analyze(f):
+def _analyze(f, fingerprint=True):
     """(peaks, duration, rate, fp) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per
     second of audio (at most MAX_PEAKS in all), each the loudest sample of any channel
     in its slice, plus the sample rate and the audio fingerprint (openevp.wavinfo) of the
     decoded samples. Reads in chunks, never the whole file. A WAV with no samples
     has fp None: every empty WAV of one format would otherwise share one identity
-    (and one set of marks), so it gets none and cannot be marked."""
+    (and one set of marks), so it gets none and cannot be marked. fingerprint False:
+    fp is None too (audio that must never be taken for a recording)."""
     try:
         w = wave.open(f)
     except (wave.Error, EOFError) as e:
@@ -87,12 +98,13 @@ def _analyze(f):
             if not data:
                 break
             total += len(data)
-            h.update(data)
+            if fingerprint:
+                h.update(data)
             mags = np.abs(_samples(data, width).reshape(-1, ch)).max(axis=1)
             peaks.extend((np.maximum.reduceat(mags, np.arange(0, len(mags), per)) / full).tolist())
         if total != expected:
             raise ValueError("the WAV file is truncated")
-        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
+        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest() if fingerprint else None
 
 
 def _channels(f):
@@ -205,6 +217,8 @@ class AudioServer:
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
+        self._pinned = set()                 # keys never evicted (the player's recording and the version it plays)
+        self._specs = OrderedDict()          # spectrogram id -> (file id, openevp.spectrogram.Spectrogram); LRU order
         self._httpd = None
 
     def start(self):
@@ -213,6 +227,22 @@ class AudioServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 server._handle(self)
+
+            def do_OPTIONS(self):                # a CORS preflight (a fetch with a Range header, say)
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Range")
+                self.send_header("Access-Control-Max-Age", "600")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def end_headers(self):
+                # Every answer, errors included, carries the CORS headers: the UI is served from
+                # another local port and its media element asks for CORS (Web Audio needs it), so
+                # without them a 404/409/416 would reach the page as an opaque network failure.
+                for k, v in CORS_HEADERS:
+                    self.send_header(k, v)
+                super().end_headers()
 
             def log_message(self, *args):
                 pass
@@ -229,7 +259,7 @@ class AudioServer:
     def _url(self, file_id):
         return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.wav"
 
-    def prepare(self, key, make=None, write=None, expected=None):
+    def prepare(self, key, make=None, write=None, expected=None, fingerprint=True):
         """Decode a recording into the cache (once per key) and return _info().
         ``write(f)``, when given, decodes straight into the cache file ``f`` (a
         seekable binary file), so a long recording is never held in memory;
@@ -241,7 +271,9 @@ class AudioServer:
         Room is made first: older entries are evicted down to the budget minus
         ``expected`` (the WAV's expected size, when known; ``write`` can also
         call reserve() once it knows). If the disk fills up anyway, every other
-        entry is evicted and the decode is tried once more."""
+        entry is evicted and the decode is tried once more. fingerprint False: no
+        fingerprint is taken (fp None), for audio that is not a recording of its own
+        (a noise-reduced version of one)."""
         with self._lock:
             gate = self._inflight.setdefault(key, threading.Lock())
         with gate:                                   # concurrent requests wait for one decode
@@ -266,7 +298,7 @@ class AudioServer:
                             self._evict(keep=None, limit=0)      # everything else goes; then once more
                         self._produce(key, path, make, write)
                     with open(path, "rb") as f:
-                        peaks, duration, rate, fp = _analyze(f)
+                        peaks, duration, rate, fp = _analyze(f, fingerprint)
                         channels = _channels(f)
                         size = os.fstat(f.fileno()).st_size
                 except BaseException:
@@ -342,6 +374,97 @@ class AudioServer:
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
                 "channels": e["channels"], "fp": e["fp"]}
 
+    def _file_of(self, url):
+        """(path, entry) of the audio a URL of this server serves; ValueError if none."""
+        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.wav", url or "")
+        with self._lock:
+            key = self._by_file.get(m.group(2)) if m and secrets.compare_digest(m.group(1), self._token) else None
+            e = self._entries.get(key) if key is not None else None
+            if e is None:
+                raise ValueError("that audio is no longer loaded: load the recording again")
+            path = e.get("path") or os.path.join(self._dir, e["file"] + ".wav")
+            return path, dict(e)
+
+    def _key_for(self, url):
+        """The cache key of the audio a URL of this server serves, or None (under _lock)."""
+        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.wav", url or "")
+        if not m or not secrets.compare_digest(m.group(1), self._token):
+            return None
+        return self._by_file.get(m.group(2))
+
+    def serves(self, url):
+        """Does a URL of this server serve audio now?"""
+        with self._lock:
+            return self._key_for(url) is not None
+
+    def pin(self, urls):
+        """Keep the audio these URLs serve in the cache, never evicted, until the next
+        pin() (which replaces the set): the recording in the player and the version of
+        it that plays, so making another version can never push them out."""
+        with self._lock:
+            self._pinned = {k for k in (self._key_for(u) for u in urls) if k is not None}
+
+    def drop_versions(self, prefix, keep_urls=()):
+        """Drop every cached entry whose key starts with prefix (the versions of one
+        recording), except those keep_urls serve and pinned ones. Returns how many."""
+        with self._lock:
+            keep = {self._key_for(u) for u in keep_urls}
+            gone = [k for k in self._entries if k[:len(prefix)] == prefix and k not in keep and k not in self._pinned]
+            for k in gone:
+                self._drop(k)
+        return len(gone)
+
+    def file_id(self, url):
+        """The file id of a URL of this server (ValueError if it serves nothing)."""
+        return self._file_of(url)[1]["file"]
+
+    def open_audio(self, url):
+        """The WAV a URL serves, opened for reading (a binary file; close it). A file
+        served in place that changed on disk since it was loaded is refused
+        (ValueError), as the player's requests are."""
+        path, e = self._file_of(url)
+        f = _open_shared(path)
+        if "stat" in e and _stat_of(os.fstat(f.fileno())) != e["stat"]:
+            f.close()
+            raise ValueError("the file changed on disk: load it again")
+        return f
+
+    def add_spectrogram(self, url, spec):
+        """Keep a spectrogram of the audio at url; returns its tiles' base URL
+        (<base>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""
+        file_id = self.file_id(url)
+        sid = secrets.token_hex(8)
+        with self._lock:
+            self._specs[sid] = (file_id, spec)
+            while len(self._specs) > SPECTROGRAMS:
+                self._specs.popitem(last=False)
+        return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/spec/{sid}"
+
+    def spectrogram_of(self, url):
+        """(tiles base URL, spectrogram) already kept for the audio at url, or None."""
+        file_id = self.file_id(url)
+        with self._lock:
+            for sid, (fid, spec) in reversed(self._specs.items()):
+                if fid == file_id:
+                    self._specs.move_to_end(sid)
+                    return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/spec/{sid}", spec
+        return None
+
+    def _tile(self, h, m):
+        with self._lock:
+            ok = secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._specs
+            spec = self._specs[m.group(2)][1] if ok else None
+        png = spec.tile(int(m.group(3)), int(m.group(4))) if spec is not None and len(m.group(3)) < 4 and len(m.group(4)) < 9 else None
+        if png is None:
+            h.send_error(404)
+            return
+        h.send_response(200)
+        h.send_header("Content-Type", "image/png")
+        h.send_header("Content-Length", str(len(png)))
+        h.send_header("Cache-Control", "max-age=3600")
+        h.end_headers()
+        h.wfile.write(png)
+
     def retarget_prefix(self, old, new):
         """A file or folder moved from `old` to `new` (same volume, so the same
         size and mtime): every file served in place from `old` or under it is
@@ -370,14 +493,14 @@ class AudioServer:
                 self._drop(key)
 
     def _evict(self, keep, limit=None):
-        """Drop the oldest decoded entries (never ``keep``, never picked files)
+        """Drop the oldest decoded entries (never ``keep``, never a pinned one, never picked files)
         until the cache holds at most ``limit`` bytes (default: the budget)."""
         limit = self._max if limit is None else limit
         total = sum(e["size"] for e in self._entries.values())
         for key in list(self._entries):
             if total <= limit:
                 break
-            if key != keep and "path" not in self._entries[key]:   # picked files use no cache space
+            if key != keep and key not in self._pinned and "path" not in self._entries[key]:   # picked: no space
                 total -= self._entries[key]["size"]
                 self._drop(key)
 
@@ -392,6 +515,10 @@ class AudioServer:
             pass                                     # still being served; the temp dir is removed at exit
 
     def _handle(self, h):
+        t = re.fullmatch(r"/([^/]+)/spec/([0-9a-f]{16})/(\d+)/(\d+)\.png", h.path)
+        if t:
+            self._tile(h, t)
+            return
         m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.wav", h.path)
         with self._lock:
             ok = m and secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._by_file
@@ -428,7 +555,6 @@ class AudioServer:
             h.send_header("Content-Type", "audio/wav")
             h.send_header("Accept-Ranges", "bytes")
             h.send_header("Content-Length", str(end - start + 1))
-            h.send_header("Access-Control-Allow-Origin", "*")   # the UI is served from another local port
             if status == 206:
                 h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             h.end_headers()

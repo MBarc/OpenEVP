@@ -171,12 +171,36 @@ td.note { color: var(--warn); }
 #play { width: 40px; height: 40px; border-radius: 50%; }
 #status { padding: 4px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); min-height: 24px; }
 .setup { margin: 4px 6px 0 20px; }
-#view-controls { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
-#view-controls label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+/* The player's settings: three tabs (View, Speed, Enhance) in the space one column of controls had.
+   The panels share one grid cell, so the box is as tall as the tallest and never jumps. */
+#view-controls { display: flex; flex-direction: column; gap: 4px; width: 196px; font-size: 12px; color: var(--muted); }
+#player-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); }
+#player-tabs [role="tab"] { flex: 1; font: inherit; font-size: 12px; padding: 1px 4px; cursor: pointer; color: var(--muted);
+                            background: none; border: 1px solid transparent; border-bottom: none; border-radius: 4px 4px 0 0; }
+#player-tabs [role="tab"][aria-selected="true"] { color: var(--text); font-weight: 600; border-color: var(--line); background: var(--bg); }
+#player-tabs [role="tab"]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#player-tabs [role="tab"].changed { color: var(--accent); }
+.tab-dot { margin-left: 3px; color: var(--accent); font-weight: 700; }
+.tab-dot[hidden] { display: none; }
+.tab-panels { display: grid; }
+.tab-panel { grid-area: 1 / 1; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.tab-panel[hidden] { display: flex; visibility: hidden; }
+#view-controls label { display: flex; align-items: center; justify-content: space-between; gap: 6px; white-space: nowrap; }
+#view-controls label.end { justify-content: flex-end; gap: 4px; }
 #view-controls input[type="range"] { width: 110px; }
-#view-controls #keep-pitch-label, #view-controls #export-speed-label { justify-content: flex-end; gap: 4px; }
 #view-controls label[hidden] { display: none; }
+.enhance-tab .enhance-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.enhance-tab .enhance-row label { gap: 3px; }
+.enhance-tab input[type="range"]#boost { width: 96px; }
+.enhance-tab input[type="range"]#noise-amount { width: 52px; }
+.enhance-tab select, #enhance-reset { font: inherit; font-size: 12px; padding: 0 2px; }
+#enhance-reset { margin-left: auto; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 4px; cursor: pointer; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 #speed-label.changed { color: var(--accent); font-weight: 600; }
+/* Enhance: an "Enhanced" tag above the waveform while anything is on (and the tab's dot) */
+.enhanced-tag { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; background: var(--accent); color: var(--panel); }
+.enhanced-tag[hidden] { display: none; }
+#boost-value, #noise-amount-value { min-width: 30px; text-align: right; font-variant-numeric: tabular-nums; }
 #speed-value { font-variant-numeric: tabular-nums; }
 #version { font-size: 12px; color: var(--muted); }
 .legal { font-size: 12px; color: var(--muted); }

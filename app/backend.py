@@ -41,7 +41,19 @@ format is a setting (clip_format: "mp3" by default, or "wav"; set_clip_format())
 The player's export_clips() and export_marked() can save at the player's speed
 (speed, keep_pitch: openevp.stretch; the names end in the speed, "-tape" without
 Keep pitch; the library's clips job never does); the player's speed and Keep pitch
-are settings too (playback_speed / keep_pitch; set_playback_speed()).
+are settings too (playback_speed / keep_pitch; set_playback_speed()). They can also
+save "as heard" (heard: the player's Enhance settings, openevp.enhance, applied
+after the speed, as the player applies them to what it plays; the names then end
+in "_enhanced"); the Enhance settings are a setting too (enhance; set_enhance()).
+Noise reduction (learn_noise() keeps a noise profile per recording for this
+session; reduce_noise() makes a noise-reduced version of the recording,
+openevp.denoise, cached in the audio server under the recording, the profile and
+the amount, never fingerprinted, never in the library): the player plays it under
+the same handle, so marks stay the original's. Exports "as heard" include it
+(heard["denoise"]: applied first, before the speed and the Enhance chain).
+The player's spectrogram (spectrogram(): openevp.spectrogram, served as tiles by
+the audio server) is computed here from the audio the player plays; whether it is
+shown is a setting (spectrogram; set_spectrogram()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
 counts them as EVPs and never cuts clips from them again.
@@ -51,13 +63,14 @@ and recordings moved between them: see app/library_ops.py (mixed into Api) and
 app/folders.py.
 """
 import datetime
+import math
 import os
 import secrets
 import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, formats, mp3, recorders, stretch, wavinfo
+from openevp import __version__, clips, denoise, enhance, formats, mp3, pcm, recorders, spectrogram, stretch, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -93,6 +106,8 @@ CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
 PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
+ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
+SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool; on unless turned off)
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -116,6 +131,40 @@ def _export_speed(speed, keep_pitch):
 
 NORMAL = (1.0, True)                # an export at normal speed
 BAD_SPEED = "Unknown playback speed."
+BAD_HEARD = "Unknown enhancement settings."
+NO_PROFILE = "Learn the noise again (select background noise only, then Learn noise)."
+NOISE_PROFILES = 32                 # noise profiles kept for this session
+
+
+def _amount(value):
+    """A noise reduction amount from the page (0..100, a whole percent), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+        return None
+    return int(round(value))
+
+
+def _heard(value):
+    """An export's "as heard" argument from the page: None (as recorded), or
+    {"enhance": settings, "denoise": {"profile", "amount"}} (either may be left
+    out) -> the same, normalized. Raises ValueError."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"enhance", "denoise"}:
+        raise ValueError(BAD_HEARD)
+    out = {}
+    if value.get("enhance") is not None:
+        out["enhance"] = enhance.normalize(value["enhance"])
+    d = value.get("denoise")
+    if d is not None:
+        if not isinstance(d, dict) or not isinstance(d.get("profile"), str) or _amount(d.get("amount")) is None:
+            raise ValueError(BAD_HEARD)
+        out["denoise"] = {"profile": d["profile"], "amount": _amount(d["amount"])}
+    return out or None
+
+
+def _heard_on(heard, rate):
+    """Does "as heard" change anything for audio at this rate?"""
+    return bool(heard) and (enhance.active(heard.get("enhance") or {}, rate) or "denoise" in heard)
 
 
 def _download(manager, key):
@@ -438,6 +487,12 @@ class Api(LibraryOps):
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
         self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
+        self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
+        self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
+        self._noise = OrderedDict()           # noise profile id -> (fp, openevp.denoise.Profile), this session only
+        self._denoising = {}                  # reduce_noise() job -> its cancel Event
+        self._spec_lock = threading.Lock()
+        self._spec_jobs = {}                  # url -> {"cancel", "done" (Events), "result"}: spectrograms being made
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -501,7 +556,9 @@ class Api(LibraryOps):
                 "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
-                **self.playback_speed(),
+                **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
+                "spectrogram": self.spectrogram_shown(),
+                "noise": {"default_amount": denoise.DEFAULT_AMOUNT, "max_reduction_db": denoise.MAX_REDUCTION_DB},
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -666,9 +723,13 @@ class Api(LibraryOps):
         rec handle, and the recording's marks, reviewed flag and backup status."""
         rec = secrets.token_hex(8)
         entry = {"fp": info.get("fp"), "duration": info.get("duration"), "name": name, "label": label,
-                 "source": source}
+                 "source": source, "url": info.get("url"), "variants": set()}
         with self._recs_lock:
             _bounded_put(self._recs, rec, entry)
+        pin = getattr(self._server, "pin", None)
+        if pin is not None and entry["url"]:
+            pin([entry["url"]])                           # the player's recording now; earlier pins end
+        self._cancel_spectrograms()
         return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"], source)}
 
     def _marks_state(self, fp, source=None):
@@ -958,7 +1019,7 @@ class Api(LibraryOps):
         except ValueError as e:
             return wav, f"saved without its marks ({e})"
 
-    def export_marked(self, rec, speed=1, keep_pitch=True):
+    def export_marked(self, rec, speed=1, keep_pitch=True, heard=None):
         """Save a WAV with the current marks of the loaded recording into the Save-to
         folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
@@ -975,11 +1036,20 @@ class Api(LibraryOps):
         (openevp.stretch: keep_pitch, or tape-style), its marks moved to match, and
         its name ends in the speed (<stem>_0.5x.wav, <stem>_0.5x-tape.wav without
         keep_pitch); "speed-progress" events
-        ({"done", "total"}) report how far that is."""
+        ({"done", "total"}) report how far that is (and how far "as heard" is).
+
+        heard ({"enhance": settings}, see _heard()): saved as the player plays it,
+        the Enhance chain (openevp.enhance) applied after the speed; the name then
+        ends in "_enhanced" (<stem>_0.5x_enhanced.wav). Nothing on for this
+        recording: saved as it is, under its plain name."""
         at = _export_speed(speed, keep_pitch)
         if at is None:
             return _fail(BAD_SPEED)
-        return self._marked_call(rec, lambda entry: self._export_marked(entry, at))
+        try:
+            heard = _heard(heard)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        return self._marked_call(rec, lambda entry: self._export_marked(entry, at, heard))
 
     def clip_format(self):
         """The clip format, "mp3" or "wav" (clips.FORMATS): the one picked in this
@@ -1037,23 +1107,153 @@ class Api(LibraryOps):
         self._playback = None if remembered else (speed, keep_pitch)
         return {"ok": True, "playback_speed": speed, "keep_pitch": keep_pitch, "remembered": remembered}
 
+    def enhance_settings(self):
+        """The player's Enhance settings (openevp.enhance.DEFAULT's keys): the ones
+        picked in this session if they could not be remembered, else the remembered
+        ones (a damaged field falls back to its default), else all off."""
+        if self._enhance is not None:
+            return dict(self._enhance)
+        saved = self._store.get_setting(ENHANCE) if self._store is not None else None
+        return enhance.normalize(saved, strict=False)
+
+    def set_enhance(self, settings):
+        """Pick the Enhance settings and remember them (a second window: for this
+        session). {"ok", "enhance", "remembered"}."""
+        try:
+            settings = enhance.normalize(settings)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(ENHANCE, settings)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._enhance = None if remembered else settings
+        return {"ok": True, "enhance": settings, "remembered": remembered}
+
+    def spectrogram_shown(self):
+        """Is the player's spectrogram shown? (Picked in this session if it could not be
+        remembered, else remembered, else True: it is on until someone turns it off, and
+        only an explicit False -- stored when they untick it -- keeps it off.)"""
+        if self._spectrogram is not None:
+            return self._spectrogram
+        saved = self._store.get_setting(SPECTROGRAM) if self._store is not None else None
+        return saved if isinstance(saved, bool) else True
+
+    def set_spectrogram(self, shown):
+        """Show the spectrogram or not, and remember it. {"ok", "spectrogram", "remembered"}."""
+        if not isinstance(shown, bool):
+            return _fail("Unknown spectrogram setting.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(SPECTROGRAM, shown)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._spectrogram = None if remembered else shown
+        return {"ok": True, "spectrogram": shown, "remembered": remembered}
+
+    def _audio_url(self, entry, url):
+        """The URL of audio the player has for this recording: url if it is one of
+        them (its own audio, or a noise-reduced version of it), its own if url is None."""
+        with self._recs_lock:
+            ok = url is None or url == entry.get("url") or url in entry.get("variants", ())
+        return (entry.get("url") if url is None else url) if ok else None
+
+    def spectrogram(self, rec, url=None):
+        """The spectrogram of the loaded recording's audio (or of url, a version of it
+        the player has, e.g. noise-reduced): computed once (openevp.spectrogram) and
+        served as PNG tiles by the audio server. {"ok", "tiles" (the tiles' base URL:
+        <tiles>/<level>/<index>.png), "columns", "rows", "column_seconds", "levels",
+        "tile", "fmax", "fft"}. Runs on the caller's thread; stops when the app closes."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        url = self._audio_url(entry, url)
+        if not url:
+            return _fail("That audio is not loaded. Load the recording again.")
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        try:
+            found = self._server.spectrogram_of(url)
+        except ValueError as e:
+            return _fail(f"No spectrogram for {entry['name']}: {_plain(e)}")
+        if found is not None:
+            return {"ok": True, "tiles": found[0], **found[1].info()}
+        # One job per URL: a second request waits for it. A request for other audio (another
+        # version, another recording) supersedes the jobs running: they are cancelled.
+        with self._spec_lock:
+            job = self._spec_jobs.get(url)
+            mine = job is None
+            if mine:
+                for other in self._spec_jobs.values():
+                    other["cancel"].set()
+                job = self._spec_jobs[url] = {"cancel": threading.Event(), "done": threading.Event(), "result": None}
+        if not mine:
+            job["done"].wait()
+            return job["result"]
+        try:
+            job["result"] = self._make_spectrogram(entry, url, job["cancel"])
+        finally:
+            with self._spec_lock:
+                if self._spec_jobs.get(url) is job:
+                    del self._spec_jobs[url]
+            job["done"].set()
+        return job["result"]
+
+    def _make_spectrogram(self, entry, url, cancel):
+        try:
+            with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
+                spec = spectrogram.compute(reader, should_stop=lambda: self._stop.is_set() or cancel.is_set())
+            found = self._server.add_spectrogram(url, spec), spec
+        except spectrogram.Cancelled:
+            return {"ok": False, "cancelled": True, "error": CLOSING if self._stop.is_set() else "Stopped."}
+        except (OSError, ValueError) as e:
+            return _fail(f"No spectrogram for {entry['name']}: {_plain(e)}")
+        except MemoryError:
+            return _fail(f"There is not enough memory for the spectrogram of {entry['name']}.",
+                         "Close other programs and try again.")
+        except Exception as e:
+            return _error(e)
+        return {"ok": True, "tiles": found[0], **found[1].info()}
+
+    def _cancel_spectrograms(self):
+        """Stop every spectrogram being made (the player moved on)."""
+        with self._spec_lock:
+            for job in self._spec_jobs.values():
+                job["cancel"].set()
+
+    def cancel_spectrogram(self):
+        """The page hid the spectrogram or let go of the recording: stop any being made."""
+        self._cancel_spectrograms()
+        return {"ok": True}
+
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""
         return _fail(mp3.UNAVAILABLE) if fmt == "mp3" and not mp3.available() else None
 
-    def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True):
+    def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True, heard=None):
         """Save each mark of the loaded recording (or only the mark mark_id) as its
         own clip (clip_format(): MP3 or WAV) into the Clips subfolder of the folder
         export_marked() would use: see openevp.clips. Never replaces a file (identical bytes count as
         already saved). Admitted, locked and waited for exactly as export_marked().
         {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}.
-        speed, keep_pitch: clips at the player's speed (see export_marked())."""
+        speed, keep_pitch, heard: clips at the player's speed and as heard (see
+        export_marked(); each clip, its pads included, is enhanced on its own)."""
         if mark_id is not None and not isinstance(mark_id, str):
             return _fail("That mark is no longer there.")
         at = _export_speed(speed, keep_pitch)
         if at is None:
             return _fail(BAD_SPEED)
-        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id, at), CLIPS_BUSY, CLIPS_BUSY_UPDATE)
+        try:
+            heard = _heard(heard)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id, at, heard),
+                                 CLIPS_BUSY, CLIPS_BUSY_UPDATE)
 
     def _marked_call(self, rec, work, busy=MARKED_BUSY, busy_update=MARKED_BUSY_UPDATE):
         """Run work(entry) for a loaded recording on the caller's thread, holding
@@ -1152,15 +1352,31 @@ class Api(LibraryOps):
         investigation = _investigation(path, self._library_path() if library is None else library)
         return os.path.join(dest, investigation) if investigation else dest
 
-    def _export_marked(self, entry, at=NORMAL):
+    def _export_marked(self, entry, at=NORMAL, heard=None):
         marks = self._store.marks(entry["fp"])
         if not marks:
             return _fail("This recording has no marks yet.")
+        noise = self._heard_noise(entry, heard)
+        if isinstance(noise, dict):
+            return noise
         got = self._entry_audio(entry, "add the marks to")
         if isinstance(got, dict):
             return got
         wav, outdir, stem = got
         del got
+        if noise is not None:
+            try:
+                wav = denoise.reduce_wav(wav, *noise, should_stop=self._stop.is_set, progress=self._speed_progress())
+            except denoise.Cancelled:
+                return _fail(CLOSING)
+            except ValueError as e:
+                return _fail(f"Could not reduce the noise of {entry['name']}: {e}")
+            except MemoryError:
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} as heard.",
+                             "Close other programs and try again, or save it as recorded.")
+            except Exception as e:
+                return _error(e)
         speed, keep_pitch = at
         out_name = stem + ".wav"
         if speed != 1:
@@ -1180,6 +1396,26 @@ class Api(LibraryOps):
                 return _error(e)
             marks = stretch.scale_marks(marks, speed)
         try:
+            rate = clips._layout(memoryview(wav))[1]
+        except ValueError as e:
+            return _fail(f"Could not add the marks to {entry['name']}: {e}")
+        if _heard_on(heard, rate):
+            out_name = out_name[:-len(".wav")] + enhance.SUFFIX + ".wav"
+        if heard and enhance.active(heard.get("enhance") or {}, rate):
+            try:
+                wav = enhance.process(wav, heard.get("enhance") or {}, should_stop=self._stop.is_set,
+                                      progress=self._speed_progress())
+            except enhance.Cancelled:
+                return _fail(CLOSING)
+            except ValueError as e:
+                return _fail(f"Could not enhance {entry['name']}: {e}")
+            except MemoryError:
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} as heard.",
+                             "Close other programs and try again, or save it as recorded.")
+            except Exception as e:
+                return _error(e)
+        try:
             marked = wavinfo.marked_parts(wav, marks)
         except ValueError as e:
             return _fail(f"Could not add the marks to {entry['name']}: {e}")
@@ -1195,6 +1431,131 @@ class Api(LibraryOps):
         return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path),
                 "folder_name": folder_name}
 
+    # ---- noise reduction (openevp.denoise) ----------------------------------------------
+    def _heard_noise(self, entry, heard):
+        """(profile, amount) for an export's heard["denoise"], None without one, or
+        the _fail() when its profile is not this recording's (any more)."""
+        d = (heard or {}).get("denoise")
+        if d is None:
+            return None
+        with self._recs_lock:
+            found = self._noise.get(d["profile"])
+        if found is None or found[0] != entry["fp"]:
+            return _fail("The noise profile for this recording is gone. " + NO_PROFILE)
+        return found[1], d["amount"]
+
+    def learn_noise(self, rec, start, end):
+        """Learn the noise profile of the loaded recording from start..end (seconds,
+        a stretch of background noise only): kept for this session, for
+        reduce_noise(). {"ok", "profile" (its id), "seconds"}."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        if not entry["fp"]:
+            return _fail(_no_fp(entry))
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (start, end)) \
+                or end <= start:
+            return _fail("Select a part of the recording first.")
+        try:
+            with self._server.open_audio(entry["url"]) as f, pcm.WavFile(f) as reader:
+                profile = denoise.learn(reader, round(start * reader.rate), round(end * reader.rate))
+        except (OSError, ValueError) as e:
+            return _fail(f"Could not learn the noise: {_plain(e)}.")
+        except Exception as e:
+            return _error(e)
+        with self._recs_lock:
+            _bounded_put(self._noise, profile.id, (entry["fp"], profile), NOISE_PROFILES)
+        return {"ok": True, "profile": profile.id, "seconds": round(end - start, 2)}
+
+    def reduce_noise(self, rec, profile_id, amount, job, playing=None):
+        """A noise-reduced version of the loaded recording (openevp.denoise with a
+        profile from learn_noise(), amount 0..100 %), made once and kept in the
+        audio server's cache under (its fingerprint, the profile, the amount). It has
+        exactly the recording's length, rate and channels, is never fingerprinted
+        and never listed: the player plays it under the same handle, and marks stay
+        the recording's. "denoise-progress" events ({"job", "done", "total"}) report
+        how far it is; cancel_denoise(job) stops it. {"ok", "url", "peaks",
+        "duration", "rate", "channels"}, or {"ok": False, "cancelled": True}.
+
+        playing: the URL of the version the player plays now (its own audio, or an
+        earlier noise-reduced one). While a version is made, the recording's own
+        decode and that one are pinned in the cache (making it never evicts what the
+        player needs); afterwards only the new version and the one playing are kept
+        (one amount per recording, so versions never pile up in the cache)."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        amount = _amount(amount)
+        if amount is None:
+            return _fail("Unknown noise reduction amount.")
+        with self._recs_lock:
+            found = self._noise.get(profile_id) if isinstance(profile_id, str) else None
+        if found is None or found[0] != entry["fp"] or not entry["fp"]:
+            return _fail(NO_PROFILE)
+        profile = found[1]
+        cancel = threading.Event()
+        with self._workers_lock:
+            if self._stop.is_set():
+                return _fail(CLOSING)
+            self._denoising[job] = cancel
+        url = entry["url"]
+        playing = self._audio_url(entry, playing) if isinstance(playing, str) else None
+        keep = [url] + ([playing] if playing and playing != url else [])
+        pin = getattr(self._server, "pin", None)
+        if pin is not None:
+            pin(keep)
+        last = [-1]
+
+        def progress(done, total):
+            pct = 100 * done // total if total else 100
+            if pct != last[0]:
+                last[0] = pct
+                self._emit("denoise-progress", {"job": job, "done": done, "total": total})
+
+        def stop():
+            return self._stop.is_set() or cancel.is_set()
+
+        def write(out):
+            with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
+                with wave.open(out, "wb") as w:
+                    w.setnchannels(reader.channels)
+                    w.setsampwidth(reader.width)
+                    w.setframerate(reader.rate)
+                    denoise.reduce(reader, lambda y: w.writeframesraw(pcm.encode(y, reader.kind, reader.width)),
+                                   profile, amount, should_stop=stop, progress=progress)
+        try:
+            info = self._server.prepare(("denoise", entry["fp"], profile.id, amount), write=write,
+                                        fingerprint=False)
+        except denoise.Cancelled:
+            return {"ok": False, "cancelled": True, "error": "Stopped." if not self._stop.is_set() else CLOSING}
+        except (OSError, ValueError) as e:
+            return _fail(f"Could not reduce the noise of {entry['name']}: {_plain(e)}.")
+        except MemoryError:
+            return _fail(f"There is not enough memory to reduce the noise of {entry['name']}.",
+                         "Close other programs and try again.")
+        except Exception as e:
+            return _error(e)
+        finally:
+            with self._workers_lock:
+                self._denoising.pop(job, None)
+        if entry["duration"] is not None and abs(info["duration"] - entry["duration"]) > 1e-9:
+            return _fail("The noise-reduced audio came out a different length; it was not used.")
+        with self._recs_lock:
+            entry["variants"].add(info["url"])
+        if pin is not None:
+            pin(keep + [info["url"]])
+            self._server.drop_versions(("denoise", entry["fp"]), keep + [info["url"]])
+        return {"ok": True, "url": info["url"], "peaks": info["peaks"], "duration": info["duration"],
+                "rate": info["rate"], "channels": info["channels"]}
+
+    def cancel_denoise(self, job):
+        """Stop a reduce_noise() job (its call answers {"ok": False, "cancelled": True})."""
+        with self._workers_lock:
+            cancel = self._denoising.get(job)
+        if cancel is not None:
+            cancel.set()
+        return {"ok": True}
+
     # ---- EVP clips: one WAV per mark (openevp.clips) ----------------------------------
     def _speed_progress(self):
         """A progress(done, total) for stretch.change_speed: "speed-progress" events,
@@ -1208,7 +1569,7 @@ class Api(LibraryOps):
                 self._emit("speed-progress", {"done": done, "total": total})
         return progress
 
-    def _export_clips(self, entry, mark_id, at=NORMAL):
+    def _export_clips(self, entry, mark_id, at=NORMAL, heard=None):
         src = entry["source"]
         if src.get("kind") == "file" and _is_clip(src["path"], self._library_path()):
             return _fail(CLIPS_AGAIN)                    # never a Clips folder inside a Clips folder
@@ -1223,6 +1584,9 @@ class Api(LibraryOps):
         refused = self._clip_format_refused(fmt)
         if refused:
             return refused
+        noise = self._heard_noise(entry, heard)
+        if isinstance(noise, dict):
+            return noise
         got = self._entry_audio(entry, "cut clips from")
         if isinstance(got, dict):
             return got
@@ -1230,22 +1594,32 @@ class Api(LibraryOps):
         del got
         outdir = os.path.join(outdir, CLIPS)
         try:
-            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at)
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at, heard, noise)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
 
-    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL):
+    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL, heard=None, noise=None):
         """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"), at
-        (speed, keep_pitch) (the name then ends in the speed: clips.name()):
+        (speed, keep_pitch) (the name then ends in the speed: clips.name()), as
+        heard (see export_marked(); noise: (profile, amount), each clip's samples
+        exactly those of the noise-reduced recording; the name then ends in "_enhanced"):
         (saved, already there, file names, notes on clips not made). Raises OSError
         when a clip cannot be written."""
         saved = already = 0
         names, notes = [], []
+        try:
+            rate = clips._layout(memoryview(wav))[1]
+        except ValueError:
+            rate = None                          # clips.make() says why, per clip
+        on = rate is not None and _heard_on(heard, rate)
+        settings = (heard or {}).get("enhance") or {}
+        process = (lambda w: enhance.process(w, settings)) if on and enhance.active(settings, rate) else None
+        source = (lambda first, last: denoise.reduce_frames(wav, *noise, first, last)) if noise is not None else None
         for m in marks:
             try:
-                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1])
+                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1], process=process, source=source)
             except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue
@@ -1253,9 +1627,10 @@ class Api(LibraryOps):
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut "
                              "(not enough memory; close other programs and try again)")
                 continue
-            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1])
+            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1], enhanced=on)
             if folders.too_long(os.path.join(outdir, name)):
-                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1])   # the note can go
+                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1],
+                                  enhanced=on)   # the note can go
                 if folders.too_long(os.path.join(outdir, name)):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")

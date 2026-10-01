@@ -232,9 +232,21 @@ or the investigation's folder for a file in the library). Those marks are standa
 `cue`/`labl`/`ltxt` WAV markers — the marker format many audio editors can
 read (none has been verified with OpenEVP yet).
 
+### The player's settings
+
+Right of the waveform, three small tabs hold the player's settings: **View**
+(Zoom, Height, Spectrogram), **Speed** (speed, Keep pitch, Exports at …×) and
+**Enhance** (the listening aids, Reduce noise, Exports enhanced). Click a tab or
+use the arrow keys on it (Home and End for the first and last); the last one
+you picked is shown again next time. A tab with something changed from its
+default shows a dot (**Speed •** while the speed isn't 1×, **Enhance •** while
+anything there is on, **View •** with the spectrogram off or the height raised),
+and its tooltip says what, so a setting is never hidden behind another tab. The
+keyboard shortcuts (`[` `]` `\`, M, Space) work whichever tab is shown.
+
 ### Playback speed
 
-**Speed**, next to Zoom and Height, plays at 0.25× to 2× (`[` slower, `]`
+**Speed**, on the Speed tab, plays at 0.25× to 2× (`[` slower, `]`
 faster, `\` or a double-click back to 1×). With **Keep pitch** ticked (the
 default) speech slows down at its normal pitch; untick it to hear it like a
 tape, deeper when slower. The speed and Keep pitch are remembered.
@@ -248,6 +260,90 @@ marks are moved to match, and a clip's 0.5 s on each side is slowed down with
 it. Untick it for normal-speed exports. The library's Export clips is always at
 normal speed. Slowing down a whole recording with Keep pitch takes a few
 seconds (a progress bar shows how far it is).
+
+### Enhance
+
+The **Enhance** tab holds the listening aids. They change
+only what you hear, live while it plays; the recording itself and its marks are
+never touched:
+
+- **Boost**: up to +24 dB louder. A soft limiter keeps it from clipping.
+- **Leveler** (Light, Medium, Strong): a compressor that brings quiet parts up
+  and loud ones down.
+- **Voice filter**: keeps the voice band, about 300 to 3400 Hz.
+- **Cut rumble**: lowers everything below about 120 Hz (handling noise, wind).
+- **Cut hiss**: lowers everything above 5 kHz. An ICD-ST25 recording (8 kHz) has
+  nothing up there, so it is greyed out for those.
+- **Hum remover**: notches out 60 Hz (or 50 Hz) mains hum and its next three
+  harmonics.
+- **Reset** turns everything off.
+
+The settings are remembered. While any of them is on, the tab reads
+**Enhance •** and an **Enhanced** tag sits above the waveform, so it is never
+left on unnoticed. **Exports enhanced** then shows on the tab: like **Exports at
+0.5×** it is ticked only when you turn enhancement on in this session, and it
+makes the player's Export WAV with marks, Export clips and Save clip save what
+you hear, named `…_enhanced` (`…_0.5x_enhanced.wav` with a speed: the speed is
+applied first, then the enhancements, as the player does). The library's Export
+clips always saves as recorded. Saving the same thing again gives identical
+files, so it says "already saved".
+
+The player runs the enhancements in Web Audio; an export runs the same chain in
+numpy (`openevp/enhance.py`, with the Leveler ported from the browser's own
+compressor in `openevp/leveler.py`). Against Chromium's offline renderer they
+agree to within rounding (87 dB or more below the signal). What you hear can
+still differ very slightly: the player filters at the sound card's rate after
+resampling, and its Leveler delays the sound by 6 ms (an export keeps every
+position, so its marks stay put).
+
+### Noise reduction
+
+To take steady background noise down (hiss, fans, air conditioning, traffic),
+drag across a stretch with **only** that noise in it (no voices, at least a
+quarter of a second; a second or two is better) and click **Learn noise** under
+the waveform. Then tick **Reduce noise** on the **Enhance** tab (hover it to see
+where the noise was learnt from). OpenEVP makes a
+noise-reduced copy of the recording's audio (a progress bar with Cancel shows
+while it does; a 30-minute ICD-ST25 recording takes about 5 seconds) and the
+player switches to it where it was, playing on. Its **amount** sets how far the
+noise goes down: 40% (the default) lowers it by 12 dB, 100% by 30 dB.
+
+Keep it low. Strong noise reduction leaves watery, warbling artefacts, and those
+can sound like whispers or voices: an "EVP" heard only with Reduce noise on
+should be checked with it off.
+
+The copy has exactly the recording's length and sample rate, so marks,
+selections, loops, the speed and the other enhancements all work on it as
+usual, and marks stay the recording's own: the copy is never fingerprinted,
+never listed in the EVP Library, and lives only in OpenEVP's temporary cache.
+The noise profile is kept per recording until OpenEVP closes; loading another
+recording turns Reduce noise off. **Exports enhanced** includes it (named
+`…_enhanced`); it is applied first, then the speed, then the other
+enhancements, as the player does.
+
+How it works (`openevp/denoise.py`): a short-time Fourier transform (about 32 ms
+Hann windows, 75% overlap), each bin's power smoothed over 5 frames and 5 bins,
+then gated against the learnt profile (fully lowered up to 3 dB above the noise,
+untouched from 10 dB above), so a lone noise peak never opens on its own (the
+cause of the "musical noise" of simple spectral subtraction).
+
+### Spectrogram
+
+**Spectrogram** (on the View tab) is on unless you untick it: it shows under the waveform, time across,
+pitch up (0 Hz at the bottom, labelled in kHz), loudness as colour from black
+through purple and red to pale yellow. A voice shows as stacked bright bands
+(its harmonics) shaped by its formants, which is often easier to spot than in
+the waveform, even under noise. It scrolls and zooms with the waveform, and the
+cursor, the marks and a drag selection cover it too. Untick it and it stays off
+(remembered); tick it again any time. Opening a recording is never slowed down by
+it: the waveform comes first, and the spectrogram fills in a moment later.
+
+It is computed by OpenEVP itself, not the page: about 32 ms windows (256-point
+FFT at 8 kHz, 512 at 16 kHz, 1024 at 44.1/48 kHz), up to 8 kHz (a 44.1 kHz
+recording has little but hiss above that), at several levels of detail served
+as image tiles, so only what is on screen is drawn. A 30-minute ICD-ST25
+recording takes under 2 seconds and about 60 MB. MP3 recordings and clips get
+one too: they are decoded to WAV like every other file.
 
 ### EVP clips
 
@@ -446,6 +542,12 @@ dedicated to the public domain under CC0 1.0 Universal; see
 `openevp/decoders/mp3/mp3_core.dll` with OpenEVP's own wrapper (`_mp3.c`).
 On x86-64 minimp3 always takes its SSE2 code path, so the same file decodes to
 the same samples on every PC.
+
+The Leveler (`openevp/leveler.py`) is a port of Chromium's Web Audio
+DynamicsCompressor (`third_party/blink/renderer/platform/audio/dynamics_compressor.cc`,
+Copyright (C) 2011 Google Inc.), licensed BSD-3-Clause; the full notice is in
+[`LICENSES/chromium-dynamics-compressor.txt`](LICENSES/chromium-dynamics-compressor.txt),
+which the app bundles (`_internal\LICENSES\`) and the release check verifies.
 
 `vendor/webview2/MicrosoftEdgeWebview2Setup.exe` is Microsoft's Evergreen WebView2
 bootstrapper (Authenticode-signed by Microsoft; the build checks its SHA-256). It is

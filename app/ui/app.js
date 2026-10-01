@@ -9,6 +9,14 @@ const $ = (id) => document.getElementById(id);
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             speed: 1, keepPitch: true, speedSave: null, speedDirty: false,   // the player's speed (one of SPEEDS), Keep pitch
             exportAtSpeed: false,                         // "Exports at 0.5×": ticked when the user leaves 1× (this session)
+            // Enhance (see enhanceGraph): the settings, the Web Audio graph once one was needed, "Exports enhanced"
+            enh: { settings: null, ctx: null, source: null, nodes: [], topology: null, exportHeard: false,
+                   save: null, dirty: false, curve: null },
+            // The spectrogram under the waveform (see loadSpectrogram): shown?, its answer, its element and tiles
+            spec: { on: false, seq: 0, info: null, url: null, el: null, imgs: new Map(), queued: false, save: null, dirty: false },
+            // Noise reduction (see reduceNoise): profiles learnt (fp -> {id, start, end}), wanted on?, the amount
+            // (percent), the job running ({job, rec}) and the amount the audio playing was reduced by.
+            noise: { profiles: new Map(), on: false, amount: 40, job: 0, running: null, used: null },
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -273,6 +281,7 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   if (seq !== S.playSeq) return;
   status("");
   drawMarks(seq);
+  scheduleSpectrogram(seq);                     // after the waveform has painted: opening is never slower
   if (r.imported) banner(`Loaded ${plural(r.imported, "EVP mark")} stored in this file.`, "ok");
   if (autoplay) S.ws.play();
 }
@@ -1437,6 +1446,7 @@ function heldLibraryFile() {                   // the library file in the player
 
 function unloadPlayer() {                      // stop, and let go of the file
   S.playSeq++;
+  hideSpectrogram();
   S.ws.pause();
   S.ws.empty();
   const media = S.ws.getMediaElement && S.ws.getMediaElement();
@@ -1992,6 +2002,10 @@ window.onBackendEvent = (event, p) => {
     status(`${S.speedWork} ${p.total ? Math.floor(100 * p.done / p.total) : 100}%`);
     return;
   }
+  if (event === "denoise-progress") {                       // Reduce noise: the job running only
+    if (S.noise.running && S.noise.running.job === p.job) noiseProgress(p.done, p.total);
+    return;
+  }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (p.job !== S.job) return;
@@ -2020,19 +2034,27 @@ window.onBackendEvent = (event, p) => {
 
 function setupPlayer() {
   const css = getComputedStyle(document.body);
-  S.ws = WaveSurfer.create({ container: "#waveform", height: 80,
+  // Our own media element, asking for CORS: the audio comes from the audio server (another local
+  // port), and Web Audio (Enhance) only gets the samples of a cross-origin element that asked.
+  const media = document.createElement("audio");
+  media.crossOrigin = "anonymous";
+  media.preload = "auto";
+  S.ws = WaveSurfer.create({ container: "#waveform", height: 80, media,
                              waveColor: css.getPropertyValue("--muted").trim(),
                              progressColor: css.getPropertyValue("--accent").trim() });
   S.ws.on("ready", () => { $("play").disabled = false; applySpeed(); tick(); });
   S.ws.on("timeupdate", tick);
-  S.ws.on("play", () => { $("play").textContent = "❚❚"; });
+  S.ws.on("play", () => { $("play").textContent = "❚❚"; resumeAudio(true); });
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
   $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
-  $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
+  $("height").oninput = () => { S.ws.setOptions({ barHeight: Number($("height").value) }); showTabMarks(); };
+  setupTabs();
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSpeed();
+  setupEnhance();
+  setupSpectrogram();
   setupSelection();                         // once: the plugin stays registered across loads
   setupMarks();
   $("open-wav").onclick = openWav;
@@ -2073,6 +2095,84 @@ function wheelZoom(e) {
   if (next) S.ws.setScroll(t * next - x);
 }
 
+// ---- The player's settings: View, Speed and Enhance tabs (a tablist, as WAI-ARIA describes) ----
+// One tab is shown at a time; the last one picked is remembered for this viewer. A tab whose
+// settings differ from their defaults shows a dot, and its tooltip says what is on, so nothing
+// changed is ever hidden behind another tab. Keyboard shortcuts don't depend on the tab shown.
+const PLAYER_TABS = ["view", "speed", "enhance"];
+const PLAYER_TAB_KEY = "openevp.player-tab";
+const TAB_TIPS = { view: "Zoom, Height and the spectrogram", speed: "Playback speed and Keep pitch",
+                   enhance: "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed)" };
+
+function setupTabs() {
+  let saved = null;
+  try { saved = localStorage.getItem(PLAYER_TAB_KEY); } catch (e) { /* not kept */ }
+  for (const name of PLAYER_TABS) $(`tab-${name}`).onclick = () => selectTab(name, true);
+  $("player-tabs").addEventListener("keydown", tabKeys);
+  selectTab(PLAYER_TABS.includes(saved) ? saved : "view", false);
+}
+
+function selectTab(name, focus) {
+  if (!PLAYER_TABS.includes(name)) return;
+  for (const t of PLAYER_TABS) {
+    const tab = $(`tab-${t}`), on = t === name;
+    tab.setAttribute("aria-selected", String(on));
+    tab.tabIndex = on ? 0 : -1;
+    $(`panel-${t}`).hidden = !on;
+  }
+  S.tab = name;
+  try { localStorage.setItem(PLAYER_TAB_KEY, name); } catch (e) { /* not kept */ }
+  if (focus) $(`tab-${name}`).focus();
+}
+
+// Left / Right move to the previous / next tab (round), Home / End to the first / last.
+function tabKeys(e) {
+  const at = PLAYER_TABS.indexOf(S.tab);
+  let next = null;
+  if (e.key === "ArrowRight") next = PLAYER_TABS[(at + 1) % PLAYER_TABS.length];
+  else if (e.key === "ArrowLeft") next = PLAYER_TABS[(at + PLAYER_TABS.length - 1) % PLAYER_TABS.length];
+  else if (e.key === "Home") next = PLAYER_TABS[0];
+  else if (e.key === "End") next = PLAYER_TABS[PLAYER_TABS.length - 1];
+  if (next === null) return;
+  e.preventDefault();
+  selectTab(next, true);
+}
+
+// What differs from the defaults, per tab ([] when nothing does). Zoom is not counted: it is
+// navigation, and the waveform itself shows it.
+function tabChanges() {
+  const view = [], speed = [], enhance = [];
+  if (S.spec && !S.spec.on) view.push("Spectrogram off");
+  if (Number($("height").value) > 1) view.push("Height raised");
+  if (S.speed !== 1) speed.push(`Speed ${S.speed}×`);
+  if (S.speed !== 1 && !S.keepPitch) speed.push("Keep pitch off");
+  const e = S.enh && S.enh.settings;
+  if (e) {
+    for (const st of enhanceGraph(e, enhRate())) {
+      if (st.type === "gain") enhance.push(`Boost +${st.db} dB`);
+      else if (st.type === "compressor") enhance.push(`Leveler (${st.preset})`);
+    }
+    if (e.voice) enhance.push("Voice filter");
+    if (e.rumble) enhance.push("Cut rumble");
+    if (e.hiss && hissAvailable(enhRate())) enhance.push("Cut hiss");
+    if (e.hum !== "off") enhance.push(`Hum remover ${e.hum} Hz`);
+  }
+  if (typeof noiseOn === "function" && noiseOn()) enhance.push(`Reduce noise ${S.noise.used}%`);
+  return { view, speed, enhance };
+}
+
+function showTabMarks() {
+  const changes = tabChanges();
+  for (const t of PLAYER_TABS) {
+    const tab = $(`tab-${t}`), on = changes[t].length > 0;
+    tab.classList.toggle("changed", on);
+    const dot = tab.querySelector ? tab.querySelector(".tab-dot") : null;
+    if (dot) dot.hidden = !on;
+    tab.dataset.on = on ? "1" : "";
+    tab.title = on ? `${TAB_TIPS[t]}. On now: ${changes[t].join(", ")}.` : TAB_TIPS[t];
+  }
+}
+
 // ---- Playback speed: 0.25× to 2×, keeping the pitch (on by default) or tape-style ----
 // The media element plays at S.speed: wavesurfer's cursor, time, region-out and the stop at a
 // region's end all follow the media's own clock, so they stay right at any speed. A change applies
@@ -2094,6 +2194,7 @@ function showSpeed() {
   $("speed").value = String(speedIndex(S.speed));
   $("speed-value").textContent = `${S.speed}×`;
   $("speed-label").classList.toggle("changed", S.speed !== 1);
+  showTabMarks();
   $("keep-pitch").checked = S.keepPitch;
   $("export-speed-label").hidden = S.speed === 1;
   $("export-speed").checked = S.exportAtSpeed;
@@ -2160,6 +2261,500 @@ function speedKeys(e) {
   if (document.querySelector(".modal:not([hidden])")) return;          // the About or update dialog is open
   e.preventDefault();
   if (e.key === "\\") setSpeed(1); else stepSpeed(e.key === "]" ? 1 : -1);
+}
+
+// ---- Enhance: Boost, Leveler, Voice filter, Cut rumble, Cut hiss, Hum remover (live, never on the file) ----
+// The media element is routed through a Web Audio graph built from the backend's spec
+// (capabilities().enhance_spec, openevp/enhance.py): MediaElementAudioSourceNode -> filters ->
+// compressor -> gain -> soft limiter -> destination. Speed and Keep pitch stay the media element's
+// own, so cursor, regions and loops work as before. The graph is made the first time anything is on
+// (a media element can be routed only once); with everything off the source goes straight to the
+// output. Exports "as heard" run the same chain in the backend (openevp.enhance) after the speed.
+const ENH_DEFAULT = { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" };
+const ENH_FIELDS = {
+  boost: (v) => typeof v === "number" && isFinite(v) && v >= 0 && v <= 24,
+  leveler: (v) => typeof v === "boolean", strength: (v) => ["light", "medium", "strong"].includes(v),
+  voice: (v) => typeof v === "boolean", rumble: (v) => typeof v === "boolean", hiss: (v) => typeof v === "boolean",
+  hum: (v) => ["off", "60", "50"].includes(v),
+};
+function normEnhance(v) {                       // each damaged or missing field: its default
+  const out = { ...ENH_DEFAULT };
+  if (v && typeof v === "object") for (const [k, ok] of Object.entries(ENH_FIELDS)) if (ok(v[k])) out[k] = v[k];
+  out.boost = Math.round(out.boost);
+  return out;
+}
+function enhRate() { return (S.current && S.current.rate) || 48000; }   // no recording: as if wide-band
+function hissAvailable(rate) { const sp = S.caps.enhance_spec; return !!sp && rate >= sp.hiss_min_rate; }
+
+// The stages for a recording at this rate, as openevp.enhance.graph() makes them (keep the two alike).
+function enhanceGraph(s, rate) {
+  const sp = S.caps.enhance_spec, out = [];
+  if (!sp) return out;
+  const nyq = rate / 2;
+  const filt = (type, f, q) => { if (f < 0.95 * nyq) out.push({ type, f, q }); };
+  if (s.rumble) filt("highpass", sp.rumble, sp.q);
+  if (s.voice) { filt("highpass", sp.voice[0], sp.q); filt("lowpass", sp.voice[1], sp.q); }
+  if (s.hiss && hissAvailable(rate)) filt("lowpass", sp.hiss, sp.q);
+  if (s.hum !== "off") {
+    const base = Number(s.hum);
+    for (let k = 1; k <= sp.hum_harmonics; k++) filt("notch", base * k, base * k / sp.hum_width);
+  }
+  if (s.leveler) out.push({ type: "compressor", preset: s.strength });
+  if (s.boost > 0) out.push({ type: "gain", db: s.boost });
+  if (s.leveler || s.boost > 0) out.push({ type: "limiter" });
+  return out;
+}
+function enhanceOn() { return (!!S.enh.settings && enhanceGraph(S.enh.settings, enhRate()).length > 0) || noiseOn(); }
+// Is the player playing a noise-reduced version of the recording?
+function noiseOn() { return !!S.current && S.noise.used !== null && S.current.playing !== S.current.url; }
+
+function limitCurve() {                         // the soft limiter's WaveShaper curve (openevp.enhance.limit_curve)
+  if (S.enh.curve) return S.enh.curve;
+  const sp = S.caps.enhance_spec, n = sp.limit_points, R = sp.limit_range, k = sp.limit_knee;
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = -R + 2 * R * i / (n - 1), a = Math.abs(v);
+    c[i] = Math.sign(v) * (a <= k ? a : k + (1 - k) * Math.tanh((a - k) / (1 - k)));
+  }
+  return (S.enh.curve = c);
+}
+
+function makeNodes(ctx, st) {
+  const sp = S.caps.enhance_spec;
+  if (st.type === "highpass" || st.type === "lowpass" || st.type === "notch") {
+    const b = ctx.createBiquadFilter();
+    b.type = st.type;
+    b.frequency.value = st.f;
+    // Web Audio takes a low- or high-pass Q in dB, a notch's as is.
+    b.Q.value = st.type === "notch" ? st.q : 20 * Math.log10(st.q);
+    return [b];
+  }
+  if (st.type === "compressor") {
+    const c = ctx.createDynamicsCompressor(), p = sp.leveler[st.preset];
+    c.threshold.value = p.threshold; c.knee.value = p.knee; c.ratio.value = p.ratio;
+    c.attack.value = p.attack; c.release.value = p.release;
+    return [c];
+  }
+  if (st.type === "gain") {
+    const g = ctx.createGain();
+    g.gain.value = Math.pow(10, st.db / 20);
+    return [g];
+  }
+  const pre = ctx.createGain(), shaper = ctx.createWaveShaper();   // the limiter: scaled into the curve's range
+  pre.gain.value = 1 / sp.limit_range;
+  shaper.curve = limitCurve();
+  return [pre, shaper];
+}
+
+// The graph follows the settings: rebuilt when its stages change (a filter on or off), else left
+// alone. Nothing on and no graph yet: nothing is made. Always live, while playing too.
+function applyEnhance() {
+  if (!S.ws || !S.enh.settings) return;
+  const stages = enhanceGraph(S.enh.settings, enhRate());
+  if (!S.enh.ctx && !stages.length) return;
+  if (!S.enh.ctx && !makeAudioGraph()) return;
+  const topology = JSON.stringify(stages);
+  if (topology === S.enh.topology) return;
+  const { ctx, source } = S.enh;
+  source.disconnect();
+  for (const n of S.enh.nodes) n.disconnect();
+  S.enh.nodes = stages.flatMap((st) => makeNodes(ctx, st));
+  let at = source;
+  for (const n of S.enh.nodes) { at.connect(n); at = n; }
+  at.connect(ctx.destination);
+  S.enh.topology = topology;
+}
+
+function makeAudioGraph() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const media = S.ws.getMediaElement && S.ws.getMediaElement();
+  if (!AC || !media) { banner("Enhance is not available here: this window has no Web Audio."); return false; }
+  try {
+    const ctx = new AC();
+    S.enh.source = ctx.createMediaElementSource(media);
+    S.enh.ctx = ctx;
+    // Running again (a later resume worked): the warning goes.
+    ctx.onstatechange = () => { if (ctx.state === "running" && $("banner-text").textContent === AUDIO_STUCK) banner(""); };
+  } catch (e) {
+    banner(`Enhance is not available: ${(e && e.message) || e}`);
+    return false;
+  }
+  resumeAudio();
+  return true;
+}
+
+// A new AudioContext may start suspended (autoplay rules): resumed on play and on every change.
+// Once the media element is routed through it, a context that stays suspended means silence:
+// checked: true (on play) says so plainly instead of playing nothing.
+const AUDIO_STUCK = "Enhance couldn't start the audio, so nothing can be heard. Click Play again; " +
+                    "if it stays silent, restart OpenEVP.";
+function resumeAudio(checked = false) {
+  const ctx = S.enh.ctx;
+  if (!ctx) return;
+  const verify = () => { if (checked && ctx.state !== "running") audioStuck(); };
+  if (ctx.state === "suspended" && ctx.resume) ctx.resume().then(verify, () => { if (checked) audioStuck(); });
+  else verify();
+}
+function audioStuck() {
+  banner(AUDIO_STUCK, "warn", { label: "Try again", run: () => { banner(""); resumeAudio(true); } });
+}
+
+// "Exports enhanced": shown while anything is on, ticked only when the user turns enhancement on in
+// this session (never by remembered settings at startup), like "Exports at 0.5×".
+function exportHeard() {
+  if (!enhanceOn() || !S.enh.exportHeard || $("player-loaded").hidden) return null;
+  const out = {};
+  if (enhanceGraph(S.enh.settings, enhRate()).length) out.enhance = { ...S.enh.settings };
+  if (noiseOn()) out.denoise = { profile: S.noise.profiles.get(S.current.fp).id, amount: S.noise.used };
+  return out;
+}
+
+function showEnhance() {
+  const s = S.enh.settings;
+  if (!s) return;
+  const on = enhanceOn();
+  $("boost").value = String(s.boost);
+  $("boost-value").textContent = s.boost ? `+${s.boost} dB` : "0 dB";
+  $("leveler").checked = s.leveler;
+  $("leveler-strength").value = s.strength;
+  $("leveler-strength").disabled = !s.leveler;
+  $("voice-filter").checked = s.voice;
+  $("cut-rumble").checked = s.rumble;
+  $("cut-hiss").checked = s.hiss;
+  const hiss = hissAvailable(enhRate());
+  $("cut-hiss").disabled = !hiss;
+  $("cut-hiss-label").title = hiss ? "Lower everything above 5 kHz (hiss)"
+    : "This recording has nothing above 4 kHz, so there is no hiss band to cut (it needs a sample rate of 12 kHz or more).";
+  $("hum").value = s.hum;
+  // Never on unnoticed: the Enhance tab's dot, and a tag above the waveform.
+  $("enhanced-tag").hidden = !on;
+  $("export-heard-label").hidden = !on;
+  $("export-heard").checked = S.enh.exportHeard;
+  showNoise();
+  showTabMarks();
+}
+
+// A change from the panel: applied at once, shown, remembered (one save at a time, the latest last).
+function setEnhance(changes) {
+  const was = enhanceOn();
+  S.enh.settings = normEnhance({ ...S.enh.settings, ...changes });
+  if (!was && enhanceOn()) S.enh.exportHeard = true;          // the user turned it on: exports follow
+  applyEnhance(); resumeAudio(); showEnhance();
+  saveEnhance();
+}
+
+function saveEnhance() {
+  S.enh.dirty = true;
+  if (!S.enh.save) {
+    S.enh.save = (async () => {
+      while (S.enh.dirty) {
+        await null;
+        S.enh.dirty = false;
+        let r;
+        try { r = await api().set_enhance(S.enh.settings); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+        if (r.ok) S.caps.enhance = r.enhance;
+        else showError(r);
+      }
+      S.enh.save = null;
+    })();
+  }
+  return S.enh.save;
+}
+
+
+function setupEnhance() {
+  S.enh.settings = normEnhance(S.caps.enhance);               // the remembered ones; "Exports enhanced" unticked
+  S.enh.exportHeard = false;
+  applyEnhance(); showEnhance();
+  $("boost").oninput = () => setEnhance({ boost: Number($("boost").value) });
+  $("boost").addEventListener("dblclick", () => setEnhance({ boost: 0 }));
+  $("leveler").onchange = () => setEnhance({ leveler: $("leveler").checked });
+  $("leveler-strength").onchange = () => setEnhance({ strength: $("leveler-strength").value });
+  $("voice-filter").onchange = () => setEnhance({ voice: $("voice-filter").checked });
+  $("cut-rumble").onchange = () => setEnhance({ rumble: $("cut-rumble").checked });
+  $("cut-hiss").onchange = () => setEnhance({ hiss: $("cut-hiss").checked });
+  $("hum").onchange = () => setEnhance({ hum: $("hum").value });
+  $("enhance-reset").onclick = resetEnhance;
+  $("export-heard").onchange = () => { S.enh.exportHeard = $("export-heard").checked; };
+  setupNoise();
+}
+
+function resetEnhance() { setNoise(false); setEnhance({ ...ENH_DEFAULT }); }
+
+// ---- Noise reduction: learn the noise from a selection, then play a noise-reduced version ----
+// The backend makes it (openevp/denoise.py: spectral gating, smoothed over time and frequency) and
+// caches it; the player then plays it under the same handle, at the same positions, so marks,
+// selections, speed, loops and Enhance all work as before. Noise reduction is per recording:
+// a profile is kept for the session, and it is off again whenever another recording is loaded.
+function noiseProfile() { return S.current && S.current.fp ? S.noise.profiles.get(S.current.fp) || null : null; }
+
+function setupNoise() {
+  S.noise.amount = Number((S.caps.noise || {}).default_amount) || 40;
+  $("noise-amount").value = String(S.noise.amount);
+  $("learn-noise").onclick = learnNoise;
+  $("reduce-noise").onchange = () => setNoise($("reduce-noise").checked);
+  $("noise-amount").oninput = () => { S.noise.amount = Number($("noise-amount").value); showNoise(); };
+  $("noise-amount").onchange = () => { S.noise.amount = Number($("noise-amount").value); if (S.noise.on) reduceNoise(); };
+  showNoise();
+}
+
+function showNoise() {
+  const prof = noiseProfile(), can = !!S.current && !!S.current.fp;
+  $("reduce-noise").checked = S.noise.on;
+  $("reduce-noise").disabled = !prof;
+  $("noise-amount").disabled = !prof;
+  $("noise-amount-value").textContent = `${S.noise.amount}%`;
+  $("learn-noise").disabled = !can;
+  $("learn-noise").title = can ? LEARN_TIP : "This recording has no audio to learn the noise from.";
+  $("noise-status").textContent = S.noise.running ? "Reducing the noise…"
+    : prof ? `Noise learnt from ${fmtPrecise(prof.start)} – ${fmtPrecise(prof.end)}.`
+    : "Select a stretch of background noise only (no voices), then click Learn noise under the waveform.";
+  $("noise-row").title = $("noise-status").textContent;          // the panel is small: said on hover
+}
+const LEARN_TIP = "Learn the background noise from the selected part (it should hold noise only, no voices) for Reduce noise in Enhance";
+
+async function learnNoise() {
+  if (!S.current || !S.region) return;
+  const cur = S.current, { start, end } = S.region;
+  status("Learning the noise…");
+  let r;
+  try { r = await api().learn_noise(cur.rec, start, end); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  status("");
+  if (S.current !== cur) return;
+  if (!r.ok) { showError(r); return; }
+  S.noise.profiles.set(cur.fp, { id: r.profile, start, end });
+  banner(`✓ Noise learnt from ${fmtPrecise(start)} – ${fmtPrecise(end)}. Turn on Reduce noise in Enhance to hear it.`, "ok",
+         { label: "Enhance", run: () => selectTab("enhance", true) });
+  if (S.noise.on) reduceNoise(); else showNoise();
+}
+
+function setNoise(on) {
+  S.noise.on = !!on && !!noiseProfile();
+  if (S.noise.on) { reduceNoise(); return; }
+  stopNoiseJob();
+  if (S.current && S.current.playing !== S.current.url) playVersion(S.current.url, S.current.peaks);
+  S.noise.used = null;
+  showEnhance();
+}
+
+function stopNoiseJob() {
+  const run = S.noise.running;
+  if (!run) return;
+  S.noise.running = null;
+  api().cancel_denoise(run.job);
+  progress(0, null);
+  if ($("banner-text").textContent.startsWith("Reducing the noise")) banner("");
+}
+
+// Make (or fetch from the cache) the noise-reduced version at the current amount, then play it.
+async function reduceNoise() {
+  const cur = S.current, prof = noiseProfile();
+  if (!cur || !prof) return;
+  stopNoiseJob();
+  const was = enhanceOn(), amount = S.noise.amount, job = ++S.noise.job;
+  S.noise.running = { job, rec: cur.rec };
+  showNoise();
+  noiseProgress(0, null);
+  let r;
+  try { r = await api().reduce_noise(cur.rec, prof.id, amount, job, cur.playing); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (!S.noise.running || S.noise.running.job !== job) return;          // cancelled, or a newer one runs
+  S.noise.running = null;
+  progress(0, null);
+  banner("");
+  if (S.current !== cur || !S.noise.on) { showEnhance(); return; }
+  if (!r.ok) {
+    S.noise.on = false; showEnhance();
+    if (!r.cancelled) showError(r);
+    return;
+  }
+  S.noise.used = amount;
+  await playVersion(r.url, r.peaks);
+  if (!was && enhanceOn()) S.enh.exportHeard = true;                    // turned on by the user: exports follow
+  showEnhance();
+}
+
+function noiseProgress(done, total) {
+  progress(done, total === null ? 1 : total);
+  const pct = total ? ` ${Math.floor(100 * done / total)}%` : "";
+  banner(`Reducing the noise…${pct}`, "ok", { label: "Cancel", run: () => { setNoise(false); } });
+}
+
+// Play another version of the loaded recording (url: its own audio, or a noise-reduced one) from
+// where it is, playing on if it was. Marks, the selection and the zoom stay (same length).
+async function playVersion(url, peaks) {
+  const cur = S.current;
+  if (!cur || cur.playing === url) return;
+  const t = S.ws.getCurrentTime(), playing = S.ws.isPlaying(), seq = S.playSeq;
+  cur.playing = url;
+  try {
+    if (cur.full) await S.ws.load(url); else await S.ws.load(url, [peaks], cur.duration);
+  } catch (e) {
+    return;                                                             // said by the "error" handler
+  }
+  if (seq !== S.playSeq || S.current !== cur) return;
+  S.ws.setTime(t);
+  if (playing) S.ws.play();
+  loadSpectrogram();                                                    // the spectrogram shows what plays
+}
+
+// ---- Spectrogram: under the waveform, scrolled and zoomed with it ----------------------------
+// The backend computes it from the audio the player plays (openevp/spectrogram.py) and serves it
+// as PNG tiles at several levels of detail (each half the columns of the one before). The page
+// shows only the tiles in view, at the coarsest level that still has a column for every pixel,
+// in an element inside wavesurfer's own scrolling wrapper (so the cursor, the marks and a drag
+// selection cover it too). Shown or not is remembered.
+const SPEC_HEIGHT = 120;
+
+function setupSpectrogram() {
+  S.spec.on = S.caps.spectrogram !== false;                  // on unless turned off (the backend's default too)
+  $("spectrogram").checked = S.spec.on;
+  showTabMarks();
+  $("spectrogram").onchange = () => setSpectrogram($("spectrogram").checked);
+  for (const ev of ["zoom", "scroll", "redraw"]) S.ws.on(ev, queueSpectrogram);
+}
+
+function setSpectrogram(on) {
+  S.spec.on = !!on;
+  $("spectrogram").checked = S.spec.on;
+  showTabMarks();
+  if (S.spec.on) loadSpectrogram(); else hideSpectrogram();
+  S.spec.dirty = true;
+  if (!S.spec.save) {
+    S.spec.save = (async () => {
+      while (S.spec.dirty) {
+        await null;
+        S.spec.dirty = false;
+        let r;
+        try { r = await api().set_spectrogram(S.spec.on); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+        if (r.ok) S.caps.spectrogram = r.spectrogram;
+        else showError(r);
+      }
+      S.spec.save = null;
+    })();
+  }
+  return S.spec.save;
+}
+
+// A recording just opened: its waveform paints first, the spectrogram is asked for a moment later
+// (the backend computes it while the player is already usable; tiles fill in when it answers).
+const SPEC_DELAY_MS = 150;
+function scheduleSpectrogram(seq) {
+  if (!S.spec.on) return;
+  setTimeout(() => { if (seq === S.playSeq && S.spec.on) loadSpectrogram(); }, SPEC_DELAY_MS);
+}
+
+// Ask for the spectrogram of what the player plays now (a newer request wins).
+async function loadSpectrogram() {
+  const seq = ++S.spec.seq;
+  clearSpectrogramTiles();
+  S.spec.info = null;
+  if (!S.spec.on || !S.current || !S.ws.getDuration()) return;
+  const { rec } = S.current, url = S.current.playing;
+  specMessage("Computing the spectrogram…");
+  let r;
+  S.spec.asking = true;
+  try { r = await api().spectrogram(rec, url); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (seq === S.spec.seq) S.spec.asking = false;
+  if (seq !== S.spec.seq || !S.spec.on || !S.current || S.current.rec !== rec || S.current.playing !== url) return;
+  if (!r.ok) { specMessage(errorText(r)); return; }
+  S.spec.info = r; S.spec.url = url;
+  specMessage("");
+  specLabels(r.fmax);
+  renderSpectrogram();
+}
+
+function hideSpectrogram() {
+  if (S.spec.asking) { S.spec.asking = false; api().cancel_spectrogram(); }   // its job stops in the backend
+  S.spec.seq++;
+  S.spec.info = null;
+  clearSpectrogramTiles();
+  if (S.spec.el) { S.spec.el.remove(); S.spec.el = null; }
+}
+
+function clearSpectrogramTiles() {
+  for (const img of S.spec.imgs.values()) img.remove();
+  S.spec.imgs.clear();
+}
+
+// Its element, inside wavesurfer's wrapper (a shadow DOM: styles inline): tiles, the frequency
+// labels (sticky at the left edge of the view) and a line for messages.
+function specElement() {
+  if (S.spec.el) return S.spec.el;
+  const el = document.createElement("div");
+  el.className = "spectrogram";
+  Object.assign(el.style, { position: "relative", height: `${SPEC_HEIGHT}px`, marginTop: "2px", background: "#000004" });
+  const labels = document.createElement("div");
+  Object.assign(labels.style, { position: "sticky", left: "0", width: "44px", height: "100%", zIndex: "4", pointerEvents: "none",
+                                font: "10px/1 Segoe UI, sans-serif", color: "#fff", textShadow: "0 0 2px #000, 0 0 2px #000" });
+  const msg = document.createElement("div");
+  Object.assign(msg.style, { position: "sticky", left: "48px", top: "0", padding: "4px", font: "12px Segoe UI, sans-serif",
+                             color: "#ccc", pointerEvents: "none", zIndex: "4" });
+  el.append(labels, msg);
+  el.labels = labels; el.msg = msg;
+  S.ws.getWrapper().appendChild(el);
+  S.spec.el = el;
+  return el;
+}
+
+function specMessage(text) {
+  const el = specElement();
+  el.msg.textContent = text;
+  el.msg.hidden = !text;
+}
+
+function specLabels(fmax) {
+  const box = specElement().labels;
+  box.textContent = "";
+  const step = fmax > 6000 ? 2000 : 1000;
+  for (let f = step; f < fmax; f += step) {
+    const s = document.createElement("span");
+    Object.assign(s.style, { position: "absolute", left: "3px", bottom: `${(100 * f / fmax).toFixed(2)}%`, transform: "translateY(50%)" });
+    s.textContent = `${f / 1000} kHz`;
+    box.appendChild(s);
+  }
+}
+
+function queueSpectrogram() {
+  if (S.spec.queued || !S.spec.info) return;
+  S.spec.queued = true;
+  requestAnimationFrame(renderSpectrogram);
+}
+
+// The coarsest level with at least one column per pixel of the waveform's full width.
+function specLevel(info, width) {
+  let level = 0;
+  while (level + 1 < info.levels && Math.ceil(info.columns / 2 ** (level + 1)) >= width) level++;
+  return level;
+}
+
+function renderSpectrogram() {
+  S.spec.queued = false;
+  const info = S.spec.info, duration = S.ws.getDuration();
+  if (!info || !S.spec.on || !duration) return;
+  const el = specElement();
+  const width = Math.max(1, S.ws.getWrapper().clientWidth || 0), view = $("waveform").clientWidth || width;
+  const level = specLevel(info, width), span = info.tile * 2 ** level;      // base columns per tile
+  const perPx = info.columns / width, scroll = S.ws.getScroll() || 0;
+  const first = Math.max(0, Math.floor(scroll * perPx / span) - 1);
+  const last = Math.min(Math.ceil(info.columns / span) - 1, Math.floor((scroll + view) * perPx / span) + 1);
+  const wanted = new Set();
+  for (let i = first; i <= last; i++) {
+    const k = `${level}/${i}`;
+    wanted.add(k);
+    if (S.spec.imgs.has(k)) continue;
+    const img = document.createElement("img");
+    const c0 = i * span, cols = Math.min(span, info.columns - c0);
+    Object.assign(img.style, { position: "absolute", top: "0", height: "100%", pointerEvents: "none",
+                               left: `${(100 * (c0 - 0.5) * info.column_seconds / duration).toFixed(5)}%`,
+                               width: `${(100 * cols * info.column_seconds / duration).toFixed(5)}%`,
+                               imageRendering: perPx < 1 ? "pixelated" : "auto" });
+    img.alt = "";
+    img.draggable = false;
+    img.src = `${info.tiles}/${level}/${i}.png`;
+    el.insertBefore(img, el.labels);
+    S.spec.imgs.set(k, img);
+  }
+  for (const [k, img] of S.spec.imgs) if (!wanted.has(k)) { img.remove(); S.spec.imgs.delete(k); }
 }
 
 // ---- Selection: drag across the waveform to pick a part; play or loop just that part ----
@@ -2424,7 +3019,9 @@ function setCurrent(label, r) {
   S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
-  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null,
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null, rate: r.rate || 0,
+                    url: r.url || null, playing: r.url || null, full: fullDetail(r),
+                    peaks: r.peaks || [],
                     markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
@@ -2433,6 +3030,10 @@ function setCurrent(label, r) {
   $("reviewed").checked = !!(r && r.reviewed);
   renderMarkTools();                            // a recording that can't be marked: the tools say why
   renderMarks();
+  stopNoiseJob();                               // noise reduction is per recording: off for the next one
+  S.noise.on = false; S.noise.used = null;
+  showEnhance(); applyEnhance();                // Cut hiss and the filters depend on its sample rate
+  hideSpectrogram();                            // drawn again once the new one is loaded
 }
 
 function sortMarks(marks) { return marks.slice().sort((a, b) => a.start - b.start); }
@@ -2747,10 +3348,11 @@ async function exportMarked() {
   if (!S.current) return;
   const rec = S.current.rec;
   const at = exportSpeed();
-  S.speedWork = at[0] === 1 ? "" : `Saving a WAV with the marks at ${at[0]}×…`;
+  const heard = exportHeard();
+  S.speedWork = at[0] === 1 && !heard ? "" : `Saving a WAV with the marks${atSpeed()}${heard ? ", enhanced" : ""}…`;
   S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status(S.speedWork || "Saving a WAV with the marks…");
   let r;
-  try { r = await api().export_marked(rec, ...at); } finally {
+  try { r = await api().export_marked(rec, ...at, heard); } finally {
     S.exportingMarked = false; S.speedWork = ""; status(""); progress(0, null); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }
@@ -2795,10 +3397,11 @@ function clipsSummary(p) {
 async function exportClips(mark) {
   if (!S.current || S.savingClips) return;
   const rec = S.current.rec;
-  const at = exportSpeed();
-  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}…`);
+  const at = exportSpeed(), heard = exportHeard();
+  S.savingClips = true; renderMarks(); scheduleLibraryRender();
+  status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}${heard ? ", enhanced" : ""}…`);
   let r;
-  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at); } finally {
+  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at, heard); } finally {
     S.savingClips = false; status(""); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }

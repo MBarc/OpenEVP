@@ -117,6 +117,8 @@ const anything = new Proxy(function () {}, {        // WaveSurfer and its plugin
 
 // ---- the stubbed backend -----------------------------------------------------------
 const calls = [];
+// capabilities().enhance_spec: openevp.enhance.spec() (test_enhance.py checks that the two agree).
+const ENHANCE_SPEC = {"boost_max": 24, "q": 0.7071067811865475, "rumble": 120.0, "voice": [300.0, 3400.0], "hiss": 5000.0, "hiss_min_rate": 12000, "hum_harmonics": 4, "hum_width": 5.0, "leveler": {"light": {"threshold": -24.0, "knee": 12.0, "ratio": 2.0, "attack": 0.01, "release": 0.25}, "medium": {"threshold": -32.0, "knee": 10.0, "ratio": 4.0, "attack": 0.005, "release": 0.25}, "strong": {"threshold": -42.0, "knee": 6.0, "ratio": 8.0, "attack": 0.003, "release": 0.2}}, "limit_range": 64.0, "limit_knee": 0.8, "limit_points": 32769};
 const BETA = "beta#1";
 const listing = {
   [BETA]: { ok: true, model: "Fake Beta", model_id: "fake-beta", playable: false, play_reason: "no decoder",
@@ -144,6 +146,7 @@ const listing = {
 };
 const api = {
   capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
+                               enhance_spec: ENHANCE_SPEC,
                                store_problems: [], formats: { dvf: { playable: true }, wav: { playable: true } } }),
   default_destination: async () => "C:\\save",
   check_update: async () => ({ ok: true, available: false, current: "0.0" }),
@@ -160,8 +163,47 @@ const api = {
   audio: async (...args) => { calls.push(["audio", ...args]); return { ok: false, error: "stub" }; },
 };
 
+// ---- a fake Web Audio: nodes that remember their params and connections -------------------
+const audioContexts = [];
+class FakeParam { constructor(v) { this.value = v; } }
+class FakeNode {
+  constructor(ctx, kind) { this.kind = kind; this.outs = []; ctx.nodes.push(this); }
+  connect(n) { this.outs.push(n); return n; }
+  disconnect() { this.outs = []; }
+}
+class FakeAudioContext {
+  constructor() { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
+                  this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
+  resume() { this.resumes++; this.state = "running"; return Promise.resolve(); }
+  createMediaElementSource(m) { this.sources++; const n = new FakeNode(this, "source"); n.media = m; return n; }
+  createBiquadFilter() { const n = new FakeNode(this, "biquad"); n.type = "lowpass"; n.frequency = new FakeParam(350); n.Q = new FakeParam(1); return n; }
+  createDynamicsCompressor() {
+    const n = new FakeNode(this, "compressor");
+    for (const k of ["threshold", "knee", "ratio", "attack", "release"]) n[k] = new FakeParam(0);
+    return n;
+  }
+  createGain() { const n = new FakeNode(this, "gain"); n.gain = new FakeParam(1); return n; }
+  createWaveShaper() { const n = new FakeNode(this, "shaper"); n.curve = null; return n; }
+}
+// The chain from the media element to the speakers, as [kind, ...its settings].
+function audioChain(ctx) {
+  const out = [];
+  let n = ctx.nodes.find((x) => x.kind === "source");
+  for (let guard = 0; n && guard < 50; guard++) {
+    if (n.outs.length !== 1) return [...out, `${n.kind} has ${n.outs.length} outputs`];
+    n = n.outs[0];
+    if (n.kind === "destination") return out;
+    if (n.kind === "biquad") out.push([n.type, n.frequency.value, Math.round(n.Q.value * 1000) / 1000]);
+    else if (n.kind === "gain") out.push(["gain", Math.round(n.gain.value * 10000) / 10000]);
+    else if (n.kind === "compressor") out.push(["compressor", n.threshold.value, n.knee.value, n.ratio.value, n.attack.value, n.release.value]);
+    else out.push(["shaper", n.curve.length]);
+  }
+  return out;
+}
+
 let ready = null;
 const window = {
+  AudioContext: FakeAudioContext,
   pywebview: { api },
   addEventListener(name, fn, capture) { if (name === "pywebviewready") ready = fn; else listen(window, name, fn, capture); },
   innerWidth: 1000, innerHeight: 700,
@@ -1342,8 +1384,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await context.exportClips(null);
   const libJob = vm.runInContext("S.clips.job", context) + 1;
   assert.deepStrictEqual(JSON.parse(JSON.stringify(speedExports)), [
-    ["marked", "h12", 0.5, false], ["clips", "h12", null, 0.5, false], ["clips", "h12", "e1", 0.5, false],
-    ["files", ["f1"], libJob - 1], ["clips", "h12", null, 1, true], ["clips", "h12", null, 1, true]]);
+    ["marked", "h12", 0.5, false, null], ["clips", "h12", null, 0.5, false, null], ["clips", "h12", "e1", 0.5, false, null],
+    ["files", ["f1"], libJob - 1], ["clips", "h12", null, 1, true, null], ["clips", "h12", null, 1, true, null]]);
   slide(1);
   assert.deepStrictEqual(Array.from(context.exportSpeed()), [0.5, true]);
   $("player-loaded").hidden = true;                                                // no player, no box shown: normal speed
@@ -1388,6 +1430,489 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.deepStrictEqual(wsLog, [["play", `selsp${idx}`, undefined]]);
     $("loop-selection").checked = false;
   }
+  vm.runInContext(`clearSelection(); setCurrent(null);`, context);
+
+  // ---- Enhance: Boost, Leveler, filters, Hum remover through Web Audio; never on unnoticed ----
+  // The real media element (ours, asking for CORS) went to WaveSurfer.create().
+  assert.ok(/<button type="button" role="tab" id="tab-enhance" data-tab="enhance" aria-controls="panel-enhance"/.test(html));
+  assert.ok(/id="export-heard-label" hidden/.test(html) && /id="enhanced-tag"[^>]*hidden/.test(html));
+  assert.ok(html.includes('<input id="boost" type="range" min="0" max="24" step="1" value="0">'));
+  for (const id of ["leveler", "leveler-strength", "voice-filter", "cut-rumble", "cut-hiss", "hum", "enhance-reset"]) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
+  context.setSpeed(1); await speedSaved();
+  // Startup with nothing remembered: all off, the plain label, no audio graph at all.
+  const enh = () => JSON.parse(vm.runInContext("JSON.stringify(S.enh.settings)", context));
+  // [the Enhance tab marked as changed, the "Enhanced" tag hidden, "Exports enhanced" hidden, ticked]
+  const enhShown = () => [$("tab-enhance").classList.contains("changed") && $("tab-enhance").dataset.on === "1", $("enhanced-tag").hidden,
+                          $("export-heard-label").hidden, $("export-heard").checked];
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
+  assert.deepStrictEqual(enhShown(), [false, true, true, false]);
+  assert.strictEqual(audioContexts.length, 0, "no AudioContext until something is on");
+  assert.strictEqual($("tab-enhance").title, "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed)");
+  // A player with a media element playing at 0.5×, Keep pitch, mid-play.
+  const enhMedia = { playbackRate: 0.5, defaultPlaybackRate: 0.5, preservesPitch: true };
+  let enhPlaying = true;
+  const enhWs = new Proxy({ getMediaElement: () => enhMedia, isPlaying: () => enhPlaying, getCurrentTime: () => 1.5,
+                            getDuration: () => 3, setPlaybackRate: (r, k) => { enhMedia.playbackRate = r; enhMedia.preservesPitch = k; },
+                            stop: () => { throw new Error("Enhance must not stop playback"); } },
+                          { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = enhWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const enhCalls = [];
+  api.set_enhance = async (st) => { enhCalls.push(st); return { ok: true, enhance: st, remembered: true }; };
+  const enhSaved = () => vm.runInContext("S.enh.save || Promise.resolve()", context);
+  vm.runInContext(`setCurrent("Recording A-001", { rec: "e1", duration: 3, fp: "fpe", rate: 8000, marks: [],
+                                                      backup: { status: null, detail: "" }, reviewed: false });`, context);
+  $("player-loaded").hidden = false;
+  // Boost: the graph is made once, from the media element; gain then the soft limiter; applied at once.
+  $("boost").value = "6"; $("boost").oninput();
+  assert.strictEqual(audioContexts.length, 1);
+  const actx = audioContexts[0];
+  assert.strictEqual(actx.nodes.find((n) => n.kind === "source").media, enhMedia);
+  assert.deepStrictEqual(audioChain(actx), [["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
+  assert.ok(actx.resumes >= 1 && actx.state === "running", "resumed (autoplay rules)");
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);   // turned on by the user: exports follow
+  assert.strictEqual($("boost-value").textContent, "+6 dB");
+  assert.deepStrictEqual([enhMedia.playbackRate, enhMedia.preservesPitch, enhPlaying], [0.5, true, true]);
+  // The limiter's curve: linear to 0.8, then soft towards 1 (the WaveShaper's input is scaled by 1/64).
+  const shaper = actx.nodes.find((n) => n.kind === "shaper");
+  const at = (v) => shaper.curve[Math.round((v / 64 + 1) * (shaper.curve.length - 1) / 2)];
+  assert.ok(Math.abs(at(0.5) - 0.5) < 0.003 && Math.abs(at(-0.8) + 0.8) < 0.003 && at(1) < 0.96 && at(3) > 0.99 && at(64) <= 1);
+  await enhSaved();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(enhCalls)), [{ boost: 6, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" }]);
+  // Each filter, at this recording's 8 kHz: Q in dB for a high- or low-pass (Butterworth: -3.01 dB), a notch's as is.
+  $("voice-filter").checked = true; $("voice-filter").onchange();
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  $("hum").value = "60"; $("hum").onchange();
+  $("leveler").checked = true; $("leveler").onchange();
+  $("leveler-strength").value = "strong"; $("leveler-strength").onchange();
+  assert.strictEqual($("tab-enhance").title, "Boost, Leveler, filters and noise reduction (what you hear; the file is never changed). " +
+                     "On now: Leveler (strong), Boost +6 dB, Voice filter, Cut rumble, Hum remover 60 Hz.");
+  assert.deepStrictEqual(audioChain(actx), [["highpass", 120, -3.01], ["highpass", 300, -3.01], ["lowpass", 3400, -3.01],
+                                            ["notch", 60, 12], ["notch", 120, 24], ["notch", 180, 36], ["notch", 240, 48],
+                                            ["compressor", -42, 6, 8, 0.003, 0.2], ["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
+  assert.strictEqual(audioContexts.length, 1, "one graph, rebuilt in place");
+  assert.strictEqual(actx.sources, 1, "the media element is routed once");
+  assert.ok(!$("leveler-strength").disabled);
+  // Cut hiss: nothing above 4 kHz at 8 kHz, so it is off (and says why); a 44.1 kHz recording gets it.
+  $("cut-hiss").checked = true; $("cut-hiss").onchange();
+  assert.ok($("cut-hiss").disabled && /no hiss band/.test($("cut-hiss-label").title));
+  assert.ok(!audioChain(actx).some((st) => st[0] === "lowpass" && st[1] === 5000));
+  vm.runInContext(`setCurrent("x.wav", { rec: "e2", duration: 3, fp: "fpx", rate: 44100, marks: [], backup: { status: null, detail: "" }, reviewed: false });`, context);
+  assert.ok(!$("cut-hiss").disabled);
+  assert.deepStrictEqual(audioChain(actx).slice(2, 5), [["lowpass", 3400, -3.01], ["lowpass", 5000, -3.01], ["notch", 60, 12]]);
+  assert.deepStrictEqual([enhMedia.playbackRate, enhMedia.preservesPitch, enhPlaying], [0.5, true, true]);
+  await enhSaved();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(enhCalls[enhCalls.length - 1])), { boost: 6, leveler: true, strength: "strong", voice: true, rumble: true, hiss: true, hum: "60" });
+  // Exports pass the settings while "Exports enhanced" is ticked; unticked (or nothing on): null.
+  const heardExports = [];
+  const savedEnhApi = { clips: api.export_clips, marked: api.export_marked };
+  api.export_clips = async (...a) => { heardExports.push(a); return { ok: true, saved: 1, already: 0, names: [], notes: [], folder: null }; };
+  api.export_marked = async (...a) => { heardExports.push(a); return { ok: true, saved: true, already: false, name: "x_enhanced.wav", folder_name: "" }; };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 1, exists: false, truncated: false, indexing: false, pending: 0, files: [], folders: [] });
+  vm.runInContext(`S.marks = [{ id: "m1", start: 1, end: 1.5, cls: "A", note: "" }];`, context);
+  await context.exportClips({ id: "m1" });
+  const statusSeen = [];
+  api.export_marked = async (...a) => { statusSeen.push($("status").textContent); heardExports.push(a);
+                                        return { ok: true, saved: true, already: false, name: "x_enhanced.wav", folder_name: "" }; };
+  await context.exportMarked();
+  assert.deepStrictEqual(statusSeen, ["Saving a WAV with the marks, enhanced…"]);
+  $("export-heard").checked = false; $("export-heard").onchange();
+  await context.exportClips(null);
+  const on = { boost: 6, leveler: true, strength: "strong", voice: true, rumble: true, hiss: true, hum: "60" };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(heardExports)),
+                         [["e2", "m1", 1, true, { enhance: on }], ["e2", 1, true, { enhance: on }], ["e2", null, 1, true, null]]);
+  // Unticked, it stays so while things change; Reset turns everything off, and the source plays straight out.
+  $("boost").value = "3"; $("boost").oninput();
+  assert.strictEqual($("export-heard").checked, false);
+  $("enhance-reset").onclick();
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
+  assert.deepStrictEqual(audioChain(actx), []);
+  assert.deepStrictEqual(enhShown(), [false, true, true, false]);
+  assert.strictEqual(context.exportHeard(), null);
+  // On again from all off: ticked again (as "Exports at 0.5×" is when the speed leaves 1×).
+  $("hum").value = "50"; $("hum").onchange();
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);
+  assert.deepStrictEqual(audioChain(actx).map((st) => st[1]), [50, 100, 150, 200]);
+  $("boost").value = "0"; fire([$("boost")], "dblclick", { target: $("boost") });
+  // A player that is not shown exports as recorded.
+  $("player-loaded").hidden = true;
+  assert.strictEqual(context.exportHeard(), null);
+  $("player-loaded").hidden = false;
+  // Playing resumes a suspended context.
+  actx.state = "suspended";
+  context.resumeAudio(true);
+  await settle();
+  assert.strictEqual(actx.state, "running");
+  assert.ok(!/couldn't start the audio/.test($("banner-text").textContent));
+  // If it stays suspended, or resume() is refused, playing says so plainly (no silent playback).
+  const realResume = actx.resume;
+  actx.state = "suspended";
+  actx.resume = () => Promise.resolve();                                           // resolves, still suspended
+  context.resumeAudio(true);
+  await settle();
+  assert.match($("banner-text").textContent, /Enhance couldn't start the audio.*Click Play again/);
+  assert.strictEqual($("banner-action").textContent, "Try again");
+  context.banner("");
+  actx.resume = () => Promise.reject(new Error("NotAllowedError"));
+  context.resumeAudio(true);
+  await settle();
+  assert.match($("banner-text").textContent, /Enhance couldn't start the audio/);
+  actx.resume = realResume;
+  $("banner-action").onclick();                                                    // Try again: it runs now
+  await settle();
+  assert.strictEqual(actx.state, "running");
+  actx.onstatechange();
+  assert.ok($("banner").hidden || !/couldn't start/.test($("banner-text").textContent));
+  context.resumeAudio(false);                                                      // a change while running: nothing said
+  assert.ok(!/couldn't start/.test($("banner-text").textContent));
+  // Remembered settings at the next start: on (and shown on), but "Exports enhanced" not ticked.
+  vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: 12, leveler: false, strength: "light", voice: true, rumble: false, hiss: false, hum: "off" } }; setupEnhance();`, context);
+  assert.deepStrictEqual(enhShown(), [true, false, false, false]);
+  assert.strictEqual(context.exportHeard(), null);
+  vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: "lots", voice: 3, hum: "50" } }; setupEnhance();`, context);   // damaged: field by field
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "50" });
+  // A refused save says why; the settings still apply for now.
+  api.set_enhance = async () => ({ ok: false, error: "Unknown enhancement settings." });
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  await enhSaved();
+  assert.ok($("banner-text").textContent.includes("Unknown enhancement settings."));
+  assert.strictEqual(audioChain(actx)[0][1], 120);
+  $("enhance-reset").onclick();
+  api.set_enhance = async (st) => ({ ok: true, enhance: st, remembered: true });
+  await enhSaved();
+  Object.assign(api, { export_clips: savedEnhApi.clips, export_marked: savedEnhApi.marked });
+  context.banner("");
+  vm.runInContext(`setCurrent(null);`, context);
+
+  // ---- The player's settings as tabs: View, Speed, Enhance ----
+  for (const [t, label] of [["view", "View"], ["speed", "Speed"], ["enhance", "Enhance"]]) {
+    assert.ok(new RegExp(`role="tab" id="tab-${t}" data-tab="${t}" aria-controls="panel-${t}"`).test(html), t);
+    assert.ok(new RegExp(`<div id="panel-${t}" class="tab-panel[^"]*" role="tabpanel" aria-labelledby="tab-${t}"`).test(html), t);
+    assert.ok(html.includes(`>${label}<span class="tab-dot" hidden aria-hidden="true">•</span></button>`), label);
+  }
+  assert.ok(/<div id="player-tabs" role="tablist" aria-label="Player settings">/.test(html));
+  // Each control is in its tab's panel.
+  const inPanel = (id, panel) => html.indexOf(`id="${id}"`) > html.indexOf(`<div id="panel-${panel}"`) &&
+    (panel === "enhance" || html.indexOf(`id="${id}"`) < html.indexOf(`<div id="panel-${{ view: "speed", speed: "enhance" }[panel]}"`));
+  for (const id of ["zoom", "height", "spectrogram"]) assert.ok(inPanel(id, "view"), id);
+  for (const id of ["speed", "speed-value", "keep-pitch", "export-speed"]) assert.ok(inPanel(id, "speed"), id);
+  for (const id of ["boost", "leveler", "leveler-strength", "voice-filter", "cut-rumble", "cut-hiss", "hum", "reduce-noise",
+                    "noise-amount", "export-heard", "enhance-reset"]) assert.ok(inPanel(id, "enhance"), id);
+  const shownTab = () => ["view", "speed", "enhance"].filter((t) => !$(`panel-${t}`).hidden);
+  const selected = () => ["view", "speed", "enhance"].filter((t) => $(`tab-${t}`)["aria-selected"] === "true");
+  const tabMarked = () => ["view", "speed", "enhance"].filter((t) => $(`tab-${t}`).dataset.on === "1");
+  const wsBeforeTabs = vm.runInContext("S.ws", context);
+  context.__ws = spWs;
+  vm.runInContext("S.ws = __ws;", context);
+  // Startup with nothing remembered: View; the tabs reached with Tab are only the selected one.
+  const stored = {};
+  const realStorage = { get: window.localStorage.getItem, set: window.localStorage.setItem };
+  window.localStorage.getItem = (k) => (k in stored ? stored[k] : null);
+  window.localStorage.setItem = (k, v) => { stored[k] = String(v); };
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual([shownTab(), selected(), $("tab-view").tabIndex, $("tab-speed").tabIndex], [["view"], ["view"], 0, -1]);
+  // A click picks a tab (and it is remembered); the arrow keys move along (round), Home and End to the ends.
+  $("tab-speed").onclick();
+  assert.deepStrictEqual([shownTab(), selected(), document.activeElement, stored["openevp.player-tab"]],
+                         [["speed"], ["speed"], $("tab-speed"), "speed"]);
+  const tabKey = (k) => fire([$("player-tabs")], "keydown", { key: k, target: document.activeElement });
+  let tk = tabKey("ArrowRight");
+  assert.ok(tk.defaultPrevented);
+  assert.deepStrictEqual([shownTab(), document.activeElement], [["enhance"], $("tab-enhance")]);
+  tabKey("ArrowRight");
+  assert.deepStrictEqual(shownTab(), ["view"]);                                     // round
+  tabKey("ArrowLeft");
+  assert.deepStrictEqual(shownTab(), ["enhance"]);
+  tabKey("Home");
+  assert.deepStrictEqual(shownTab(), ["view"]);
+  tabKey("End");
+  assert.deepStrictEqual([shownTab(), $("tab-enhance").tabIndex, $("tab-view").tabIndex], [["enhance"], 0, -1]);
+  tk = tabKey("x");
+  assert.ok(!tk.defaultPrevented && shownTab()[0] === "enhance");
+  // Remembered: the next start opens on it; a damaged value falls back to View.
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual(shownTab(), ["enhance"]);
+  stored["openevp.player-tab"] = "nonsense";
+  vm.runInContext("setupTabs()", context);
+  assert.deepStrictEqual(shownTab(), ["view"]);
+  // Shortcuts work whichever tab is shown: with Enhance shown, ] changes the speed and the Speed tab
+  // gets its dot (and says what is on); \ takes it back.
+  $("tab-enhance").onclick();
+  context.setSpeed(1); await speedSaved();
+  vm.runInContext(`S.keepPitch = true; showSpeed();`, context);
+  assert.ok(!tabMarked().includes("speed"));
+  key("]");
+  assert.deepStrictEqual([speedState()[0], shownTab()], [1.25, ["enhance"]]);
+  assert.ok(tabMarked().includes("speed"));
+  assert.strictEqual($("tab-speed").title, "Playback speed and Keep pitch. On now: Speed 1.25×.");
+  $("keep-pitch").checked = false; $("keep-pitch").onchange();
+  assert.strictEqual($("tab-speed").title, "Playback speed and Keep pitch. On now: Speed 1.25×, Keep pitch off.");
+  $("keep-pitch").checked = true; $("keep-pitch").onchange();
+  key(BACKSLASH);
+  assert.ok(!tabMarked().includes("speed") && $("tab-speed").title === "Playback speed and Keep pitch");
+  await speedSaved();
+  // With View shown: the Enhance tab's dot says Boost is on; M still opens the mark form; Space still plays.
+  $("tab-view").onclick();
+  loadMarked("htab", [{ id: "t1", start: 1, end: 1.5, cls: "A", note: "" }]);
+  $("boost").value = "3"; $("boost").oninput();
+  assert.ok(tabMarked().includes("enhance") && $("tab-enhance").title.endsWith("On now: Boost +3 dB."));
+  assert.deepStrictEqual(shownTab(), ["view"], "a change never switches the tab");
+  $("enhance-reset").onclick();
+  assert.ok(!tabMarked().includes("enhance"));
+  const tabSel = fakeRegions.addRegion({ id: "tabsel", start: 2, end: 2.5 });
+  context.regionCreated(tabSel);
+  key("m");
+  assert.ok(vm.runInContext("!!S.markForm", context), "M opens the mark form with View shown");
+  context.closeMarkForm();
+  const spaceBefore = spPlaying;
+  fire([document], "keydown", { code: "Space", key: " ", target: document.body });
+  assert.strictEqual(spPlaying, !spaceBefore, "Space plays/pauses with View shown");
+  fire([document], "keydown", { code: "Space", key: " ", target: document.body });
+  // The mark loop works with the Speed tab shown.
+  $("tab-speed").onclick();
+  loopBtn(0).onclick(ev);
+  assert.ok(vm.runInContext("S.markLoop && S.activeMark === 't1'", context));
+  loopBtn(0).onclick(ev);
+  // View's dot: the spectrogram turned off, or Height raised (zoom is navigation: no dot).
+  vm.runInContext(`S.spec.on = true; showTabMarks();`, context);
+  $("zoom").value = "500";
+  assert.ok(!tabMarked().includes("view"));
+  $("height").value = "20"; $("height").oninput();
+  assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Height raised."));
+  $("height").value = "1"; $("height").oninput();
+  vm.runInContext(`S.spec.on = false; showTabMarks();`, context);
+  assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Spectrogram off."));
+  vm.runInContext(`S.spec.on = true; showTabMarks(); clearSelection(); setCurrent(null); S.enh.exportHeard = false; showEnhance();`, context);
+  window.localStorage.getItem = realStorage.get; window.localStorage.setItem = realStorage.set;
+  $("tab-view").onclick();
+  context.__ws = wsBeforeTabs;
+  vm.runInContext("S.ws = __ws;", context);
+  // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
+  assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
+  // On by default: capabilities() said nothing (a new user), so it is on; only an explicit false turns it off.
+  assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context), "on unless turned off");
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: false }; setupSpectrogram();`, context);
+  assert.ok(!$("spectrogram").checked && !vm.runInContext("S.spec.on", context), "turned off: stays off");
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
+  assert.ok($("spectrogram").checked);
+  vm.runInContext(`S.spec.on = false; $("spectrogram").checked = false;`, context);
+  const wrapper = document.createElement("div");
+  let wrapW = 800, wsScroll = 0;
+  Object.defineProperty(wrapper, "clientWidth", { get: () => wrapW });
+  const specWs = new Proxy({ getWrapper: () => wrapper, getScroll: () => wsScroll, getDuration: () => 100, getMediaElement: () => enhMedia },
+                           { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = specWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const specCalls = [], specSaves = [];
+  const specInfo = { ok: true, tiles: "http://t/spec/abc", columns: 12500, rows: 129, column_seconds: 0.008, levels: 6, tile: 512,
+                     fmax: 4000, fft: 256 };
+  let specAnswer = null;
+  api.spectrogram = (rec, url) => { specCalls.push([rec, url]); return new Promise((res) => { specAnswer = res; }); };
+  api.set_spectrogram = async (on) => { specSaves.push(on); return { ok: true, spectrogram: on, remembered: true }; };
+  const loadSp = (rec, extra = {}) => vm.runInContext(`setCurrent("Recording", ${JSON.stringify({ rec, duration: 100, fp: "f" + rec, rate: 8000,
+    url: `http://a/${rec}.wav`, marks: [], backup: { status: null, detail: "" }, reviewed: false, ...extra })});`, context);
+  const specEl = () => vm.runInContext("S.spec.el", context);
+  const tiles = () => [...vm.runInContext("S.spec.imgs", context).keys()];
+  const answer = async (r) => { specAnswer(r); await new Promise((res) => setImmediate(res)); };
+  loadSp("s1");
+  $("spectrogram").checked = true; $("spectrogram").onchange();
+  assert.deepStrictEqual(specCalls, [["s1", "http://a/s1.wav"]]);                  // the audio the player plays
+  assert.ok(wrapper.children.includes(specEl()), "inside wavesurfer's wrapper: scrolled and zoomed with it");
+  assert.strictEqual(specEl().msg.textContent, "Computing the spectrogram…");
+  await answer(specInfo);
+  assert.strictEqual(specEl().msg.textContent, "");
+  assert.deepStrictEqual(specEl().labels.children.map((c) => [c.textContent, c.style.bottom]),
+                         [["1 kHz", "25.00%"], ["2 kHz", "50.00%"], ["3 kHz", "75.00%"]]);
+  // Fit to 800 px: level 3 (782 columns would be too few, 1563 is enough); its 4 tiles, placed by time.
+  assert.deepStrictEqual(tiles(), ["3/0", "3/1", "3/2", "3/3"]);
+  const img0 = vm.runInContext(`S.spec.imgs.get("3/1")`, context);
+  assert.deepStrictEqual([img0.src, img0.style.left, img0.style.width, img0.style.imageRendering],
+                         ["http://t/spec/abc/3/1.png", "32.76400%", "32.76800%", "auto"]);
+  await vm.runInContext("S.spec.save || Promise.resolve()", context);
+  assert.deepStrictEqual(specSaves, [true]);
+  // Zoomed in (400 px per second) and scrolled: full detail, only the tiles in view (and one each side).
+  wrapW = 40000; wsScroll = 20000;
+  context.renderSpectrogram();
+  assert.deepStrictEqual(tiles(), ["0/11", "0/12", "0/13"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("0/12").style.imageRendering`, context), "pixelated");
+  assert.strictEqual(specEl().children.filter((c) => c.tagName === "IMG").length, 3, "tiles out of view are removed");
+  wrapW = 800; wsScroll = 0;
+  // Another recording before the answer: that answer is dropped; the new one asks again.
+  loadSp("s2");
+  assert.deepStrictEqual(tiles(), []);
+  const late = specAnswer;
+  vm.runInContext("loadSpectrogram()", context);
+  const second = specAnswer;
+  late(specInfo); await new Promise((res) => setImmediate(res));
+  assert.deepStrictEqual(tiles(), []);
+  specAnswer = second;
+  await answer({ ok: false, error: "No spectrogram for x: the file changed on disk: load it again" });
+  assert.strictEqual(specEl().msg.textContent, "No spectrogram for x: the file changed on disk: load it again");
+  // An MP3 (a recording or a clip) is decoded to WAV by the backend: it gets one like any other.
+  specCalls.length = 0;
+  loadSp("s3");
+  vm.runInContext("loadSpectrogram()", context);
+  assert.deepStrictEqual(specCalls, [["s3", "http://a/s3.wav"]]);
+  await answer(specInfo);
+  // Off: gone, and remembered.
+  let specCancels = 0;
+  api.cancel_spectrogram = async () => { specCancels++; return { ok: true }; };
+  loadSp("s5");                                                                    // a request in flight, then unloaded
+  vm.runInContext("loadSpectrogram()", context);
+  vm.runInContext("hideSpectrogram()", context);
+  assert.strictEqual(specCancels, 1, "the backend job is cancelled");
+  vm.runInContext("hideSpectrogram()", context);
+  assert.strictEqual(specCancels, 1, "nothing to cancel");
+  loadSp("s4");
+  vm.runInContext("loadSpectrogram()", context);
+  await answer(specInfo);
+  assert.strictEqual(tiles().length, 4);
+  $("spectrogram").checked = false; $("spectrogram").onchange();
+  assert.ok(specEl() === null && tiles().length === 0 && !wrapper.children.some((c) => c.className === "spectrogram"));
+  await vm.runInContext("S.spec.save || Promise.resolve()", context);
+  assert.deepStrictEqual(specSaves, [true, false]);
+  // Remembered on at the next start.
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
+  assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context));
+  // Opening a recording: the waveform is loaded and drawn first; the spectrogram is only asked for
+  // a moment later (a timer), and not at all if another recording was opened meanwhile.
+  const timers = [];
+  context.setTimeout = (fn, ms) => { timers.push([fn, ms]); return timers.length; };
+  specCalls.length = 0;
+  const opened = { rec: "s6", duration: 100, fp: "fs6", rate: 8000, url: "http://a/s6.wav", peaks: [0.5], marks: [],
+                   backup: { status: null, detail: "" }, reviewed: false };
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s6", opened, false);
+  assert.deepStrictEqual(specCalls, [], "nothing asked before the waveform is up");
+  const specTimer = timers.find(([, ms]) => ms === 150);
+  assert.ok(specTimer, "asked shortly after");
+  specTimer[0]();
+  assert.deepStrictEqual(specCalls, [["s6", "http://a/s6.wav"]]);
+  await answer(specInfo);
+  assert.strictEqual(tiles().length, 4);
+  timers.length = 0; specCalls.length = 0;
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s7", { ...opened, rec: "s7", url: "http://a/s7.wav" }, false);
+  const stale = timers.find(([, ms]) => ms === 150);
+  vm.runInContext("S.playSeq++", context);                                         // another recording opened meanwhile
+  stale[0]();
+  assert.deepStrictEqual(specCalls, []);
+  vm.runInContext(`S.spec.on = false; $("spectrogram").checked = false;`, context);   // off: no timer at all
+  timers.length = 0;
+  await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Recording s8", { ...opened, rec: "s8" }, false);
+  assert.ok(!timers.some(([, ms]) => ms === 150));
+  context.setTimeout = () => 0;
+  vm.runInContext(`S.spec.on = false; hideSpectrogram(); setCurrent(null);`, context);
+
+  // ---- Noise reduction: Learn noise from a selection, Reduce noise plays a noise-reduced version ----
+  assert.ok(html.includes('<button id="learn-noise"'));
+  assert.ok(/id="reduce-noise"/.test(html) && /<input id="noise-amount" type="range" min="0" max="100" step="5" value="40"/.test(html));
+  assert.ok(/watery, warbling artefacts that can sound like whispers or voices/.test(html), "the tooltip warns");
+  const nLog = [];
+  let nTime = 12.5, nPlaying = true;
+  const nWs = new Proxy({ getMediaElement: () => enhMedia, getWrapper: () => wrapper, getScroll: () => 0, getDuration: () => 100,
+                          getCurrentTime: () => nTime, isPlaying: () => nPlaying,
+                          load: async (...a) => { nLog.push(JSON.parse(JSON.stringify(["load", ...a]))); nPlaying = false; },
+                          setTime: (t) => { nLog.push(["setTime", t]); nTime = t; }, play: () => { nLog.push(["play"]); nPlaying = true; },
+                          setOptions: () => {} },
+                        { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = nWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const nCalls = [];
+  let reduceAnswer = null;
+  api.learn_noise = async (...a) => { nCalls.push(["learn", ...a]); return { ok: true, profile: "p1", seconds: 0.8 }; };
+  api.reduce_noise = (...a) => { nCalls.push(["reduce", ...a]); return new Promise((res) => { reduceAnswer = res; }); };
+  api.cancel_denoise = async (job) => { nCalls.push(["cancel", job]); return { ok: true }; };
+  api.spectrogram = async () => ({ ok: false, error: "x" });
+  const loadN = (rec, extra = {}) => vm.runInContext(`setCurrent("Recording", ${JSON.stringify({ rec, duration: 100, fp: "fp-" + rec, rate: 44100,
+    url: `http://a/${rec}.wav`, peaks: [0.5], marks: [], backup: { status: null, detail: "" }, reviewed: false, ...extra })});`, context);
+  loadN("n1");
+  vm.runInContext("S.current.full = false;", context);
+  assert.ok($("reduce-noise").disabled && $("noise-amount").disabled, "no profile yet");
+  assert.match($("noise-status").textContent, /background noise only/);
+  assert.ok(!$("learn-noise").disabled);
+  // Learn noise from the selection.
+  const nSel = fakeRegions.addRegion({ id: "nsel", start: 2, end: 3.25 });
+  context.regionCreated(nSel);
+  await context.learnNoise();
+  assert.deepStrictEqual(nCalls, [["learn", "n1", 2, 3.25]]);
+  assert.ok(!$("reduce-noise").disabled);
+  assert.strictEqual($("noise-status").textContent, "Noise learnt from 0:02.0 – 0:03.3.");
+  assert.match($("banner-text").textContent, /Noise learnt/);
+  // Reduce noise: progress with Cancel, then the noise-reduced audio plays from where it was.
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  const job1 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls[1], ["reduce", "n1", "p1", 40, job1, "http://a/n1.wav"]);
+  assert.strictEqual($("noise-status").textContent, "Reducing the noise…");
+  window.onBackendEvent("denoise-progress", { job: job1, done: 25, total: 100 });
+  assert.deepStrictEqual([$("banner-text").textContent, $("banner-action").textContent, $("progress-fill").style.width],
+                         ["Reducing the noise… 25%", "Cancel", "25%"]);
+  window.onBackendEvent("denoise-progress", { job: job1 + 7, done: 90, total: 100 });             // another job's: ignored
+  assert.strictEqual($("banner-text").textContent, "Reducing the noise… 25%");
+  assert.ok($("enhanced-tag").hidden, "not on until it plays");
+  reduceAnswer({ ok: true, url: "http://a/n1-dn.wav", peaks: [0.2], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1-dn.wav", [[0.2]], 100], ["setTime", 12.5], ["play"]]);
+  assert.strictEqual(vm.runInContext("S.current.playing", context), "http://a/n1-dn.wav");
+  assert.deepStrictEqual(enhShown(), [true, false, false, true]);     // on, and exports follow (turned on now)
+  assert.ok($("banner").hidden && $("progress").hidden);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(context.exportHeard())), { denoise: { profile: "p1", amount: 40 } });
+  assert.strictEqual(vm.runInContext("S.current.fp", context), "fp-n1", "marks stay the recording's");
+  // A new amount: made again (the old one kept playing meanwhile); a newer answer wins.
+  $("noise-amount").value = "60"; $("noise-amount").oninput();
+  assert.strictEqual($("noise-amount-value").textContent, "60%");
+  $("noise-amount").onchange();
+  const job2 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls.slice(2), [["reduce", "n1", "p1", 60, job2, "http://a/n1-dn.wav"]]);      // the first had finished: nothing to cancel
+  nLog.length = 0; nPlaying = false; nTime = 40;
+  reduceAnswer({ ok: true, url: "http://a/n1-dn60.wav", peaks: [0.1], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1-dn60.wav", [[0.1]], 100], ["setTime", 40]]);   // paused: stays paused
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(context.exportHeard())), { denoise: { profile: "p1", amount: 60 } });
+  // With Enhance on too, both go to exports.
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  assert.deepStrictEqual(Object.keys(context.exportHeard()), ["enhance", "denoise"]);
+  $("cut-rumble").checked = false; $("cut-rumble").onchange();
+  // Cancel while it runs: the job is stopped, Reduce noise goes off, the recording's own audio plays.
+  $("noise-amount").value = "20"; $("noise-amount").onchange();
+  const job2b = vm.runInContext("S.noise.job", context);
+  $("noise-amount").value = "30"; $("noise-amount").onchange();                     // changed again while it runs
+  const job3 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls.slice(-2), [["cancel", job2b], ["reduce", "n1", "p1", 30, job3, "http://a/n1-dn60.wav"]]);
+  nLog.length = 0;
+  $("banner-action").onclick();
+  assert.deepStrictEqual(nCalls[nCalls.length - 1], ["cancel", job3]);
+  assert.ok(!$("reduce-noise").checked && !vm.runInContext("S.noise.on", context));
+  await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1.wav", [[0.5]], 100], ["setTime", 40]]);
+  reduceAnswer({ ok: false, cancelled: true, error: "Stopped." });
+  await settle();
+  assert.deepStrictEqual(enhShown(), [false, true, true, true]);
+  assert.strictEqual(context.exportHeard(), null);
+  // A failure says why and turns it off.
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  reduceAnswer({ ok: false, error: "Could not reduce the noise of x: no memory." });
+  await settle();
+  assert.ok(!$("reduce-noise").checked && $("banner-text").textContent.includes("Could not reduce the noise"));
+  // Another recording: off, and no profile; back to the first one: its profile is still there (this session).
+  loadN("n2");
+  assert.ok($("reduce-noise").disabled && !$("reduce-noise").checked);
+  loadN("n1");
+  assert.ok(!$("reduce-noise").disabled && !$("reduce-noise").checked);
+  // Audio without a fingerprint (an empty WAV) can't learn noise.
+  loadN("n3", { fp: null });
+  assert.ok($("learn-noise").disabled && /no audio/.test($("learn-noise").title));
+  // Reset turns Reduce noise off too.
+  loadN("n1");
+  vm.runInContext("S.current.full = true;", context);
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  reduceAnswer({ ok: true, url: "http://a/n1-dn.wav", peaks: [0.2], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  const lastLoad = nLog.filter((x) => x[0] === "load").pop();
+  assert.deepStrictEqual(lastLoad, ["load", "http://a/n1-dn.wav"]);                   // full detail: decoded by the page
+  $("enhance-reset").onclick();
+  assert.ok(!$("reduce-noise").checked && vm.runInContext("S.current.playing", context) === "http://a/n1.wav");
+  context.banner("");
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
