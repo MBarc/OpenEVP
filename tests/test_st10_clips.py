@@ -27,6 +27,14 @@ from test_st10_modes import NO_SP, fake_decoders, sp_dvf  # noqa: E402
 from app import backend, library_ops  # noqa: E402
 from openevp import clips, formats, wavinfo  # noqa: E402
 
+
+def setUpModule():
+    """These tests are about WAV clips (MP3 is the default format: see test_mp3_clips)."""
+    patch = mock.patch.object(backend.Api, "clip_format", lambda self: "wav")
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+
+
 WAIT = 60
 SP_VECTOR = "tone-1000-fullscale"          # 20 LPEC SP frames: 20480 samples, 1.28 s at 16 kHz
 

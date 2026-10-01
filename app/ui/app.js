@@ -1754,7 +1754,7 @@ function libraryMenuItems(target) {
       { label: "Open", run: () => openLibraryFolder(id) },
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
-      { label: "Export clips", disabled: !canExportClips(), title: clipsTip("Save every EVP in this folder (and its folders) as its own WAV clip"),
+      { label: "Export clips", disabled: !canExportClips(), title: clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ folder: id }, L.folderById.get(id).name || "the library") },
     ];
   }
@@ -1774,7 +1774,7 @@ function libraryMenuItems(target) {
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
       // Export clips is for the row clicked (its files: the copies of one recording), ticked or not.
       { label: "Export clips", disabled: !canExportClips() || !groupMarked(g),
-        title: clipsTip(groupMarked(g) ? "Save each EVP of this recording as its own WAV clip" : "No EVPs marked in this recording"),
+        title: clipsTip(groupMarked(g) ? `Save each EVP of this recording as its own ${clipLabel()} clip` : "No EVPs marked in this recording"),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
     ];
   }
@@ -2114,6 +2114,7 @@ async function storeWritable() {
   if (!S.started || S.caps.marks_read_only) return;
   renderMarkTools();
   renderLibraryBar();
+  showClipFormat();                            // the remembered clip format applies now
   if (S.current) {
     closeMarkForm();
     for (const region of S.markRegions.values()) region.remove();   // redrawn draggable
@@ -2148,6 +2149,8 @@ function setupMarks() {
   $("retry-backup").onclick = () => retryBackup(S.current && S.current.rec);
   $("export-marked").onclick = exportMarked;
   $("export-clips").onclick = () => exportClips(null);
+  $("clip-format").onchange = setClipFormat;
+  showClipFormat();
 }
 
 // The recording now in the player (its label and the backend's audio result), or none (null).
@@ -2337,7 +2340,7 @@ function markRow(m) {
   if (writable) note.onclick = () => editNoteInline(note, m);
   row.append(chip, time, note,
     markButton("▶", "Play this EVP", () => playMark(m)),
-    markButton("Save clip", "Save this EVP as its own WAV clip (in a Clips folder)", () => exportClips(m),
+    markButton("Save clip", `Save this EVP as its own ${clipLabel()} clip (in a Clips folder)`, () => exportClips(m),
                !savingAudio()),
     markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
     markButton("✕", tip || "Delete this mark", () => deleteMark(m), writable));
@@ -2475,7 +2478,24 @@ async function exportMarked() {
   loadLibrary();
 }
 
-// ---- EVP clips: each mark as its own short WAV, in a Clips folder beside the WAV with marks ----
+// ---- EVP clips: each mark as its own short MP3 or WAV, in a Clips folder beside the WAV with marks ----
+// The clip format (capabilities().clip_format, "mp3" by default): one setting for the player's
+// Export clips and Save clip and the library's Export clips, picked next to Export clips.
+function clipFormat() { return S.caps.clip_format === "wav" ? "wav" : "mp3"; }
+function clipLabel() { return clipFormat() === "wav" ? "WAV" : "MP3"; }
+function showClipFormat() {
+  $("clip-format").value = clipFormat();
+  $("export-clips").title = `Save each EVP as its own short ${clipLabel()} clip (in a Clips folder)`;
+}
+async function setClipFormat() {
+  const fmt = $("clip-format").value;
+  let r;
+  try { r = await api().set_clip_format(fmt); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (r.ok) S.caps.clip_format = r.format;
+  else showError(r);
+  showClipFormat(); renderMarks();
+}
+
 // "3 clips saved (1 already there)", what was skipped and why, and Open folder when there is one.
 function clipsSummary(p) {
   const parts = [];

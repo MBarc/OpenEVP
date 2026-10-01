@@ -34,9 +34,10 @@ fingerprinted by one background indexer (also a registered worker), which
 reports "library-row" / "library-progress" / "library-done" events tagged with
 the scan_id of the list_library() call that started it.
 
-EVP clips (one WAV per mark, openevp.clips) go into a Clips subfolder of the
+EVP clips (one MP3 or WAV per mark, openevp.clips) go into a Clips subfolder of the
 folder a WAV with marks goes into: export_clips() for the loaded recording (like
-export_marked()), and a background job for library recordings or folders.
+export_marked()), and a background job for library recordings or folders. Their
+format is a setting (clip_format: "mp3" by default, or "wav"; set_clip_format()).
 
 Library folders can be created, renamed and deleted (to the Recycle Bin only),
 and recordings moved between them: see app/library_ops.py (mixed into Api) and
@@ -49,7 +50,7 @@ import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, formats, recorders, wavinfo
+from openevp import __version__, clips, formats, mp3, recorders, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -80,6 +81,7 @@ MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
 CLIPS_BUSY = "Wait for the export to finish, then export the clips."
 CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
+CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
 
 
 class _BackupRunning(Exception):
@@ -377,6 +379,7 @@ class Api(LibraryOps):
         self._busy = threading.Lock()      # held while an export, export_marked() or an update install runs
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
+        self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -438,7 +441,9 @@ class Api(LibraryOps):
                 "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
                 "marks_read_only_reason": store.read_only_reason if store is not None else None,
-                "store_problems": self._store_problems + (store.problems() if store is not None else [])}
+                "store_problems": self._store_problems + (store.problems() if store is not None else []),
+                "clip_format": self.clip_format(), "mp3": mp3.available(),
+                "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
         """While the store is read-only (another OpenEVP holds it, or its lock file
@@ -908,10 +913,38 @@ class Api(LibraryOps):
         sees it and waits for it before closing the store."""
         return self._marked_call(rec, self._export_marked)
 
+    def clip_format(self):
+        """The clip format, "mp3" or "wav" (clips.FORMATS): the one picked in this
+        session if it could not be remembered, else the remembered one, else "mp3"."""
+        if self._clip_format is not None:
+            return self._clip_format
+        saved = self._store.get_setting(CLIP_FORMAT) if self._store is not None else None
+        return saved if saved in clips.FORMATS else clips.FORMATS[0]
+
+    def set_clip_format(self, fmt):
+        """Pick the clip format ("mp3" or "wav") and remember it. A window that
+        cannot write the settings (a second window) uses it for this session.
+        {"ok", "format", "remembered"}."""
+        if fmt not in clips.FORMATS:
+            return _fail("Unknown clip format.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(CLIP_FORMAT, fmt)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._clip_format = None if remembered else fmt
+        return {"ok": True, "format": fmt, "remembered": remembered}
+
+    def _clip_format_refused(self, fmt):
+        """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""
+        return _fail(mp3.UNAVAILABLE) if fmt == "mp3" and not mp3.available() else None
+
     def export_clips(self, rec, mark_id=None):
         """Save each mark of the loaded recording (or only the mark mark_id) as its
-        own WAV clip into the Clips subfolder of the folder export_marked() would
-        use: see openevp.clips. Never replaces a file (identical bytes count as
+        own clip (clip_format(): MP3 or WAV) into the Clips subfolder of the folder
+        export_marked() would use: see openevp.clips. Never replaces a file (identical bytes count as
         already saved). Admitted, locked and waited for exactly as export_marked().
         {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}."""
         if mark_id is not None and not isinstance(mark_id, str):
@@ -1050,6 +1083,10 @@ class Api(LibraryOps):
                 return _fail("That mark is no longer there.")
         if not marks:
             return _fail("This recording has no marks yet.")
+        fmt = self.clip_format()
+        refused = self._clip_format_refused(fmt)
+        if refused:
+            return refused
         got = self._entry_audio(entry, "cut clips from")
         if isinstance(got, dict):
             return got
@@ -1057,26 +1094,27 @@ class Api(LibraryOps):
         del got
         outdir = os.path.join(outdir, CLIPS)
         try:
-            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem)
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
 
-    def _save_clips(self, wav, marks, outdir, stem):
-        """Cut and save one clip per mark into outdir: (saved, already there, file
-        names, notes on clips not made). Raises OSError when a clip cannot be written."""
+    def _save_clips(self, wav, marks, outdir, stem, fmt="wav"):
+        """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"):
+        (saved, already there, file names, notes on clips not made). Raises OSError
+        when a clip cannot be written."""
         saved = already = 0
         names, notes = [], []
         for m in marks:
             try:
-                clip = clips.cut(wav, m)
-            except ValueError as e:
+                clip = clips.make(wav, m, fmt)
+            except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue
-            name = clips.name(stem, m)
+            name = clips.name(stem, m, fmt=fmt)
             if folders.too_long(os.path.join(outdir, name)):
-                name = clips.name(stem, m, with_note=False)          # the note is what can go
+                name = clips.name(stem, m, with_note=False, fmt=fmt)   # the note is what can go
                 if folders.too_long(os.path.join(outdir, name)):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")
@@ -1146,18 +1184,19 @@ class Api(LibraryOps):
             return _fail(read_only)
         if self._stop.is_set():
             return _fail(CLOSING)
-        return None
+        return self._clip_format_refused(self.clip_format())
 
     def _start_clips(self, work, where, job):
         refused = self._clips_refused()
         if refused:
             return refused
         cancel = threading.Event()
-        # Save-to and the library folder as they are now: a change during the job never splits its clips.
+        # Save-to, the library folder and the clip format as they are now: a change during the job never splits it.
         with self._dest_lock:
             dest = self._dest
         library = self._library_path()
-        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library),
+        fmt = self.clip_format()
+        thread = threading.Thread(target=self._clips_job, args=(work, where, job, cancel, dest, library, fmt),
                                   name="clips")
         with self._workers_lock:              # admitted, started and registered in one step against shutdown()
             if self._stop.is_set():
@@ -1177,14 +1216,14 @@ class Api(LibraryOps):
         """True while a library clips job runs (the close prompt says so)."""
         return self._clips_running is not None
 
-    def _clips_job(self, work, where, job, cancel, dest, library):
+    def _clips_job(self, work, where, job, cancel, dest, library, fmt="wav"):
         """Cut the clips of each marked recording in work() ([(path, kind)]): copies
         of one recording (the same fingerprint) are exported once per destination.
         Unmarked recordings are passed over; ones that cannot be read or decoded are
         skipped and reported. Events: "clips-progress", then "clips-done" (also when
         cancelled or closing) or "clips-failed" (a clip could not be written), sent
         once _busy is free again. dest, library: the Save-to and library folders
-        when the job started."""
+        when the job started; fmt: the clip format then."""
         saved = already = recordings = 0
         skipped, notes, outdirs, done_keys = [], [], [], set()
         outcome = []
@@ -1223,7 +1262,7 @@ class Api(LibraryOps):
                     if key not in done_keys:
                         done_keys.add(key)
                         try:
-                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0])
+                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0], fmt)
                         except OSError as e:
                             finish("clips-failed", error=f"Could not save the clips of {name}: {_plain(e)}",
                                    advice=DISK)

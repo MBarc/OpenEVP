@@ -785,6 +785,43 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "The clips export did not start: boom");
 
+  // ---- the clip format: a menu next to Export clips (MP3 by default), one setting for the player and the library ----
+  assert.ok(/<button id="export-clips"[^>]*>Export clips<\/button>\s*<select id="clip-format"[^>]*>\s*<option value="mp3">MP3 \(for sharing\)<\/option>\s*<option value="wav">WAV \(full quality\)<\/option>\s*<\/select>/.test(html),
+            "the Clip format menu sits right after Export clips: MP3 (for sharing) first, then WAV (full quality)");
+  assert.strictEqual($("clip-format").value, "mp3");                                // capabilities() said nothing: MP3
+  assert.match($("export-clips").title, /own short MP3 clip/);
+  const formatCalls = [];
+  api.set_clip_format = async (fmt) => { formatCalls.push(fmt); return { ok: true, format: fmt, remembered: true }; };
+  $("clip-format").value = "wav";
+  await $("clip-format").onchange();
+  assert.deepStrictEqual(formatCalls, ["wav"]);
+  assert.strictEqual(vm.runInContext("S.caps.clip_format", context), "wav");
+  assert.strictEqual($("clip-format").value, "wav");
+  assert.match($("export-clips").title, /own short WAV clip/);
+  rightClick(folderRow("f1").cells[1]);                                            // the library's menu says so too
+  assert.match(menu.children[3].title, /as its own WAV clip$/);
+  press("Escape");
+  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks,
+                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
+  assert.match($("marks-list").children[0].children.find((b) => b.textContent === "Save clip").title, /own WAV clip/);
+  vm.runInContext(`setCurrent(null);`, context);
+  api.set_clip_format = async () => ({ ok: false, error: "Unknown clip format." });   // refused: said, and shown as it was
+  $("clip-format").value = "mp3";
+  await $("clip-format").onchange();
+  assert.strictEqual($("banner-text").textContent, "Unknown clip format.");
+  assert.strictEqual($("clip-format").value, "wav");
+  api.set_clip_format = async (fmt) => ({ ok: true, format: fmt, remembered: false });  // a second window: this session
+  $("clip-format").value = "mp3";
+  await $("clip-format").onchange();
+  assert.strictEqual($("clip-format").value, "mp3");
+  rightClick(folderRow("f1").cells[1]);
+  assert.match(menu.children[3].title, /as its own MP3 clip$/);
+  press("Escape");
+  // The remembered format arrives with capabilities() (startup, or when the store becomes writable).
+  vm.runInContext(`S.caps.clip_format = "wav"; showClipFormat();`, context);
+  assert.strictEqual($("clip-format").value, "wav");
+  vm.runInContext(`S.caps.clip_format = "mp3"; showClipFormat();`, context);
+
   // An ICD-ST10 .dvf in the library, in a build without the LPEC ST decoder: greyed out with its
   // reason (not the ⚠ of a damaged file), and a click says why instead of asking the backend to play it.
   const st10File = { ...libFile("r7", "001_A_001_Unknown.dvf", "root", null), type: "dvf", seconds: 20.1,

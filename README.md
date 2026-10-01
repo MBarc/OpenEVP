@@ -225,7 +225,10 @@ read (none has been verified with OpenEVP yet).
 ### EVP clips
 
 **Export clips** (next to Export WAV with marks) saves every mark of the loaded
-recording as its own short WAV; **Save clip** in a mark's row saves just that one.
+recording as its own short clip; **Save clip** in a mark's row saves just that one.
+The **Clip format** menu next to Export clips picks **MP3 (for sharing)**, the
+default, or **WAV (full quality)**; it is remembered, and the library's Export
+clips uses it too.
 In the library, right-click a recording, or a folder (every marked recording in
 it and its subfolders), and choose **Export clips**. A folder runs in the
 background with a progress bar and **Cancel**; recordings that can't be decoded
@@ -238,13 +241,18 @@ with **Open folder**.
   end of the recording), cut from the decoded audio in its own format — an ST25
   recording stays 8 kHz mono, an ICD-ST10 one 44.1 kHz stereo (ST) or 16 kHz
   mono (SP); nothing is resampled.
+- MP3 clips are 128 kbps CBR at the recording's own sample rate (LAME allows
+  at most 64 kbps at 8 kHz, so ST25 clips are 64 kbps), with the mark (class,
+  time and note) as the ID3 title and the note as the comment. A WAV from
+  elsewhere at a rate MP3 doesn't have (say 96 kHz) is resampled by the encoder
+  to the nearest MP3 rate; mono and stereo only.
 - Clips go into a **`Clips`** folder inside the folder Export WAV with marks
   uses (for example `Save to\A\Clips` or `Save to\Old Mill\Clips`), named
-  `<recording>_EVP-<class>_<MMmSS.s>s[_<note>].wav`, e.g.
-  `001_A_003_EVP-A_00m12.4s.wav`. The note is shortened and characters Windows
+  `<recording>_EVP-<class>_<MMmSS.s>s[_<note>].mp3` (or `.wav`), e.g.
+  `001_A_003_EVP-A_00m12.4s.mp3`. The note is shortened and characters Windows
   doesn't allow in file names are left out.
-- The mark's class and note are written into the clip as a WAV marker, like in
-  the WAV with marks.
+- In a WAV clip, the mark's class and note are written in as a WAV marker, like
+  in the WAV with marks.
 - Nothing is overwritten: a clip already saved with the same bytes counts as
   "already there"; a different one gets a numbered name ("… (2).wav").
 - Clips are for sharing, so the EVP Library ignores the `Clips` folders OpenEVP
@@ -385,6 +393,12 @@ OpenEVP is provided "as is", without warranty of any kind.
 `vendor/libusb-1.0.30/libusb-1.0.dll` is libusb 1.0.30 (MinGW64 build) from the
 official PGP-signed release (signed by Tormod Volden), licensed LGPL-2.1; see
 `vendor/libusb-1.0.30/COPYING`. The build script checks its SHA-256.
+
+MP3 clips are encoded with [lameenc](https://github.com/chrisstaite/lameenc)
+(installed from PyPI, `requirements-app.txt`), licensed LGPL-3.0-or-later, which
+includes the [LAME](https://lame.sourceforge.io/) MP3 encoder, licensed
+LGPL-2.0-or-later. The app bundles it as a separate extension module
+(`_internal\lameenc.*.pyd`), with its license in `_internal\lameenc-*.dist-info`.
 
 `vendor/webview2/MicrosoftEdgeWebview2Setup.exe` is Microsoft's Evergreen WebView2
 bootstrapper (Authenticode-signed by Microsoft; the build checks its SHA-256). It is

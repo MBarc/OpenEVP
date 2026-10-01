@@ -7,6 +7,9 @@ whole sample frames (the fmt chunk's block align), so nothing is resampled or
 converted. Each clip runs from PAD seconds before its mark to PAD seconds after
 it, clamped to the recording, and carries the mark as a standard RIFF marker
 (wavinfo.with_markers), placed where the EVP is inside the clip.
+
+A clip can also be an MP3 for sharing (FORMATS; openevp.mp3): the same cut,
+encoded, with the mark as its ID3 title and the note as its comment.
 """
 import math
 import re
@@ -15,6 +18,7 @@ import unicodedata
 
 from . import wavinfo
 
+FORMATS = ("mp3", "wav")    # clip formats; the first is the default
 PAD = 0.5                   # seconds of audio kept on each side of the mark
 MAX_NOTE = 40               # characters of the note kept in a clip's file name
 
@@ -101,7 +105,28 @@ def stamp(seconds):
     return f"{tenths // 600:02d}m{(tenths % 600) // 10:02d}.{tenths % 10}s"
 
 
-def name(stem, mark, with_note=True):
-    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>].wav."""
+def name(stem, mark, with_note=True, fmt="wav"):
+    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>].<fmt>."""
     note = safe_note(mark.get("note")) if with_note else ""
-    return f"{stem}_EVP-{mark['cls']}_{stamp(mark['start'])}" + (f"_{note}" if note else "") + ".wav"
+    return f"{stem}_EVP-{mark['cls']}_{stamp(mark['start'])}" + (f"_{note}" if note else "") + f".{fmt}"
+
+
+def title(mark):
+    """A clip's title (its MP3 tag): "EVP B at 1:02.4: get out" (the note left out when empty)."""
+    tenths = max(0, round(float(mark["start"]) * 10))
+    text = f"EVP {mark['cls']} at {tenths // 600}:{(tenths % 600) // 10:02d}.{tenths % 10}"
+    note = " ".join((mark.get("note") or "").split())
+    return f"{text}: {note}" if note else text
+
+
+def make(wav_bytes, mark, fmt="wav", pad=PAD):
+    """A clip of one mark in fmt ("wav": cut(); "mp3": that cut encoded, see
+    openevp.mp3). Raises ValueError as cut() does (or when the MP3 encoder cannot
+    take the audio), RuntimeError (mp3.UNAVAILABLE) when MP3 is not available."""
+    clip = cut(wav_bytes, mark, pad)
+    if fmt == "wav":
+        return clip
+    if fmt != "mp3":
+        raise ValueError(f"unknown clip format {fmt!r}")
+    from . import mp3
+    return mp3.encode(clip, title(mark), (mark.get("note") or "").strip())

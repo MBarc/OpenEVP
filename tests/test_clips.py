@@ -23,6 +23,13 @@ from openevp import clips, wavinfo  # noqa: E402
 WAIT = 30
 
 
+def setUpModule():
+    """These tests are about WAV clips (MP3 is the default format: see test_mp3_clips)."""
+    patch = mock.patch.object(backend.Api, "clip_format", lambda self: "wav")
+    patch.start()
+    unittest.addModuleCleanup(patch.stop)
+
+
 def pcm_wav(rate, channels, seconds, width=2):
     """A WAV whose every frame holds its own index (so a cut can be checked frame by frame)."""
     n = int(rate * seconds)
