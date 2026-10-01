@@ -64,9 +64,9 @@ from . import folders
 from .devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceGone
 from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_put, _fail,  # noqa: F401
                           _clips_folder, _is_clip, _make_clips_folder, _under_clips, _decoder_problem, _decoder_problems, _file_id, _folder_id, _fs_problem,
-                          _kind_format,
+                          _kind_format, _listed_kind,
                           _plain)
-from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
+from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, MP3_NO_MARKS, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -172,6 +172,24 @@ def _stat_of(st):
     return st.st_size, st.st_mtime_ns
 
 
+def _mp3_seconds(path, st):
+    """(seconds, None) of an MP3 clip from its frame headers, or (None, why not)."""
+    if st.st_size > mp3.MAX_BYTES:
+        return None, "it is too large to be an MP3 clip"
+    try:
+        with open(path, "rb") as f:
+            return round(mp3.info(f.read())[2], 1), None
+    except OSError as e:
+        return None, _plain(e)
+    except ValueError as e:
+        return None, str(e)
+
+
+def _no_fp(entry):
+    """Why a loaded recording without a fingerprint cannot be marked: an MP3 clip, or an empty WAV."""
+    return MP3_NO_MARKS if entry["source"].get("path", "").lower().endswith(".mp3") else NO_AUDIO
+
+
 def _wav_length(f):
     """Exact length in seconds of a PCM WAV (a path or a file object)."""
     with wave.open(f) as w:
@@ -230,8 +248,8 @@ def _scan_library(folder, clips=None):
                     subdirs.append(e)
                     continue
                 kind = os.path.splitext(e.name)[1].lower()[1:]
-                if not kind or _kind_format(kind) is None or not e.is_file():
-                    continue
+                if not _listed_kind(kind, clips is not None and rel in clips) or not e.is_file():
+                    continue                    # (an MP3 only in a Clips folder of OpenEVP's, as a clip)
                 st = e.stat()
             except OSError:
                 continue
@@ -462,6 +480,7 @@ class Api(LibraryOps):
         for f in formats.all():
             problem = _decoder_problem(f)
             kinds[f.ext[1:]] = {"label": f.label, "playable": problem is None, "reason": problem}
+        kinds["mp3"] = {"label": "MP3 clip", "playable": True, "reason": None}    # in Clips folders only
         return {"wav": not unavailable, "wav_status": wav_status, "formats": kinds, "version": __version__,
                 "models": [m.name for m in recorders.supported()],
                 "marks": store is not None, "marks_read_only": bool(store is not None and store.read_only),
@@ -666,8 +685,8 @@ class Api(LibraryOps):
         entry = self._entry(rec)
         if entry is None:
             return _fail(RELOAD)
-        if not entry["fp"]:                   # an empty WAV has no fingerprint (see _analyze)
-            return _fail(NO_AUDIO)
+        if not entry["fp"]:                   # an empty WAV has no fingerprint (see _analyze), nor an MP3 clip
+            return _fail(_no_fp(entry))
         try:
             return action(entry)
         except (StoreReadOnly, StoreUnavailable, ValueError) as e:
@@ -988,7 +1007,7 @@ class Api(LibraryOps):
         if entry is None:
             return _fail(RELOAD)
         if not entry["fp"]:
-            return _fail(NO_AUDIO)
+            return _fail(_no_fp(entry))
         with self._workers_lock:
             if self._stop.is_set():
                 return _fail(CLOSING)
@@ -1431,6 +1450,13 @@ class Api(LibraryOps):
         name = os.path.basename(path)
         source = {"kind": "file", "path": path}
         try:
+            if os.path.splitext(name)[1].lower() == ".mp3":
+                if not _is_clip(path, root):
+                    return _fail(f"{name}: MP3 files play here only as EVP clips (in a Clips folder made by Export clips).")
+                info = self._server.prepare_mp3(path)      # the page decodes it; no fingerprint, no marks
+                source["stat"] = info.pop("stat", None)
+                return self._loaded(info, name, name, source,
+                                    {"name": name, "imported": 0, "markable": False, "mark_reason": MP3_NO_MARKS})
             fmt = formats.by_ext(os.path.splitext(name)[1])
             if fmt is None or fmt is formats.WAV:
                 info = self._server.prepare_file(path)
@@ -1547,14 +1573,22 @@ class Api(LibraryOps):
             fp = error = seconds = unplayable = None
             fmt = _kind_format(kind)
             cached = None
-            if fmt.decoder is not None and store is not None:
+            if fmt is None:
+                # An MP3 clip (_listed_kind): its length from its frame headers; never
+                # fingerprinted, indexed or cached, so never a recording.
+                seconds, error = _mp3_seconds(path, st)
+                if error:
+                    error = f"{name} can't be played: {error}."
+            if fmt is not None and fmt.decoder is not None and store is not None:
                 cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
-            if fmt.decoder is not None and cached is None:
+            if fmt is not None and fmt.decoder is not None and cached is None:
                 # A file's own header can say it cannot be decoded yet (an ICD-ST10
                 # recording; only the header is read): listed like a file without
                 # a decoder, and never cached. A cached file was decoded before.
                 unplayable = self._file_problem(fmt, path, st)
-            if fmt.decoder is None:
+            if fmt is None:
+                pass                            # (the MP3 clip above)
+            elif fmt.decoder is None:
                 # Listed, never fingerprinted or cached: no decoder is not the file's fault.
                 seconds, error = fmt.seconds(path), f"{name} can't be played or marked: {_decoder_problem(fmt)}."
             elif unplayable:

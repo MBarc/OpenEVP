@@ -263,12 +263,18 @@ with **Open folder**.
   them out (they are copies of parts of recordings). You can still mark a clip
   in the player; the mark is kept, but it doesn't count either. Export clips
   never cuts clips from clips.
+- MP3 clips are listed and play the same way (the player decodes the MP3
+  itself). They can't be marked: the mark tools say so (mark the recording, or
+  export the clip as WAV). OpenEVP lists `.mp3` files only in its own `Clips`
+  folders, as clips; anywhere else they are other files, and an MP3 clip can
+  only be moved to another `Clips` folder OpenEVP made.
 - Rename or delete a `Clips` folder like any other folder (delete goes to the
   Recycle Bin), and renaming, moving or deleting a folder takes its `Clips`
   folder along. Recordings can't be moved into a `Clips` folder: it is for
-  clips only. Clips can be moved out of it, and then are ordinary WAVs.
+  clips only. WAV clips can be moved out of it, and then are ordinary WAVs.
 - OpenEVP recognises its own `Clips` folders by a small hidden file inside,
-  `.openevp-clips`; delete that file and its clips count as ordinary recordings.
+  `.openevp-clips`; delete that file and its WAV clips count as ordinary
+  recordings (its MP3 clips are then no longer listed).
   A folder you named `Clips` yourself is an ordinary folder.
 
 ### Where marks live

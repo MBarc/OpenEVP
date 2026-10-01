@@ -121,3 +121,50 @@ def id3(title="", comment=""):
     n = len(frames)
     size = bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])   # syncsafe
     return b"ID3\x03\x00\x00" + size + frames
+
+
+# ---- reading an MP3 (a clip in the library): its format and length, from the frame headers ----
+MAX_BYTES = 256 << 20                    # an MP3 longer than this is not a clip
+_BITRATES = {3: (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320),   # MPEG-1 layer III
+             2: (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160)}      # MPEG-2 and 2.5
+_RATES = {3: (44100, 48000, 32000), 2: (22050, 24000, 16000), 0: (11025, 12000, 8000)}
+
+
+def _id3_length(data):
+    """Bytes taken by an ID3v2 tag at the start of data (0 when there is none)."""
+    if len(data) < 10 or data[:3] != b"ID3":
+        return 0
+    size = sum((b & 0x7F) << (7 * (3 - i)) for i, b in enumerate(data[6:10]))
+    return 10 + size + (10 if data[5] & 0x10 else 0)                # a v2.4 footer
+
+
+def info(data):
+    """(sample rate, channels, seconds) of an MP3 (MPEG layer III; bytes), counted
+    from its frame headers, so no audio is decoded. Seconds include the encoder's
+    delay and the last frame's padding (a few hundredths of a second). Raises
+    ValueError when no frame is found."""
+    pos = _id3_length(data)
+    rate = channels = None
+    samples = 0
+    while pos + 4 <= len(data):
+        h = int.from_bytes(data[pos:pos + 4], "big")
+        version, layer, br, sr = (h >> 19) & 3, (h >> 17) & 3, (h >> 12) & 15, (h >> 10) & 3
+        if h >> 21 != 0x7FF or version == 1 or layer != 1 or br in (0, 15) or sr == 3:
+            if not samples and pos < 64 * 1024:
+                pos += 1                                            # junk before the first frame
+                continue
+            break                                                  # the end (a v1 tag, junk)
+        frame_rate = _RATES[version][sr]
+        if rate is None:
+            rate, channels = frame_rate, 1 if (h >> 6) & 3 == 3 else 2
+        elif frame_rate != rate:
+            break
+        spf = 1152 if version == 3 else 576
+        size = spf // 8 * _BITRATES[3 if version == 3 else 2][br] * 1000 // frame_rate + ((h >> 9) & 1)
+        if pos + size > len(data):
+            break                                                  # a truncated last frame
+        samples += spf
+        pos += size
+    if not samples:
+        raise ValueError("not an MP3 file (no MPEG audio frames)")
+    return rate, channels, samples / rate

@@ -1,7 +1,9 @@
 """MP3 clips (openevp.mp3, openevp.clips.make): encoding at the recording's own
 rate, the ID3v2.3 tag, determinism (a second export finds the clip already
 saved), the clip format setting (Api.clip_format / set_clip_format, MP3 by
-default) and what happens without lameenc.
+default) and what happens without lameenc; and MP3 clips in the EVP Library:
+listed and played (served as they are) in the Clips folders OpenEVP made only,
+never fingerprinted, indexed, counted or marked.
 
 The encoding tests need lameenc (requirements-app.txt): skipped without it, a
 failure in the release gate."""
@@ -10,7 +12,10 @@ import math
 import os
 import struct
 import sys
+import tempfile
 import unittest
+import urllib.error
+import urllib.request
 import wave
 from unittest import mock
 
@@ -20,8 +25,9 @@ import release_gate  # noqa: E402
 import test_library as tl  # noqa: E402
 import test_marks_api as tm  # noqa: E402
 from app import backend, library_ops  # noqa: E402
+from app.audio_server import AudioServer  # noqa: E402
 from app.store import AppData  # noqa: E402
-from openevp import clips, mp3  # noqa: E402
+from openevp import clips, mp3, wavinfo  # noqa: E402
 
 NO_LAMEENC = "lameenc is not installed (pip install -r requirements-app.txt)"
 WAIT = 30
@@ -333,6 +339,202 @@ class LibraryMp3Tests(unittest.TestCase):
             event, p = self.run_job(lambda: api.export_clips_folder("root", 3))
             self.assertEqual((event, p["already"]), ("clips-done", 1))
             self.assertFalse(api._busy.locked())
+
+
+
+def mp3_clip(seconds=3.0, rate=8000, channels=1, start=1.0, note="clip"):
+    return clips.make(tone_wav(rate, channels, seconds), mark(start, start + 0.25, "B", note), "mp3")
+
+
+class Mp3InfoTests(unittest.TestCase):
+    """mp3.info(): the format and length from the frame headers (no lameenc needed to read)."""
+
+    @release_gate.require(mp3.available(), NO_LAMEENC)
+    def test_rate_channels_and_length(self):
+        for rate, channels in ((8000, 1), (16000, 1), (44100, 2)):
+            data = mp3_clip(rate=rate, channels=channels)
+            got_rate, got_channels, seconds = mp3.info(data)
+            frames = mpeg_frames(data[read_id3(data)[1]:])
+            self.assertEqual((got_rate, got_channels), (rate, channels))
+            self.assertAlmostEqual(seconds, sum(f[3] for f in frames) / rate)
+            self.assertTrue(1.25 <= seconds < 1.5, seconds)
+        data = mp3_clip()
+        self.assertEqual(mp3.info(data[read_id3(data)[1]:]), mp3.info(data))          # no tag
+        self.assertEqual(mp3.info(b"junk" + data[read_id3(data)[1]:])[:2], (8000, 1))  # junk before the frames
+        self.assertLess(mp3.info(data[:-100])[2], mp3.info(data)[2])                   # a truncated last frame
+
+    def test_not_an_mp3(self):
+        for data in (b"", b"RIFF....WAVEfmt ", b"ID3\x03\x00\x00\x00\x00\x00\x00", bytes(5000)):
+            with self.assertRaises(ValueError):
+                mp3.info(data)
+
+
+class AudioServerMp3Tests(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.s = AudioServer(None, self.dir.name)
+        self.s.start()
+        self.addCleanup(self.s.stop)
+
+    def get(self, url, headers=None):
+        return urllib.request.urlopen(urllib.request.Request(url, headers=headers or {}), timeout=5)
+
+    def http_error(self, url):
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            self.get(url)
+        e.exception.close()
+        return e.exception.code
+
+    @release_gate.require(mp3.available(), NO_LAMEENC)
+    def test_served_as_it_is_with_ranges(self):
+        data = mp3_clip(rate=44100, channels=2)
+        folder = os.path.join(self.dir.name, "clips")
+        os.makedirs(folder)
+        path = os.path.join(folder, "x_EVP-B_00m01.0s.mp3")
+        with open(path, "wb") as f:
+            f.write(data)
+        info = self.s.prepare_mp3(path)
+        self.assertTrue(info["url"].endswith(".mp3"))
+        self.assertEqual((info["peaks"], info["fp"], info["compressed"], info["rate"], info["channels"]),
+                         ([], None, True, 44100, 2))
+        self.assertAlmostEqual(info["duration"], mp3.info(data)[2])
+        self.assertEqual(info["stat"], (os.stat(path).st_size, os.stat(path).st_mtime_ns))
+        with self.get(info["url"]) as r:
+            self.assertEqual((r.status, r.headers["Content-Type"]), (200, "audio/mpeg"))
+            self.assertEqual(r.read(), data)
+        with self.get(info["url"], {"Range": "bytes=10-19"}) as r:
+            self.assertEqual((r.status, r.read()), (206, data[10:20]))
+        self.assertEqual(self.http_error(info["url"][:-4] + ".wav"), 404)    # the same id as a .wav: not found
+        self.assertEqual(self.s.prepare_mp3(path)["url"], info["url"])     # registered once per version
+        self.assertEqual(sorted(os.listdir(self.dir.name)), ["clips"])       # served in place, nothing cached
+        with open(path, "ab") as f:                                         # changed on disk: refused
+            f.write(b"x")
+        self.assertEqual(self.http_error(info["url"]), 409)
+
+    def test_not_an_mp3_is_refused(self):
+        path = os.path.join(self.dir.name, "fake.mp3")
+        with open(path, "wb") as f:
+            f.write(tone_wav(8000, 1, 0.5))
+        with self.assertRaises(ValueError):
+            self.s.prepare_mp3(path)
+
+
+@release_gate.require(mp3.available(), NO_LAMEENC)
+class LibraryMp3ClipsTests(unittest.TestCase):
+    """MP3 clips in the EVP Library, with the fixtures of test_library and a real audio server."""
+    new_api, write, index = tl.LibraryTests.new_api, tl.LibraryTests.write, tl.LibraryTests.index
+    run_job = LibraryMp3Tests.run_job
+
+    def setUp(self):
+        tl.LibraryTests.setUp(self)
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        self.server = AudioServer(None, cache.name)
+        self.server.start()
+        self.addCleanup(self.server.stop)
+
+    def populate(self):
+        self.rec = tm.wav_bytes(b"rec", seconds=2.0)
+        self.write("Case/rec.wav", self.rec)
+        library_ops._make_clips_folder(os.path.join(self.lib, "Case", "Clips"))
+        self.clip = mp3_clip(note="hello")
+        self.write("Case/Clips/rec_EVP-B_00m01.0s_hello.mp3", self.clip)
+        self.write("Case/Clips/rec_EVP-A_00m00.5s.wav", clips.cut(self.rec, mark(0.5, 0.6)))
+        self.write("Case/Clips/Deeper/old.mp3", mp3_clip(note="deeper"))         # any depth inside
+        self.write("Case/Clips/broken.mp3", b"not an mp3 at all")
+        self.write("Case/song.mp3", self.clip)                                     # not in a Clips folder
+        self.write("Other/Clips/mine.mp3", self.clip)                              # the user's own "Clips" folder
+
+    def test_listed_as_clips_only_in_openevps_clips_folders(self):
+        self.populate()
+        api = self.new_api()
+        indexed = []
+        real = api._index_file
+
+        def spy(path, *a, **k):
+            indexed.append(os.path.basename(path))
+            return real(path, *a, **k)
+        with mock.patch.object(api, "_index_file", spy):
+            r = self.index(api)
+        rows = {f["name"]: f for f in r["files"]}
+        self.assertEqual(sorted(rows), ["broken.mp3", "old.mp3", "rec.wav", "rec_EVP-A_00m00.5s.wav",
+                                        "rec_EVP-B_00m01.0s_hello.mp3"])          # song.mp3, mine.mp3: never
+        row = rows["rec_EVP-B_00m01.0s_hello.mp3"]
+        self.assertEqual((row["type"], row["clip"], row["fp"], row["error"], row["unplayable"]),
+                         ("mp3", True, None, None, None))
+        self.assertAlmostEqual(row["seconds"], round(mp3.info(self.clip)[2], 1))
+        self.assertTrue(rows["old.mp3"]["clip"])
+        self.assertIn("broken.mp3 can't be played: not an MP3 file", rows["broken.mp3"]["error"])
+        self.assertFalse(any(n.endswith(".mp3") for n in indexed), indexed)        # never fingerprinted
+        for path in (os.path.join(self.lib, "Case", "Clips", "rec_EVP-B_00m01.0s_hello.mp3"),
+                     os.path.join(self.lib, "Case", "song.mp3")):
+            st = os.stat(path)
+            self.assertIsNone(self.store.cached_fp(path, st.st_size, st.st_mtime_ns))
+        self.assertEqual(set(self.store.summary()), set())                         # nothing marked, nothing counted
+        self.assertEqual(api.capabilities()["formats"]["mp3"], {"label": "MP3 clip", "playable": True, "reason": None})
+        # Delete's folder info counts them as clips; an MP3 elsewhere is an other file.
+        info = api.folder_info(next(d["id"] for d in r["folders"] if d["rel"] == ["Case"]))
+        self.assertEqual((info["recordings"], info["clips"]), (1, 4))
+        self.assertGreaterEqual(info["other_files"], 1)                            # song.mp3 (and the marker)
+        other = api.folder_info(next(d["id"] for d in r["folders"] if d["rel"] == ["Other"]))
+        self.assertEqual((other["recordings"], other["clips"], other["other_files"]), (0, 0, 1))
+
+    def test_played_as_it_is_and_never_marked(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        fid = next(f["id"] for f in r["files"] if f["name"] == "rec_EVP-B_00m01.0s_hello.mp3")
+        p = api.play_library(fid)
+        self.assertTrue(p["ok"], p)
+        self.assertTrue(p["url"].endswith(".mp3"))
+        self.assertEqual((p["compressed"], p["fp"], p["rate"], p["channels"], p["marks"], p["imported"]),
+                         (True, None, 8000, 1, [], 0))
+        self.assertEqual((p["markable"], p["mark_reason"]), (False, library_ops.MP3_NO_MARKS))
+        with urllib.request.urlopen(p["url"], timeout=5) as resp:
+            self.assertEqual((resp.headers["Content-Type"], resp.read()), ("audio/mpeg", self.clip))
+        rec = p["rec"]
+        self.assertEqual(api.add_mark(rec, 0.1, 0.2, "A", "")["error"], library_ops.MP3_NO_MARKS)
+        self.assertEqual(api.set_reviewed(rec, True)["error"], library_ops.MP3_NO_MARKS)
+        self.assertEqual(api.export_marked(rec)["error"], library_ops.MP3_NO_MARKS)
+        self.assertEqual(api.export_clips(rec)["error"], library_ops.MP3_NO_MARKS)
+        self.assertEqual(api.recording_changed(rec), {"ok": True, "changed": False})
+        self.assertEqual(self.store.summary(), {})
+        self.assertEqual(api.library_marks(fid), {"ok": True, "marks": []})
+        bad = next(f["id"] for f in r["files"] if f["name"] == "broken.mp3")
+        self.assertIn("not an MP3 file", api.play_library(bad)["error"])
+        # An MP3 outside a Clips folder never plays (it is never listed; checked here directly).
+        song = os.path.join(self.lib, "Case", "song.mp3")
+        self.assertIn("only as EVP clips", api._play_file(song, root=self.lib)["error"])
+
+    def test_an_mp3_clip_moves_only_between_clips_folders(self):
+        self.populate()
+        library_ops._make_clips_folder(os.path.join(self.lib, "Other", "Night", "Clips"))
+        api = self.new_api()
+        r = self.index(api)
+        folder = {tuple(d["rel"]): d["id"] for d in r["folders"]}
+        fid = next(f["id"] for f in r["files"] if f["name"] == "rec_EVP-B_00m01.0s_hello.mp3")
+        wav = next(f["id"] for f in r["files"] if f["name"] == "rec_EVP-A_00m00.5s.wav")
+        for target in (("Case",), ("Other",), ("Other", "Clips")):              # (a Clips folder the user named)
+            self.assertEqual(api.move_files([fid], folder[target])["error"], library_ops.MP3_STAYS)
+        self.assertEqual(api.move_files([wav, fid], folder[("Case",)])["error"], library_ops.MP3_STAYS)
+        res = api.move_files([fid], folder[("Other", "Night", "Clips")])        # another Clips folder of OpenEVP's
+        self.assertTrue(res["ok"], res)
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, "Other", "Night", "Clips", "rec_EVP-B_00m01.0s_hello.mp3")))
+        r = self.index(api)
+        self.assertTrue(next(f for f in r["files"] if f["name"] == "rec_EVP-B_00m01.0s_hello.mp3")["clip"])
+
+    def test_export_clips_never_reads_mp3_clips(self):
+        self.populate()
+        self.store.add_mark(wavinfo.wav_fingerprint(io.BytesIO(self.rec)), 0.5, 0.6, "A", "", name="rec.wav",
+                            duration=2.0)
+        api = self.new_api()
+        r = self.index(api)
+        event, p = self.run_job(lambda: api.export_clips_folder("root", 1))
+        self.assertEqual((event, p["recordings"], p["saved"], p["skipped"]), ("clips-done", 1, 1, []))
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, "Case", "Clips", "rec_EVP-A_00m00.5s.mp3")))
+        clip_ids = [f["id"] for f in r["files"] if f["name"].endswith(".mp3")]
+        self.assertEqual(api.export_clips_files(clip_ids, 2)["error"], backend.CLIPS_AGAIN)
 
 
 if __name__ == "__main__":

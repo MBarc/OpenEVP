@@ -909,6 +909,58 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.lib.flat = true; renderLibrary();`, context);
   assert.deepStrictEqual(rowsNow().map((r) => r.group.main.id), ["r1"]);
   vm.runInContext(`S.lib.flat = false; renderLibrary();`, context);
+
+  // An MP3 clip (the default clip format): listed and playable in the Clips folder; the page loads the
+  // MP3 itself (no server peaks: wavesurfer decodes it at its own rate) and the mark tools are off.
+  const mp3Reason = "MP3 clips can't be marked. Mark the recording itself, or export the clip as WAV to mark it.";
+  vm.runInContext(`S.caps.formats.mp3 = { label: "MP3 clip", playable: true, reason: null };`, context);
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 61, exists: true, truncated: false, indexing: false,
+                                    pending: 0, folders: clipFolders,
+                                    files: [marked(libFile("r1", "a.wav", "root", "fp1"), 1),
+                                            { ...libFile("c3", "a_EVP-B_00m03.0s_hi.mp3", "fc", null), type: "mp3", clip: true }] });
+  context.openLibraryFolder("root");
+  await context.loadLibrary();
+  await settle();
+  assert.strictEqual(folderRow("fc").cells[1].textContent, "🎞️ Clips Clips1 clip");
+  context.openLibraryFolder("fc");
+  await settle();
+  const mp3Row = recRow("c3");
+  assert.ok(mp3Row.classList.contains("lib-clip") && !mp3Row.classList.contains("unplayable"));
+  assert.strictEqual(mp3Row.cells[5].textContent, "Clip");
+  rightClick(mp3Row.cells[1]);
+  assert.deepStrictEqual(menuItems()[0], ["Play", false]);
+  choose("Move to…");                                          // an MP3 clip stays in a Clips folder
+  assert.ok(pick("f1").disabled && pick("f1").title === "MP3 clips stay in Clips folders");
+  assert.ok(pick("root").disabled);
+  context.closeFolderDialog();
+  assert.ok(vm.runInContext(`mp3StaysInClips("f1", ["c3"]) && !mp3StaysInClips("fc", ["c3"]) && !mp3StaysInClips("f1", ["r1"])`, context));
+  vm.runInContext(`S.wsCalls = []; S.ws = new Proxy(S.ws, { get: (t, k) =>
+    k === "load" ? (...a) => { S.wsCalls.push(["load", ...a]); return Promise.resolve(); }
+    : k === "setOptions" ? (o) => { S.wsCalls.push(["options", o]); } : t[k] });`, context);
+  api.play_library = async (id) => { ops.push(["play", id]);
+    return { ok: true, url: "http://127.0.0.1:1/t/c3.mp3", peaks: [], duration: 4000, rate: 44100, channels: 2, fp: null,
+             compressed: true, rec: "h9", name: "a_EVP-B_00m03.0s_hi.mp3", imported: 0, marks: [], reviewed: false,
+             backup: { status: null, detail: "" }, backup_needed: false, markable: false, mark_reason: mp3Reason }; };
+  ops.length = 0;
+  mp3Row.onclick();
+  await settle();
+  assert.deepStrictEqual(ops, [["play", "c3"]]);
+  const wsCalls = JSON.parse(vm.runInContext("JSON.stringify(S.wsCalls)", context));
+  assert.deepStrictEqual(wsCalls.filter((c) => c[0] === "load"), [["load", "http://127.0.0.1:1/t/c3.mp3"]], "no peaks: decoded in the page");
+  // (even a long one, past the full-detail budget a WAV would be drawn from server peaks for)
+  assert.ok(wsCalls.some((c) => c[0] === "options" && c[1].sampleRate === 44100), "decoded at its own rate");
+  assert.strictEqual(vm.runInContext("S.zoomMax", context), 44100);                  // zooms to the sample
+  assert.ok($("mark-evp").disabled && $("reviewed").disabled);
+  assert.strictEqual($("mark-evp").title, mp3Reason);
+  vm.runInContext(`S.region = { start: 0.1, end: 0.2 }; $("player-loaded").hidden = false;`, context);
+  fire([document], "keydown", { key: "m", target: document.body });                // M: no mark form either
+  assert.ok(!vm.runInContext("S.markForm", context));
+  assert.ok($("export-clips").disabled && $("export-marked").disabled);
+  // Another recording loaded: the tools are back.
+  vm.runInContext(`setCurrent("A-001", ${JSON.stringify({ rec: "h1", duration: 3, fp: "fpP", marks: [],
+                                                        backup: { status: null, detail: "" }, reviewed: false })});`, context);
+  assert.ok(!$("mark-evp").disabled && $("mark-evp").title !== mp3Reason);
+  vm.runInContext(`setCurrent(null); S.region = null;`, context);
   context.openLibraryFolder("root");
   await settle();
   console.log("ok");

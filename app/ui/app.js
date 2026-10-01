@@ -211,7 +211,8 @@ function showPlayerLoaded(label) {
 const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;
 
 function fullDetail(r) {                          // drawn from the audio itself?
-  return !!r.rate && r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES;
+  // An MP3 clip (r.compressed) always is: the server has no peaks for it, the page decodes it.
+  return !!r.rate && (!!r.compressed || r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES);
 }
 
 function maxZoom(r) {                             // px per second: one pixel per sample at the deepest zoom
@@ -951,6 +952,11 @@ function clipsOnly(folderId, ids) {
   const d = S.lib.folderById.get(folderId);
   return !!(d && d.in_clips) && !ids.every((id) => { const f = S.lib.byId.get(id); return f && f.clip; });
 }
+// An MP3 clip is listed only in a Clips folder: moved anywhere else it would vanish from the library.
+function mp3StaysInClips(folderId, ids) {
+  const d = S.lib.folderById.get(folderId);
+  return !(d && d.in_clips) && ids.some((id) => { const f = S.lib.byId.get(id); return f && f.type === "mp3"; });
+}
 function canRenameRecording(g) { return libraryToolsReady() && groupPickIds(g).length > 0; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
@@ -1636,8 +1642,10 @@ function moveDialog(ids = [...S.lib.selected]) {
     b.folderId = d.id;
     // The folder every picked file is in already (the folder shown, in the folder view).
     const here = ids.every((id) => L.byId.get(id).folder_id === d.id);
-    b.disabled = here || clipsOnly(d.id, ids);
+    const mp3 = mp3StaysInClips(d.id, ids);
+    b.disabled = here || clipsOnly(d.id, ids) || mp3;
     if (here) b.title = "They are in this folder already";
+    else if (mp3) b.title = "MP3 clips stay in Clips folders";
     else if (b.disabled) b.title = "A Clips folder is for EVP clips only";
     b.onclick = () => {
       target = d.id;
@@ -1713,6 +1721,7 @@ function dropTarget(e) {
   const el = e.target.closest("tr.lib-folder, #library-crumbs button.crumb");
   if (!el || !L.folderById.has(el.folderId) || el.folderId === L.folderId) return null;
   if (clipsOnly(el.folderId, S.drag.ids)) return null;   // a Clips folder takes clips only
+  if (mp3StaysInClips(el.folderId, S.drag.ids)) return null;   // and an MP3 clip stays in one
   return el;
 }
 
@@ -2127,10 +2136,13 @@ const READ_ONLY_TIP = "Marks can't be changed right now.";   // only if the back
 const NO_MARKS_TIP = "Marks are not available here.";
 
 function isMark(r) { return r.id.startsWith("mark-"); }
-function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
+// Marks can be changed: the store is writable, and the recording loaded can be marked (an MP3 clip can't).
+function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only && !(S.current && S.current.markReason); }
 // Why the store is read-only, in the backend's words (another OpenEVP, or its lock file could not be opened).
 function readOnlyTip() { return S.caps.marks_read_only_reason || READ_ONLY_TIP; }
-function marksTip() { return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? readOnlyTip() : ""; }
+function marksTip() {
+  return !S.caps.marks ? NO_MARKS_TIP : S.caps.marks_read_only ? readOnlyTip() : (S.current && S.current.markReason) || "";
+}
 function showing(rec) { return !!S.current && S.current.rec === rec; }   // is this handle's recording still in the player?
 function backupEventsSeen(rec) { return S.backupEvents.get(rec) || 0; }
 function isPoint(m) { return m.end <= m.start; }        // imported point markers: no length to drag
@@ -2202,12 +2214,14 @@ function setCurrent(label, r) {
   closeMarkForm();
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
-  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null } : null;
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null,
+                    markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
   S.backupNeeded = !!(r && r.backup_needed);
   S.backupRunning = false;
   $("reviewed").checked = !!(r && r.reviewed);
+  renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
   renderMarks();
 }
 
