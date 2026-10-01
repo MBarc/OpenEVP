@@ -217,3 +217,15 @@ Player settings tabs:
     M marks a selection, Space plays and pauses, a mark's 🔁 loops. Untick
     Spectrogram: **View •**. Close and start OpenEVP: the tab you last picked is
     shown.
+
+Show in File Explorer:
+
+36. In the EVP Library, right-click a recording that has both a `.dvf` and a
+    `.wav`: **Show in File Explorer** is right under Play (the arrow keys reach
+    it). Choose it: File Explorer opens on its folder with the `.dvf` selected.
+    Do the same on a WAV, an MP3 and a clip in a `Clips` folder, in a folder whose
+    name has spaces, commas and accents (e.g. `Old Mill, night 2 – Grüße`): each
+    opens with that file selected. Right-click a folder, a `Clips` folder and the
+    library folder's own row: **Open in File Explorer** (under Open) opens it.
+    Delete a file in Explorer, then Show in File Explorer on its row: "<name> is
+    no longer there. Refresh the list." and no Explorer window.

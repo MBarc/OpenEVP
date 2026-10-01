@@ -74,7 +74,7 @@ from collections import OrderedDict
 
 from openevp import __version__, clips, denoise, enhance, formats, mp3, pcm, recorders, spectrogram, stretch, wavinfo
 from openevp.export import save_unique, save_wav
-from openevp.paths import open_folder
+from openevp.paths import open_folder, show_in_folder
 from openevp.recorders import base as rbase
 
 from .updater import UpdateCancelled
@@ -2417,6 +2417,47 @@ class Api(LibraryOps):
         if not isinstance(path, str) or not os.path.isdir(path):
             return _fail("That folder does not exist.")
         return {"ok": bool(open_folder(path))}
+
+    # ---- Show in File Explorer (library rows, by id: the page never sends a path) ----
+    def show_library_file(self, file_id):
+        """Open Explorer with a library file (by id from list_library) selected.
+        Each copy of a recording (.dvf, .wav) has an id of its own; the page sends
+        the one its row shows. Only a file inside the library folder, as the
+        latest listing saw it, is shown."""
+        path = self._library_file(file_id)
+        with self._lib_lock:
+            root = self._library_folders.get("root")
+        if path is None or root is None:
+            return _fail(LIB_CHANGED)
+        if os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(self._library_path())):
+            return _fail(LIB_CHANGED)
+        if self._root_moved(root):
+            return _fail(ROOT_CHANGED)
+        if not os.path.isfile(path):
+            return _fail(f"{os.path.basename(path)} is no longer there. Refresh the list.")
+        if not folders.inside(root, path):
+            return _fail(LIB_CHANGED)
+        if not show_in_folder(path):
+            return _fail("File Explorer could not be opened.")
+        return {"ok": True}
+
+    def open_library_folder(self, folder_id):
+        """Open a library folder (by id from list_library; "root" is the library
+        folder itself) in Explorer, as Open folder does after an export."""
+        found = self._lib_paths(folder_id)
+        if found is None:
+            return _fail(LIB_CHANGED)
+        root, path = found
+        if self._root_moved(root):
+            return _fail(ROOT_CHANGED)
+        if not os.path.isdir(path):
+            return _fail(f"The folder {os.path.basename(os.path.normpath(path))} is no longer there. "
+                         "Refresh the list.")
+        if not folders.inside(root, path, allow_root=True):
+            return _fail(LIB_CHANGED)
+        if not open_folder(path):
+            return _fail("File Explorer could not be opened.")
+        return {"ok": True}
 
     def choose_destination(self):
         """Let the user pick the save folder, starting in the current one; returns it

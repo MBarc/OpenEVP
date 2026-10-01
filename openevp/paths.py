@@ -1,9 +1,11 @@
-"""Where OpenEVP saves by default, and showing a folder in Explorer.
+"""Where OpenEVP saves by default, and showing a folder (or a file in it) in Explorer.
 
 Shared by the desktop app and the command-line downloader.
 """
 import os
+import subprocess
 import sys
+import threading
 
 
 def documents_dir():
@@ -54,3 +56,30 @@ def open_folder(path):
         return True
     except OSError:
         return False
+
+
+def explorer_select_command(path):
+    r"""The command line that opens Explorer with path's file selected:
+    "<Windows>\explorer.exe" /select,"<path>". It is one string, not an argument
+    list: Explorer splits its arguments at commas unless they are quoted, and
+    subprocess quotes a list item only when it holds a space or a tab, so
+    [explorer, "/select,", r"C:\a,b\c.wav"] opens no window at all (checked on
+    Windows 11). A Windows path cannot contain a double quote, so quoting it
+    always is safe."""
+    windows = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+    explorer = os.path.join(windows, "explorer.exe")
+    return f'"{explorer}" /select,"{os.path.abspath(path)}"'
+
+
+def show_in_folder(path):
+    """Open Explorer with the file selected (Windows only), without a shell.
+    Returns False if Explorer could not be started. (explorer.exe exits with 1
+    even when it worked, so its exit code means nothing; it is only reaped.)"""
+    if sys.platform != "win32":
+        return False
+    try:
+        proc = subprocess.Popen(explorer_select_command(path))
+    except (OSError, ValueError):
+        return False
+    threading.Thread(target=proc.wait, name="explorer", daemon=True).start()
+    return True
