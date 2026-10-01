@@ -466,6 +466,36 @@ class LibraryMp3RecordingsTests(unittest.TestCase):
         self.assertEqual(reads[first:], ["video.mpeg"])
         self.assertIn("video.mpeg", names)
 
+    def test_listing_reads_only_an_mp3s_header(self):
+        """list_library() runs on the page's call: without a store (so nothing is indexed) an
+        MP3's length comes from its headers, never from reading its audio."""
+        import builtins
+        long_mp3 = mp3_vector("tone-44k-stereo.mp3") * 200                    # ~3.3 MB, 209 s
+        self.write("Case/long.mp3", long_mp3)
+        self.write("Case/long.mpeg", mp3.id3("EVP A at 0:01.0") + long_mp3)
+        real_open, read = builtins.open, []
+
+        def counting_open(*a, **k):
+            f = real_open(*a, **k)
+            if "b" in (a[1] if len(a) > 1 else k.get("mode", "r")):
+                real_read = f.read
+
+                def counted(n=-1):
+                    got = real_read(n)
+                    read.append((os.path.basename(a[0]), len(got)))
+                    return got
+                f.read = counted
+            return f
+        api = self.new_api(store=None)
+        with mock.patch.object(formats, "open", counting_open, create=True),                 mock.patch.object(backend, "open", counting_open, create=True):
+            r = api.list_library()
+        rows = {f["name"]: f for f in r["files"]}
+        self.assertEqual((r["indexing"], rows["long.mp3"]["seconds"], rows["long.mpeg"]["seconds"]),
+                         (False, 209.0, 209.0))
+        for name in ("long.mp3", "long.mpeg"):
+            got = sum(n for who, n in read if who == name)
+            self.assertTrue(0 < got <= 4 * mp3dec.SNIFF_BYTES, (name, read))      # its sniff and length
+
     def test_marks_follow_the_audio_across_a_rename_to_mpeg(self):
         self.populate()
         api = self.new_api()

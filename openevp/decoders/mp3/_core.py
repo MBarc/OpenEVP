@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import Optional
 
 DLL_PATH = Path(__file__).resolve().parent / "mp3_core.dll"
-_ABI_VERSION = 1
+_ABI_VERSION = 2
+SCAN_BUDGET = 1 << 20                # bytes one mp3c_decode call goes through at most (_mp3.c)
 F_CHANNELS, F_RATE, F_LAYER, F_FRAMES, F_DROPPED, F_COUNT = range(6)
 
 
@@ -60,7 +61,9 @@ def problem() -> Optional[str]:
 class Decoder:
     """One decode of one file (bytes): ``run(pcm, cap)`` decodes the next frames
     into pcm (a ctypes int16 array of cap sample frames x 2 channels at most)
-    and returns the sample frames written (0 at the end). ``pos`` is how far
+    and returns the sample frames written. 0 does not mean the end: one call
+    scans at most about SCAN_BUDGET bytes (a stretch of junk takes several
+    calls), so the caller can stop in between; ``done`` says the end. ``pos`` is how far
     into the file it got; ``fmt`` the format and counts (F_*)."""
 
     def __init__(self, data: bytes, start: int = 0, end: Optional[int] = None):
@@ -78,6 +81,11 @@ class Decoder:
     @property
     def pos(self) -> int:
         return self._pos.value
+
+    @property
+    def done(self) -> bool:
+        """Has every byte been used (the end of the file)?"""
+        return self._pos.value >= self._len
 
     def run(self, pcm, cap: int) -> int:
         n = _lib.mp3c_decode(self._mem, self._data, self._len, ctypes.byref(self._pos), pcm, cap, self.fmt)

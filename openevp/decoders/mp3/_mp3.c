@@ -14,6 +14,14 @@
  * exactly once, so a call never loops on the same data. With pcm NULL nothing
  * is decoded: the frames are only counted (their length, from the headers).
  *
+ * Bounded work per call: minimp3 is shown at most WINDOW bytes from *pos (far
+ * more than the ten frames it looks ahead to sync), and a call stops once it
+ * has gone through BUDGET bytes, even if it wrote nothing (a long stretch of
+ * junk or free-format data), so the caller polls its stop flag between calls.
+ * A call that returns 0 is the end only when *pos == len. For a file of valid
+ * frames the window changes nothing; inside junk it decides where minimp3
+ * resyncs, the same way every time.
+ *
  * Determinism: minimp3 decodes in single-precision float. On x86-64 it always
  * takes its SSE2 path (MINIMP3_ONLY_SIMD; SSE2 is part of x86-64, so there is
  * no run-time dispatch): every x86-64 CPU gives the same samples. The build
@@ -22,14 +30,15 @@
  * would take minimp3's NEON path and is not promised to match x86-64.
  */
 
-#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
 #define MINIMP3_IMPLEMENTATION
 #include "minimp3.h"
 
-#define ABI_VERSION 1
+#define ABI_VERSION 2
+#define WINDOW (256 * 1024)             /* bytes one mp3dec_decode_frame call is shown at most */
+#define BUDGET (1024 * 1024)            /* bytes one mp3c_decode call goes through at most */
 #define EXPORT __declspec(dllexport)
 
 enum { F_CHANNELS, F_RATE, F_LAYER, F_FRAMES, F_DROPPED, F_COUNT };
@@ -63,22 +72,24 @@ static int tag_frame(const uint8_t *h, int frame_bytes) {
     return 36 + 4 <= frame_bytes && !memcmp(h + 36, "VBRI", 4);
 }
 
-/* Decode from buf[*pos] (buf holds len bytes: the whole file, so minimp3 always
- * sees the frames that follow) into pcm, at most cap sample frames (cap must be
- * at least mp3c_max_frame_samples()). Returns the sample frames written (0: the
- * end, nothing more decodes), or -1 for bad arguments. fmt[F_COUNT] gets the
+/* Decode from buf[*pos] (buf holds len bytes: the whole file) into pcm, at most
+ * cap sample frames (cap must be at least mp3c_max_frame_samples()) and at most
+ * about BUDGET bytes of input. Returns the sample frames written (0 with
+ * *pos == len: the end), or -1 for bad arguments. fmt[F_COUNT] gets the
  * output format and the counts so far. */
 EXPORT int mp3c_decode(void *mem, const uint8_t *buf, int64_t len, int64_t *pos,
                        int16_t *pcm, int cap, int64_t *fmt) {
     State *s = (State *)mem;
     int written = 0;
+    int64_t start;
     if (!s || !buf || !pos || len < 0 || *pos < 0 || *pos > len || !fmt ||
         cap < MINIMP3_MAX_SAMPLES_PER_FRAME / 2)
         return -1;
-    while (*pos < len && written + MINIMP3_MAX_SAMPLES_PER_FRAME / 2 <= cap) {
+    start = *pos;
+    while (*pos < len && written + MINIMP3_MAX_SAMPLES_PER_FRAME / 2 <= cap && *pos - start < BUDGET) {
         mp3dec_frame_info_t info;
         int64_t left = len - *pos;
-        int avail = left > INT_MAX ? INT_MAX : (int)left;
+        int avail = left > WINDOW ? WINDOW : (int)left;
         const uint8_t *at = buf + *pos;
         int n = mp3dec_decode_frame(&s->dec, at, avail, pcm ? s->frame : NULL, &info);
         if (info.frame_bytes <= 0) {                /* fewer bytes than a frame header: the end */

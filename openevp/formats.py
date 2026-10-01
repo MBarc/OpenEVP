@@ -63,6 +63,7 @@ codec, not per recorder model. Tests add their own formats with
 register()/unregister().
 """
 import io
+import os
 import re
 import struct
 import wave
@@ -367,13 +368,16 @@ def _mp3_translated(call):
 
 
 def _mp3_seconds(path):
-    """An MP3's length counted from its frames' headers (nothing is decoded), or None."""
+    """An MP3's length from its headers only (openevp.decoders.mp3.estimate: a
+    Xing/VBRI frame count, else the first frame's bitrate over the file's size),
+    reading a few KB, never the audio; None when unknown. Listing a library
+    calls this; the exact length comes from the indexer's decode."""
     try:
         with open(path, "rb") as f:
-            data = f.read(_mp3dec.MAX_BYTES + 1)
-        return round(_mp3dec.seconds(data)[2], 1)
-    except (OSError, ValueError, RuntimeError):
+            got = _mp3dec.estimate(f, os.fstat(f.fileno()).st_size)
+    except (OSError, ValueError):
         return None
+    return round(got[2], 1) if got else None
 
 
 MP3_DECODER = _Mp3()

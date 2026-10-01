@@ -187,6 +187,33 @@ class DamagedTests(unittest.TestCase):
         with self.assertRaises(mp3dec.Cancelled):
             mp3dec.to_wav(vector("tone-8k-mono.mp3"), should_stop=lambda: True)
 
+    def test_a_long_stretch_of_junk_is_cancellable(self):
+        """The core goes through at most SCAN_BUDGET bytes a call, junk or not: should_stop is
+        polled all the way through a long stretch with no frames."""
+        rng = np.random.default_rng(3)
+        junk = rng.integers(0, 256, 6 << 20, dtype=np.uint8).tobytes()          # 6 MB without a frame
+        data = vector("tone-8k-mono.mp3") + junk + vector("tone-8k-mono.mp3")
+        polls = []
+
+        def count():
+            polls.append(1)
+            return False
+        frames = wav_params(mp3dec.to_wav(data, should_stop=count))[3]
+        self.assertGreaterEqual(frames, 9216)
+        self.assertGreaterEqual(len(polls), (6 << 20) // _core.SCAN_BUDGET)
+        polls.clear()
+
+        def stop_in_the_junk():
+            polls.append(1)
+            return len(polls) > 3
+        with self.assertRaises(mp3dec.Cancelled):
+            mp3dec.to_wav(data, should_stop=stop_in_the_junk)
+        self.assertEqual(len(polls), 4)
+        frames_only = junk + vector("tone-8k-mono.mp3")                          # junk first: the same
+        polls.clear()
+        self.assertGreater(wav_params(mp3dec.to_wav(frames_only, should_stop=count))[3], 0)
+        self.assertGreaterEqual(len(polls), (6 << 20) // _core.SCAN_BUDGET)
+
 
 class SniffTests(unittest.TestCase):
     """sniff(): from the first SNIFF_BYTES only; no decoder needed."""
@@ -197,6 +224,29 @@ class SniffTests(unittest.TestCase):
             self.assertTrue(mp3dec.sniff(vector(name)[:mp3dec.SNIFF_BYTES]), name)
         self.assertTrue(mp3dec.sniff(mp3.id3("EVP A at 0:01.0") + b"anything"))      # an ID3v2 tag
 
+    def test_junk_in_front_and_files_cut_mid_frame(self):
+        data = vector("tone-44k-stereo.mp3")
+        size = mp3dec.frame_header(data)[5]
+        for name, d in (("300 zero bytes in front", bytes(300) + data),
+                        ("text in front", b"junk " * 100 + data),
+                        ("cut in its second frame", data[:size + 100]),
+                        ("cut in its third frame", data[:2 * size + 7]),
+                        ("cut mid-frame later on", data[:len(data) // 2 + 13])):
+            self.assertTrue(mp3dec.sniff(d[:mp3dec.SNIFF_BYTES]), name)
+        self.assertEqual(mp3dec.first_frame(bytes(300) + data), 300)
+        self.assertFalse(mp3dec.sniff(data[:size + 2]))                          # one frame, no second header
+        self.assertFalse(mp3dec.sniff((bytes(4000) + data)[:mp3dec.SNIFF_BYTES]))   # no second frame in the first 4 KB
+
+    @release_gate.require(mp3dec.available(), NO_CORE)
+    def test_junk_in_front_and_cut_files_decode(self):
+        data = vector("tone-44k-stereo.mp3")
+        whole = mp3dec.to_wav(data)
+        self.assertEqual(mp3dec.to_wav(bytes(300) + data), whole)               # the same samples
+        size = mp3dec.frame_header(data)[5]
+        for cut in (size + 100, len(data) // 2 + 13):
+            frames = wav_params(mp3dec.to_wav(data[:cut]))[3]
+            self.assertTrue(0 < frames < wav_params(whole)[3], cut)
+
     def test_other_files(self):
         wav = io.BytesIO()
         with wave.open(wav, "wb") as w:
@@ -206,9 +256,12 @@ class SniffTests(unittest.TestCase):
             w.writeframes(bytes(1000))
         video = vector("video.mpeg")
         self.assertEqual(video[:4], b"\x00\x00\x01\xba")                           # an MPEG-PS pack header
+        frames = vector("tone-8k-mono.mp3")
+        ts = b"".join(b"\x47" + bytes(187) for _ in range(3)) + frames      # MPEG-TS packets
         for name, data in (("MPEG-PS video", video), ("text", b"hello, this is text\n" * 50), ("empty", b""),
                            ("WAV", wav.getvalue()), ("zeros", bytes(4096)), ("one sync", b"\xff\xfb\x90\x44" + bytes(100)),
-                           ("junk then frames", b"junk" + vector("tone-8k-mono.mp3"))):
+                           ("a WAV holding MPEG audio", b"RIFF\0\0\0\0WAVEfmt " + frames),
+                           ("MP4", b"\0\0\0\x20ftypM4A " + frames), ("MPEG-TS", ts)):
             self.assertFalse(mp3dec.sniff(data[:mp3dec.SNIFF_BYTES]), name)
 
     def test_formats(self):
@@ -254,7 +307,52 @@ class FormatTests(unittest.TestCase):
                 f.write(vector("video.mpeg"))
             self.assertFalse(formats.MP3.is_format(path))
             self.assertIsNone(formats.MP3.seconds(path))
+            # From the headers only: exact for CBR and for a Xing frame count.
+            for name, want in (("tone-44k-stereo.mp3", 46080 / 44100), ("vbr-xing-22k.mp3", 23616 / 22050),
+                               ("tone-32k-stereo.mp2", 32256 / 32000)):
+                with open(path, "wb") as f:
+                    f.write(mp3.id3("EVP A at 0:01.0", "x" * 6000) + bytes(300) + vector(name))
+                self.assertEqual(formats.MP3.seconds(path), round(want, 1), name)
+                with open(path, "rb") as f:
+                    self.assertAlmostEqual(mp3dec.estimate(f, os.path.getsize(path))[2], want, delta=0.002)
             self.assertFalse(formats.MP3.is_format(os.path.join(tmp, "missing.mp3")))
+
+    def test_seconds_reads_only_the_headers(self):
+        """A long MP3's length in a listing costs a few KB of reading, never the audio."""
+        import builtins
+        import tempfile
+        data = vector("tone-44k-stereo.mp3") * 200                                # ~3.3 MB
+        real_open = builtins.open
+        read = []
+
+        class Counting:
+            def __init__(self, f):
+                self.f = f
+
+            def read(self, n=-1):
+                got = self.f.read(n)
+                read.append(len(got))
+                return got
+
+            def __getattr__(self, name):
+                return getattr(self.f, name)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                self.f.close()
+
+        def counting_open(*a, **k):
+            return Counting(real_open(*a, **k))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "long.mp3")
+            with open(path, "wb") as f:
+                f.write(data)
+            with mock.patch.object(formats, "open", counting_open, create=True):
+                self.assertAlmostEqual(formats.MP3.seconds(path), 200 * 1.0449, delta=0.2)
+                self.assertTrue(formats.MP3.is_format(path))
+        self.assertLessEqual(sum(read), 3 * mp3dec.SNIFF_BYTES, read)
 
 
 class UnavailableTests(unittest.TestCase):
