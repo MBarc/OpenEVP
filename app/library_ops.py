@@ -36,9 +36,12 @@ BACKUP_UNCHECKED = ("The backup could not be checked before a library folder was
                     "(it may have been in it); back it up again.")
 ROOT_CHANGED = "The library folder changed. Refresh and try again."
 CLIPS = "Clips"             # the subfolder EVP clips go into
-CLIPS_MARKER = ".openevp-clips"   # in a Clips folder OpenEVP created: the library leaves that folder out
-CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library leaves it out while this "
-                     b"file is here; delete this file to list the folder again.\r\n")
+CLIPS_MARKER = ".openevp-clips"   # in a Clips folder OpenEVP created: its files are clips, not recordings
+CLIPS_MARKER_TEXT = (b"OpenEVP made this folder for EVP clips. The EVP Library lists these clips but never "
+                     b"counts them as EVPs while this file is here; delete this file to treat them as "
+                     b"recordings.\r\n")
+CLIPS_ONLY = "A Clips folder is for EVP clips only. Move recordings to another folder."
+CLIPS_AGAIN = "That is an EVP clip (or a folder of them); clips are not cut from clips."
 FS_WAIT = 10                # seconds a folder operation waits for the indexer to pause
 RENAME_TRIES = 4            # os.rename attempts when a file is briefly in use (antivirus, indexing)
 RENAME_PAUSE = 0.33         # seconds between them (about 1 s in all)
@@ -53,11 +56,41 @@ def _plain(e):
 
 
 def _clips_folder(path):
-    """Is a folder a Clips folder OpenEVP created (it holds CLIPS_MARKER)? Clips are
-    output for sharing: the library never lists, indexes or counts such a folder,
-    nor imports its markers. A folder the user named Clips is an ordinary folder."""
+    """Is a folder a Clips folder OpenEVP created (it holds CLIPS_MARKER)? Its files
+    (and those of every folder inside it) are clips: the library lists them and
+    they play, but they never count as EVPs, their markers are never imported and
+    Export clips never cuts them again. A folder the user named Clips is an
+    ordinary folder."""
     try:
         return os.path.isfile(os.path.join(path, CLIPS_MARKER))
+    except (OSError, ValueError):
+        return False
+
+
+def _under_clips(path, root=None):
+    """Is a folder a Clips folder OpenEVP made, or inside one? Looks at path and
+    its parents up to the library folder root (never root itself, as the listing
+    never counts the library folder as a Clips folder) or the drive's root."""
+    try:
+        path = os.path.abspath(path)
+        stop = os.path.normcase(os.path.abspath(root)) if root else None
+    except (OSError, ValueError):
+        return False
+    while True:
+        if stop is not None and os.path.normcase(path) == stop:
+            return False
+        if _clips_folder(path):
+            return True
+        parent = os.path.dirname(path)
+        if parent == path:
+            return False
+        path = parent
+
+
+def _is_clip(path, root=None):
+    """Is a file a clip (in a Clips folder OpenEVP made, at any depth)?"""
+    try:
+        return _under_clips(os.path.dirname(os.path.abspath(path)), root)
     except (OSError, ValueError):
         return False
 
@@ -298,12 +331,14 @@ class LibraryOps:
 
     def _walk(self, path):
         """A fresh look at everything in a folder (never through a symlink or
-        junction): counts, and the cached fingerprints of its recordings."""
+        junction): counts, and the cached fingerprints of its recordings. The
+        files of a Clips folder OpenEVP made (path itself, one inside it, or one it
+        is in) count as clips: never recordings, never read or fingerprinted."""
         info = {"recordings": 0, "with_evps": 0, "unindexed": 0, "other_files": 0, "subfolders": 0,
-                "bytes": 0, "fps": set(), "pending": [], "unknown": 0}
-        stack = [path]
+                "bytes": 0, "fps": set(), "pending": [], "unknown": 0, "clips": 0}
+        stack = [(path, _under_clips(path, self._library_path()))]
         while stack:
-            where = stack.pop()
+            where, in_clips = stack.pop()
             try:
                 with os.scandir(where) as it:
                     entries = list(it)
@@ -318,12 +353,7 @@ class LibraryOps:
                         continue
                     if e.is_dir():
                         info["subfolders"] += 1
-                        if _clips_folder(e.path):       # goes along, but its clips are not recordings
-                            files, dirs = self._count_files(e.path)
-                            info["other_files"] += files
-                            info["subfolders"] += dirs
-                        else:
-                            stack.append(e.path)
+                        stack.append((e.path, in_clips or _clips_folder(e.path)))   # clips go along
                         continue
                     st = e.stat()
                 except OSError:
@@ -333,6 +363,9 @@ class LibraryOps:
                 fmt = _kind_format(kind) if kind else None
                 if e.name.startswith(".") or fmt is None:
                     info["other_files"] += 1
+                    continue
+                if in_clips:                    # a clip: not a recording, never read
+                    info["clips"] += 1
                     continue
                 info["recordings"] += 1
                 if fmt.decoder is None:         # never fingerprinted, so never a marked recording's backup
@@ -350,29 +383,6 @@ class LibraryOps:
                     if r is not None and r["marks"]:
                         info["with_evps"] += 1
         return info
-
-    @staticmethod
-    def _count_files(path):
-        """(files, subfolders) in a folder, counted all the way down (links not followed)."""
-        n, dirs, stack = 0, 0, [path]
-        while stack:
-            try:
-                with os.scandir(stack.pop()) as it:
-                    entries = list(it)
-            except OSError:
-                continue
-            for e in entries:
-                try:
-                    if folders.entry_is_link(e):
-                        n += 1
-                    elif e.is_dir():
-                        dirs += 1
-                        stack.append(e.path)
-                    else:
-                        n += 1
-                except OSError:
-                    continue
-        return n, dirs
 
     def _backups_in(self, path, walked, fingerprint=False):
         """{fp: (its backup record, its backup files found in path, the detail to
@@ -570,7 +580,8 @@ class LibraryOps:
 
     def folder_info(self, folder_id):
         """What deleting a folder would put in the Recycle Bin, counted fresh from
-        disk: {"ok", "name", "recordings", "with_evps", "evps_at_least" (some
+        disk: {"ok", "name", "recordings", "with_evps", "clips" (files in Clips folders
+        OpenEVP made: never counted as recordings), "evps_at_least" (some
         recordings are not checked yet, so there may be more), "backups" (marked
         recorder recordings whose backup files are in it), "other_files",
         "subfolders", "bytes", "save_folder" (it is, or holds, the Save-to folder:
@@ -586,7 +597,7 @@ class LibraryOps:
             info = self._walk(path)
             backups = len(self._backups_in(path, info))
             return {"ok": True, "name": os.path.basename(os.path.normpath(path)),
-                    "recordings": info["recordings"], "with_evps": info["with_evps"],
+                    "recordings": info["recordings"], "with_evps": info["with_evps"], "clips": info["clips"],
                     "evps_at_least": info["unindexed"] > 0, "backups": backups,
                     "other_files": info["other_files"], "subfolders": info["subfolders"], "bytes": info["bytes"],
                     "save_folder": bool(self._dest) and folders.under(self._dest, path)}
@@ -702,6 +713,10 @@ class LibraryOps:
             refused = self._usable(root, target, allow_root=True, pins=pins)
             if refused:
                 return refused
+            # A Clips folder holds clips only: a recording moved in would stop counting
+            # (and its markers would never be imported). Clips may move between them.
+            if _under_clips(target, root) and not all(_is_clip(p, root) for p in paths.values()):
+                return _fail(CLIPS_ONLY)
             for path in paths.values():             # the folders the files come from
                 try:
                     pins.chain(root, os.path.dirname(os.path.abspath(path)))

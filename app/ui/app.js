@@ -411,12 +411,19 @@ function renderMain() {
 // The backend lists files and fingerprints new ones in the background ("library-*" events,
 // tagged with the scan_id of the listing they belong to). Copies of one recording (same
 // fingerprint: a .dvf and its WAV, or a WAV saved twice) show as one row.
+// Clips (the files in a Clips folder OpenEVP made, f.clip) are listed in the folder view and
+// play, but are never EVPs: no filter but "All" shows them, and no count or chip includes them,
+// even when someone marked one in the player. The All recordings view leaves them out.
 const LIB_FILTERS = {
   all: () => true,
-  evp: (g) => g.marks.A + g.marks.B + g.marks.C > 0,
-  A: (g) => g.marks.A > 0, B: (g) => g.marks.B > 0, C: (g) => g.marks.C > 0,
-  unreviewed: (g) => !g.reviewed,
+  evp: (g) => !g.clip && g.marks.A + g.marks.B + g.marks.C > 0,
+  A: (g) => !g.clip && g.marks.A > 0, B: (g) => !g.clip && g.marks.B > 0, C: (g) => !g.clip && g.marks.C > 0,
+  unreviewed: (g) => !g.clip && !g.reviewed,
 };
+
+// The files the library shows: in the All recordings view, recordings only (clips are copies
+// of parts of recordings).
+function libraryFiles() { return S.lib.flat ? S.lib.files.filter((f) => !f.clip) : S.lib.files; }
 
 function libFileKey(f) { return f.fp || `id:${f.id}`; }       // un-indexed files are rows of their own
 
@@ -523,7 +530,7 @@ function setFileFp(f, fp) {
 // key = the row; recKey = the recording (its marks, expanded state).
 function libraryGroups() {
   const L = S.lib, groups = new Map(), order = new Map();
-  L.files.forEach((f, i) => {
+  libraryFiles().forEach((f, i) => {
     order.set(f, i);
     const rk = libFileKey(f), k = L.flat ? rk : `${f.folder_id}|${rk}`;
     if (!groups.has(k)) groups.set(k, { key: k, recKey: rk, folderId: f.folder_id, files: [] });
@@ -542,6 +549,7 @@ function libraryGroups() {
     g.notes = sum.notes;
     g.seconds = g.files.map((f) => f.seconds).find((s) => s != null);
     g.error = main.error;
+    g.clip = !!main.clip;                         // a folder's files are all clips or none
     g.order = order.get(main);
     out.push(g);
   }
@@ -570,7 +578,8 @@ function renderLibrary() {
   L.renderQueued = false;
   if (S.drag) { L.renderHeld = true; return; }   // rows stay put under the pointer; redrawn on dragend
   L.groups = libraryGroups();
-  $("library-count").textContent = L.listed && L.files.length ? `(${new Set(L.files.map(libFileKey)).size})` : "";
+  const recs = new Set(L.files.filter((f) => !f.clip).map(libFileKey));
+  $("library-count").textContent = L.listed && recs.size ? `(${recs.size})` : "";
   $("library-entry").title = L.folder || "";
   if (S.view !== "library") return;
   renderLibraryBar();
@@ -620,7 +629,7 @@ function renderLibrary() {
   if (!L.listed) empty.textContent = "Loading…";
   else if (L.problem) empty.textContent = L.problem;
   else if (!L.exists) empty.textContent = `${L.folder} does not exist yet. Export recordings from a recorder, or choose another library folder above.`;
-  else if (!L.files.length && (L.flat || L.folders.length <= 1)) empty.textContent = `No recordings in ${L.folder} yet.`;
+  else if (!libraryFiles().length && (L.flat || L.folders.length <= 1)) empty.textContent = `No recordings in ${L.folder} yet.`;
   else if (L.flat || libraryFiltering()) empty.textContent = "No recordings match.";
   else empty.textContent = "This folder is empty. Drag recordings here or use Move to…";
 }
@@ -704,7 +713,7 @@ function libraryFolderRows() {
   for (const d of L.folders) {
     if (d.parent !== L.folderId) continue;
     const named = !!q && L.filter === "all" && d.name.toLowerCase().includes(q);
-    rows.set(d.id, { ...d, recs: new Map(), visible: !libraryFiltering() || named });
+    rows.set(d.id, { ...d, recs: new Map(), clipKeys: new Set(), visible: !libraryFiltering() || named });
   }
   if (!rows.size) return [];
   // folder id -> [the subfolder of the current folder it is in (or null), the names from there down]
@@ -725,11 +734,13 @@ function libraryFolderRows() {
     const [t, names] = topOf(g.folderId);
     if (t == null) continue;
     const row = rows.get(t);
-    row.recs.set(g.recKey, g.marks);           // a recording once, with its marks (un-indexed ones too)
+    if (g.clip) row.clipKeys.add(g.recKey);    // clips: counted apart, never EVPs
+    else row.recs.set(g.recKey, g.marks);      // a recording once, with its marks (un-indexed ones too)
     if (!row.visible && libraryMatches(g, names)) row.visible = true;
   }
   for (const row of rows.values()) {
     row.count = row.recs.size;
+    row.clipCount = row.clipKeys.size;
     row.marks = { A: 0, B: 0, C: 0 };
     for (const m of row.recs.values()) for (const c of ["A", "B", "C"]) row.marks[c] += (m && m[c]) || 0;
   }
@@ -748,23 +759,34 @@ function libraryFolderRow(d) {
     tr.onclick = () => { L.selFolder = tr.folderId; tr.focus({ preventScroll: true }); scheduleLibraryRender(); };
     tr.onfocus = () => { if (L.selFolder !== tr.folderId) { L.selFolder = tr.folderId; scheduleLibraryRender(); } };
     tr.ondblclick = () => openLibraryFolder(tr.folderId);
-    tr.title = "Double-click to open";
     L.folderEls.set(d.id, tr);
   }
   tr.folderId = d.id;
   const selected = L.selFolder === d.id;
-  const sig = JSON.stringify([d.name, d.count, d.marks, selected, !!S.caps.marks]);
+  const sig = JSON.stringify([d.name, d.count, d.clipCount, d.marks, !!d.clips, selected, !!S.caps.marks]);
   if (tr.sig === sig) return tr;
   tr.sig = sig;
   tr.classList.toggle("selected", selected);
+  tr.classList.toggle("lib-clips", !!d.clips);
+  tr.title = d.clips ? "EVP clips saved by Export clips (not counted as EVPs). Double-click to open"
+                     : "Double-click to open";
   const [, cName, , , , cEvp] = tr.cells;
   cName.textContent = "";
   const name = document.createElement("div");
   name.className = "lib-folder-name";
-  name.textContent = `📁 ${d.name}`;
+  name.textContent = `${d.clips ? "🎞️" : "📁"} ${d.name}`;
+  if (d.clips) {
+    const tag = document.createElement("span");
+    tag.className = "badge badge-clips";
+    tag.textContent = "Clips";
+    name.append(" ", tag);
+  }
   const count = document.createElement("div");
   count.className = "lib-also";
-  count.textContent = d.count ? plural(d.count, "recording") : "No recordings";
+  const parts = [];
+  if (d.count) parts.push(plural(d.count, "recording"));
+  if (d.clipCount) parts.push(plural(d.clipCount, "clip"));
+  count.textContent = parts.length ? parts.join(", ") : d.clips ? "No clips" : "No recordings";
   cName.append(name, count);
   cEvp.textContent = "";
   if (S.caps.marks) {
@@ -923,6 +945,12 @@ function savingAudio() { return !!(S.exportingMarked || S.savingClips || S.clips
 function canNewFolder() { return libraryToolsReady() && !S.lib.flat && S.lib.folderById.has(S.lib.folderId); }
 function canChangeFolder(id) { return libraryToolsReady() && S.lib.folderById.has(id) && id !== "root"; }   // rename, delete
 function canMove(ids) { return libraryToolsReady() && ids.length > 0 && S.lib.folders.length >= 2; }
+// A Clips folder OpenEVP made (or one inside it) takes clips only: a recording moved there would
+// stop counting. The backend refuses it too.
+function clipsOnly(folderId, ids) {
+  const d = S.lib.folderById.get(folderId);
+  return !!(d && d.in_clips) && !ids.every((id) => { const f = S.lib.byId.get(id); return f && f.clip; });
+}
 function canRenameRecording(g) { return libraryToolsReady() && groupPickIds(g).length > 0; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
@@ -983,11 +1011,12 @@ function libraryRow(g) {
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
   const sig = JSON.stringify([g.files.map((f) => [f.id, f.name, f.investigation, f.type, f.unplayable]), g.seconds, g.marks, g.reviewed,
-                              g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable]);
+                              g.error, g.fp, L.indexing, expanded, libraryPlaying(g), !!playable, g.clip]);
   if (tr.sig === sig) return tr;
   tr.sig = sig;
   tr.classList.toggle("playing", libraryPlaying(g));
   tr.classList.toggle("unplayable", !playable);
+  tr.classList.toggle("lib-clip", g.clip);
   tr.title = playable ? "" : whyUnplayable(g);
   const [cToggle, cName, cInv, cType, cLen, cEvp, cRev] = tr.cells;
   const toggle = cToggle.lastChild;
@@ -1027,6 +1056,13 @@ function libraryRow(g) {
     warn.textContent = "⚠";
     cEvp.title = g.error;
     cEvp.appendChild(warn);
+  } else if (g.clip) {                         // an EVP already: never counted as one
+    const tag = document.createElement("span");
+    tag.className = "badge badge-clips";
+    tag.textContent = "Clip";
+    cEvp.title = total ? `An EVP clip (${plural(total, "mark")} of its own, not counted as EVPs)`
+                       : "An EVP clip (not counted as an EVP)";
+    cEvp.appendChild(tag);
   } else if (!g.fp) {
     cEvp.textContent = L.indexing ? "…" : "—";
     cEvp.title = L.indexing ? "Not checked yet" : "";
@@ -1496,7 +1532,8 @@ async function deleteFolderDialog() {
   if (info.evps_at_least && !info.with_evps) evps = "not all checked for EVPs yet";
   else if (info.with_evps) evps = `${info.evps_at_least ? "at least " : ""}${info.with_evps} with EVPs`;
   else evps = "none with EVPs";
-  item(info.recordings ? `${plural(info.recordings, "recording")} — ${evps}` : "No recordings");
+  if (info.recordings || !info.clips) item(info.recordings ? `${plural(info.recordings, "recording")} — ${evps}` : "No recordings");
+  if (info.clips) item(`${plural(info.clips, "EVP clip")} (made by Export clips)`);
   if (info.backups) item(plural(info.backups, "recorder backup"));
   if (info.other_files) item(`${plural(info.other_files, "other file")} such as photos or video`);
   if (info.subfolders) item(plural(info.subfolders, "folder"));
@@ -1598,8 +1635,10 @@ function moveDialog(ids = [...S.lib.selected]) {
     b.textContent = `📁 ${d.name || "Library"}`;
     b.folderId = d.id;
     // The folder every picked file is in already (the folder shown, in the folder view).
-    b.disabled = ids.every((id) => L.byId.get(id).folder_id === d.id);
-    if (b.disabled) b.title = "They are in this folder already";
+    const here = ids.every((id) => L.byId.get(id).folder_id === d.id);
+    b.disabled = here || clipsOnly(d.id, ids);
+    if (here) b.title = "They are in this folder already";
+    else if (b.disabled) b.title = "A Clips folder is for EVP clips only";
     b.onclick = () => {
       target = d.id;
       for (const x of list.children) x.setAttribute("aria-selected", String(x === b));
@@ -1673,6 +1712,7 @@ function dropTarget(e) {
   if (!S.drag || L.op || L.flat || !e.target.closest) return null;
   const el = e.target.closest("tr.lib-folder, #library-crumbs button.crumb");
   if (!el || !L.folderById.has(el.folderId) || el.folderId === L.folderId) return null;
+  if (clipsOnly(el.folderId, S.drag.ids)) return null;   // a Clips folder takes clips only
   return el;
 }
 
@@ -1750,11 +1790,13 @@ function libraryMenuItems(target) {
     const id = folderRow.folderId;
     selectFolderRow(id);                       // the row the menu is for, as a click would
     const why = canChangeFolder(id) ? "" : L.op ? "Wait for the operation to finish" : "";
+    const inClips = !!L.folderById.get(id).in_clips;
     return [
       { label: "Open", run: () => openLibraryFolder(id) },
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
-      { label: "Export clips", disabled: !canExportClips(), title: clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
+      { label: "Export clips", disabled: !canExportClips() || inClips,
+        title: inClips ? "These are clips already" : clipsTip(`Save every EVP in this folder (and its folders) as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ folder: id }, L.folderById.get(id).name || "the library") },
     ];
   }
@@ -1774,7 +1816,8 @@ function libraryMenuItems(target) {
       { label: n > 1 ? `Move ${plural(n, "recording")} to…` : "Move to…", disabled: !canMove(ids), run: () => moveDialog(ids) },
       // Export clips is for the row clicked (its files: the copies of one recording), ticked or not.
       { label: "Export clips", disabled: !canExportClips() || !groupMarked(g),
-        title: clipsTip(groupMarked(g) ? `Save each EVP of this recording as its own ${clipLabel()} clip` : "No EVPs marked in this recording"),
+        title: clipsTip(g.clip ? "This is a clip already" : groupMarked(g) ? `Save each EVP of this recording as its own ${clipLabel()} clip`
+                                                                             : "No EVPs marked in this recording"),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
     ];
   }
@@ -1917,6 +1960,7 @@ function updateExport() {
 
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
+  if (d && d.ok === false) { showError(d); return; }   // refused (a folder inside a Clips folder)
   if (d) { setDest(d); loadLibrary(); }   // the library may be the save folder
 };
 
@@ -2535,7 +2579,7 @@ function clipsTip(tip) {
   if (S.lib.op || S.exporting) return "Wait for the operation to finish";
   return tip;
 }
-function groupMarked(g) { return g.marks.A + g.marks.B + g.marks.C > 0; }
+function groupMarked(g) { return !g.clip && g.marks.A + g.marks.B + g.marks.C > 0; }
 
 // A folder (and its folders) or one recording's files, as a background job: progress, Cancel.
 async function exportLibraryClips(what, name) {

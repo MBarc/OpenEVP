@@ -178,9 +178,9 @@ class LibraryTests(unittest.TestCase):
                                ("Old Mill", "y.wav", "wav"), ("Old Mill", "x.dvf", "dvf")])
         for f in r["files"]:
             self.assertEqual(set(f), {"id", "name", "investigation", "type", "seconds", "modified", "fp",
-                                      "marks", "reviewed", "notes", "error", "unplayable", "folder_id"})
-            self.assertEqual((f["fp"], f["marks"], f["reviewed"], f["notes"], f["error"]),
-                             (None, {"A": 0, "B": 0, "C": 0}, False, "", None))
+                                      "marks", "reviewed", "notes", "error", "unplayable", "folder_id", "clip"})
+            self.assertEqual((f["fp"], f["marks"], f["reviewed"], f["notes"], f["error"], f["clip"]),
+                             (None, {"A": 0, "B": 0, "C": 0}, False, "", None, False))
             self.assertRegex(f["id"], "^[0-9a-f]{16}$")
             self.assertNotIn(self.tmp, repr(f))                              # the page never sees paths
 
@@ -227,7 +227,8 @@ class LibraryTests(unittest.TestCase):
         os.makedirs(os.path.join(self.lib, "Empty"))
         os.makedirs(os.path.join(self.lib, ".hidden"))
         r = self.new_api(store=None).list_library()
-        self.assertEqual(r["folders"][0], {"id": "root", "parent": None, "name": "OpenEVP", "rel": []})
+        self.assertEqual(r["folders"][0], {"id": "root", "parent": None, "name": "OpenEVP", "rel": [],
+                                             "in_clips": False, "clips": False})
         order = [tuple(f["rel"]) for f in r["folders"][1:]]
         self.assertEqual(order, [("a",), ("a", "b"), ("a", "b", "c"), ("a", "b", "c", "d"),
                                  ("Empty",), ("Old Mill",), ("Old Mill", "A")])
@@ -248,7 +249,8 @@ class LibraryTests(unittest.TestCase):
         self.assertEqual(by_rel[("Old Mill", "A")]["name"], "A")
         for f in r["folders"]:
             self.assertNotIn("depth", f)
-            self.assertEqual(set(f), {"id", "parent", "name", "rel"})
+            self.assertEqual(set(f), {"id", "parent", "name", "rel", "clips", "in_clips"})
+            self.assertEqual((f["clips"], f["in_clips"]), (False, False))
 
     def test_folder_ids_are_stable_across_scans(self):
         self.populate()

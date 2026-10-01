@@ -31,6 +31,8 @@ tr.unplayable td { color: var(--muted); }
 .badge { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px; }
 .badge-dvf { background: var(--line); color: var(--text); }
 .badge-wav { background: var(--accent-soft); color: var(--accent); }
+/* EVP clips (a Clips folder OpenEVP made, and its files): listed, never counted as EVPs */
+.badge-clips { background: var(--warn-bg); color: var(--warn); font-weight: 600; }
 table[hidden] { display: none; }
 .device { margin-bottom: 10px; }
 .device-name { font-weight: 600; padding: 4px 6px; border-radius: 4px; cursor: pointer; }

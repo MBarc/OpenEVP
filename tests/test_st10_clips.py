@@ -110,6 +110,22 @@ class St10LibraryClipsTests(ClipCheck, unittest.TestCase):
         e = api.export_clips(r["rec"])
         self.assertEqual((e["ok"], e["saved"], e["already"]), (True, 0, 2))           # the same bytes: already there
         self.assertFalse(api._busy.locked())
+        # The clips are listed (in OpenEVP's Clips folder) and play, but their markers are
+        # never imported, and a folder job never cuts clips from them.
+        self.index(api)
+        rows = self.by_name(api.list_library())
+        clip_names = sorted(n for n, f in rows.items() if f["clip"])
+        self.assertEqual(clip_names, ["001_A_001_Unknown_EVP-A_00m00.6s_st.wav", "001_A_001_Unknown_EVP-A_00m01.6s.wav"])
+        self.assertFalse(rows["001_A_001_Unknown.dvf"]["clip"])
+        for name in clip_names:
+            played = api.play_library(rows[name]["id"])
+            self.assertEqual((played["ok"], played["imported"]), (True, 0), name)
+            self.assertIsNone(self.store.recording(wavinfo.wav_fingerprint(io.BytesIO(self.clip_of("Old Mill", name)))))
+            self.assertEqual(rows[name]["marks"], {"A": 0, "B": 0, "C": 0})
+        event, p = self.run_job(lambda: api.export_clips_folder("root", 2))
+        self.assertEqual((event, p["saved"], p["already"], p["recordings"]), ("clips-done", 0, 2, 1))
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Old Mill", backend.CLIPS))),
+                         [library_ops.CLIPS_MARKER] + clip_names)
 
     @release_gate.require(HAVE_SP, NO_SP_TABLES)
     def test_lpec_sp_recording_gives_16k_mono_clips(self):
