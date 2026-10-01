@@ -17,7 +17,8 @@ Automated (exits non-zero if any fails):
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
      the favicon, vendor/...), with nothing else in the bundled UI folder;
   4. the built app starts (OpenEVP.exe --smoke): both decoders load with their
-     tables and fast C cores, an MP3 clip is encoded (lameenc), the backend and the WebView2 page start in a
+     tables and fast C cores, an MP3 clip is encoded (lameenc) and the page
+     plays and decodes it (MP3 clips play in the library), the backend and the WebView2 page start in a
      hidden window, the page loads its scripts and styles and can fetch every
      bundled UI file, and the JS bridge answers capabilities().
 
@@ -404,6 +405,11 @@ def check_gui():
     print(f"   MP3 encoding: {'available' if m.get('available') else 'NOT available'}"
           f"{' (lameenc ' + m['version'] + ')' if m.get('version') else ''}"
           f"{', test clip ' + str(m['bytes']) + ' bytes' if m.get('bytes') else ''}")
+    pm = m.get("page")
+    if pm:
+        print(f"   MP3 clip in the page: {'plays' if pm.get('ok') else 'FAILS'} (audio element "
+              f"{pm.get('can_play')!r}; WebAudio {pm.get('rate')} Hz, "
+              f"{pm.get('channels')} ch, {pm.get('duration')} s)")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
           f"version {report.get('capabilities', {}).get('version')!r}, "
           f"wav {report.get('capabilities', {}).get('wav')!r}")
