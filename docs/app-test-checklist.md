@@ -132,3 +132,26 @@ Playback speed:
     speed is still 0.5× but **Exports at 0.5×** is unticked until you move the
     speed to 1× and back. Time Export WAV with marks at 0.5× (Keep pitch)
     on a 30-minute ICD-ST25 recording and a few-minute ICD-ST10 stereo one.
+
+Enhance:
+
+29. Click **Enhance** (under Keep pitch): a panel opens above it (Esc or a click
+    elsewhere closes it). Play a recording with speech and drag **Boost** to
+    +12 dB: it gets louder at once, without a restart or a click of the cursor,
+    and loud parts do not crackle (the limiter). The button turns solid
+    ("Enhance: on") and an **Enhanced** tag shows above the waveform.
+    One at a time, listen to each: **Leveler** Light / Medium / Strong (quiet
+    parts come up), **Voice filter** (thinner, telephone-like), **Cut rumble**
+    (handling thumps and wind go), **Hum remover** 60 Hz and 50 Hz on a recording
+    with mains hum (the hum goes, the voice stays), **Cut hiss** on an ICD-ST10
+    recording (greyed out, with a reason, on an ICD-ST25 one). With each on, set
+    Speed to 0.5× and 2×, with and without Keep pitch: speed and pitch behave
+    as before; the cursor, a selection's loop and a mark's loop stay right.
+    **Reset**: everything off, the button plain, the tag gone.
+30. Turn Boost on: **Exports enhanced** appears, ticked. Export WAV with marks:
+    `<name>_enhanced.wav`, which sounds like what you heard; again: "already
+    saved". With Speed 0.5×: `<name>_0.5x_enhanced.wav`. Export clips and Save
+    clip: `…_enhanced.mp3`. Untick it: plain names. The library's Export clips:
+    plain names. Close and start OpenEVP: the settings are still on (button solid,
+    tag shown), **Exports enhanced** unticked. A second OpenEVP window keeps its
+    own changes for that session only.

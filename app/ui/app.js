@@ -9,6 +9,9 @@ const $ = (id) => document.getElementById(id);
 const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: false }, zoomPx: 0, zoomMax: 400,
             speed: 1, keepPitch: true, speedSave: null, speedDirty: false,   // the player's speed (one of SPEEDS), Keep pitch
             exportAtSpeed: false,                         // "Exports at 0.5×": ticked when the user leaves 1× (this session)
+            // Enhance (see enhanceGraph): the settings, the Web Audio graph once one was needed, "Exports enhanced"
+            enh: { settings: null, ctx: null, source: null, nodes: [], topology: null, exportHeard: false,
+                   save: null, dirty: false, curve: null },
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -2028,12 +2031,17 @@ window.onBackendEvent = (event, p) => {
 
 function setupPlayer() {
   const css = getComputedStyle(document.body);
-  S.ws = WaveSurfer.create({ container: "#waveform", height: 80,
+  // Our own media element, asking for CORS: the audio comes from the audio server (another local
+  // port), and Web Audio (Enhance) only gets the samples of a cross-origin element that asked.
+  const media = document.createElement("audio");
+  media.crossOrigin = "anonymous";
+  media.preload = "auto";
+  S.ws = WaveSurfer.create({ container: "#waveform", height: 80, media,
                              waveColor: css.getPropertyValue("--muted").trim(),
                              progressColor: css.getPropertyValue("--accent").trim() });
   S.ws.on("ready", () => { $("play").disabled = false; applySpeed(); tick(); });
   S.ws.on("timeupdate", tick);
-  S.ws.on("play", () => { $("play").textContent = "❚❚"; });
+  S.ws.on("play", () => { $("play").textContent = "❚❚"; resumeAudio(); });
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
@@ -2041,6 +2049,7 @@ function setupPlayer() {
   $("height").oninput = () => S.ws.setOptions({ barHeight: Number($("height").value) });
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSpeed();
+  setupEnhance();
   setupSelection();                         // once: the plugin stays registered across loads
   setupMarks();
   $("open-wav").onclick = openWav;
@@ -2169,6 +2178,220 @@ function speedKeys(e) {
   e.preventDefault();
   if (e.key === "\\") setSpeed(1); else stepSpeed(e.key === "]" ? 1 : -1);
 }
+
+// ---- Enhance: Boost, Leveler, Voice filter, Cut rumble, Cut hiss, Hum remover (live, never on the file) ----
+// The media element is routed through a Web Audio graph built from the backend's spec
+// (capabilities().enhance_spec, openevp/enhance.py): MediaElementAudioSourceNode -> filters ->
+// compressor -> gain -> soft limiter -> destination. Speed and Keep pitch stay the media element's
+// own, so cursor, regions and loops work as before. The graph is made the first time anything is on
+// (a media element can be routed only once); with everything off the source goes straight to the
+// output. Exports "as heard" run the same chain in the backend (openevp.enhance) after the speed.
+const ENH_DEFAULT = { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" };
+const ENH_FIELDS = {
+  boost: (v) => typeof v === "number" && isFinite(v) && v >= 0 && v <= 24,
+  leveler: (v) => typeof v === "boolean", strength: (v) => ["light", "medium", "strong"].includes(v),
+  voice: (v) => typeof v === "boolean", rumble: (v) => typeof v === "boolean", hiss: (v) => typeof v === "boolean",
+  hum: (v) => ["off", "60", "50"].includes(v),
+};
+function normEnhance(v) {                       // each damaged or missing field: its default
+  const out = { ...ENH_DEFAULT };
+  if (v && typeof v === "object") for (const [k, ok] of Object.entries(ENH_FIELDS)) if (ok(v[k])) out[k] = v[k];
+  out.boost = Math.round(out.boost);
+  return out;
+}
+function enhRate() { return (S.current && S.current.rate) || 48000; }   // no recording: as if wide-band
+function hissAvailable(rate) { const sp = S.caps.enhance_spec; return !!sp && rate >= sp.hiss_min_rate; }
+
+// The stages for a recording at this rate, as openevp.enhance.graph() makes them (keep the two alike).
+function enhanceGraph(s, rate) {
+  const sp = S.caps.enhance_spec, out = [];
+  if (!sp) return out;
+  const nyq = rate / 2;
+  const filt = (type, f, q) => { if (f < 0.95 * nyq) out.push({ type, f, q }); };
+  if (s.rumble) filt("highpass", sp.rumble, sp.q);
+  if (s.voice) { filt("highpass", sp.voice[0], sp.q); filt("lowpass", sp.voice[1], sp.q); }
+  if (s.hiss && hissAvailable(rate)) filt("lowpass", sp.hiss, sp.q);
+  if (s.hum !== "off") {
+    const base = Number(s.hum);
+    for (let k = 1; k <= sp.hum_harmonics; k++) filt("notch", base * k, base * k / sp.hum_width);
+  }
+  if (s.leveler) out.push({ type: "compressor", preset: s.strength });
+  if (s.boost > 0) out.push({ type: "gain", db: s.boost });
+  if (s.leveler || s.boost > 0) out.push({ type: "limiter" });
+  return out;
+}
+function enhanceOn() { return !!S.enh.settings && enhanceGraph(S.enh.settings, enhRate()).length > 0; }
+
+function limitCurve() {                         // the soft limiter's WaveShaper curve (openevp.enhance.limit_curve)
+  if (S.enh.curve) return S.enh.curve;
+  const sp = S.caps.enhance_spec, n = sp.limit_points, R = sp.limit_range, k = sp.limit_knee;
+  const c = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const v = -R + 2 * R * i / (n - 1), a = Math.abs(v);
+    c[i] = Math.sign(v) * (a <= k ? a : k + (1 - k) * Math.tanh((a - k) / (1 - k)));
+  }
+  return (S.enh.curve = c);
+}
+
+function makeNodes(ctx, st) {
+  const sp = S.caps.enhance_spec;
+  if (st.type === "highpass" || st.type === "lowpass" || st.type === "notch") {
+    const b = ctx.createBiquadFilter();
+    b.type = st.type;
+    b.frequency.value = st.f;
+    // Web Audio takes a low- or high-pass Q in dB, a notch's as is.
+    b.Q.value = st.type === "notch" ? st.q : 20 * Math.log10(st.q);
+    return [b];
+  }
+  if (st.type === "compressor") {
+    const c = ctx.createDynamicsCompressor(), p = sp.leveler[st.preset];
+    c.threshold.value = p.threshold; c.knee.value = p.knee; c.ratio.value = p.ratio;
+    c.attack.value = p.attack; c.release.value = p.release;
+    return [c];
+  }
+  if (st.type === "gain") {
+    const g = ctx.createGain();
+    g.gain.value = Math.pow(10, st.db / 20);
+    return [g];
+  }
+  const pre = ctx.createGain(), shaper = ctx.createWaveShaper();   // the limiter: scaled into the curve's range
+  pre.gain.value = 1 / sp.limit_range;
+  shaper.curve = limitCurve();
+  return [pre, shaper];
+}
+
+// The graph follows the settings: rebuilt when its stages change (a filter on or off), else left
+// alone. Nothing on and no graph yet: nothing is made. Always live, while playing too.
+function applyEnhance() {
+  if (!S.ws || !S.enh.settings) return;
+  const stages = enhanceGraph(S.enh.settings, enhRate());
+  if (!S.enh.ctx && !stages.length) return;
+  if (!S.enh.ctx && !makeAudioGraph()) return;
+  const topology = JSON.stringify(stages);
+  if (topology === S.enh.topology) return;
+  const { ctx, source } = S.enh;
+  source.disconnect();
+  for (const n of S.enh.nodes) n.disconnect();
+  S.enh.nodes = stages.flatMap((st) => makeNodes(ctx, st));
+  let at = source;
+  for (const n of S.enh.nodes) { at.connect(n); at = n; }
+  at.connect(ctx.destination);
+  S.enh.topology = topology;
+}
+
+function makeAudioGraph() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const media = S.ws.getMediaElement && S.ws.getMediaElement();
+  if (!AC || !media) { banner("Enhance is not available here: this window has no Web Audio."); return false; }
+  try {
+    const ctx = new AC();
+    S.enh.source = ctx.createMediaElementSource(media);
+    S.enh.ctx = ctx;
+  } catch (e) {
+    banner(`Enhance is not available: ${(e && e.message) || e}`);
+    return false;
+  }
+  resumeAudio();
+  return true;
+}
+
+// A new AudioContext may start suspended (autoplay rules): resumed on play and on every change.
+function resumeAudio() {
+  const ctx = S.enh.ctx;
+  if (ctx && ctx.state === "suspended" && ctx.resume) ctx.resume().catch(() => {});
+}
+
+// "Exports enhanced": shown while anything is on, ticked only when the user turns enhancement on in
+// this session (never by remembered settings at startup), like "Exports at 0.5×".
+function exportHeard() {
+  const on = enhanceOn() && S.enh.exportHeard && !$("player-loaded").hidden;
+  return on ? { enhance: { ...S.enh.settings } } : null;
+}
+
+function showEnhance() {
+  const s = S.enh.settings;
+  if (!s) return;
+  const on = enhanceOn();
+  $("boost").value = String(s.boost);
+  $("boost-value").textContent = s.boost ? `+${s.boost} dB` : "0 dB";
+  $("leveler").checked = s.leveler;
+  $("leveler-strength").value = s.strength;
+  $("leveler-strength").disabled = !s.leveler;
+  $("voice-filter").checked = s.voice;
+  $("cut-rumble").checked = s.rumble;
+  $("cut-hiss").checked = s.hiss;
+  const hiss = hissAvailable(enhRate());
+  $("cut-hiss").disabled = !hiss;
+  $("cut-hiss-label").title = hiss ? "Lower everything above 5 kHz (hiss)"
+    : "This recording has nothing above 4 kHz, so there is no hiss band to cut (it needs a sample rate of 12 kHz or more).";
+  $("hum").value = s.hum;
+  // Never on unnoticed: the button, and a tag above the waveform.
+  $("enhance-toggle").classList.toggle("on", on);
+  $("enhance-toggle").textContent = on ? "Enhance: on" : "Enhance";
+  $("enhanced-tag").hidden = !on;
+  $("export-heard-label").hidden = !on;
+  $("export-heard").checked = S.enh.exportHeard;
+}
+
+// A change from the panel: applied at once, shown, remembered (one save at a time, the latest last).
+function setEnhance(changes) {
+  const was = enhanceOn();
+  S.enh.settings = normEnhance({ ...S.enh.settings, ...changes });
+  if (!was && enhanceOn()) S.enh.exportHeard = true;          // the user turned it on: exports follow
+  applyEnhance(); resumeAudio(); showEnhance();
+  saveEnhance();
+}
+
+function saveEnhance() {
+  S.enh.dirty = true;
+  if (!S.enh.save) {
+    S.enh.save = (async () => {
+      while (S.enh.dirty) {
+        await null;
+        S.enh.dirty = false;
+        let r;
+        try { r = await api().set_enhance(S.enh.settings); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+        if (r.ok) S.caps.enhance = r.enhance;
+        else showError(r);
+      }
+      S.enh.save = null;
+    })();
+  }
+  return S.enh.save;
+}
+
+function openEnhancePanel(open) {
+  $("enhance-panel").hidden = !open;
+  $("enhance-toggle").setAttribute("aria-expanded", String(open));
+}
+
+function setupEnhance() {
+  S.enh.settings = normEnhance(S.caps.enhance);               // the remembered ones; "Exports enhanced" unticked
+  S.enh.exportHeard = false;
+  applyEnhance(); showEnhance();
+  $("enhance-toggle").onclick = () => openEnhancePanel($("enhance-panel").hidden);
+  $("enhance-close").onclick = () => openEnhancePanel(false);
+  $("boost").oninput = () => setEnhance({ boost: Number($("boost").value) });
+  $("boost").addEventListener("dblclick", () => setEnhance({ boost: 0 }));
+  $("leveler").onchange = () => setEnhance({ leveler: $("leveler").checked });
+  $("leveler-strength").onchange = () => setEnhance({ strength: $("leveler-strength").value });
+  $("voice-filter").onchange = () => setEnhance({ voice: $("voice-filter").checked });
+  $("cut-rumble").onchange = () => setEnhance({ rumble: $("cut-rumble").checked });
+  $("cut-hiss").onchange = () => setEnhance({ hiss: $("cut-hiss").checked });
+  $("hum").onchange = () => setEnhance({ hum: $("hum").value });
+  $("enhance-reset").onclick = resetEnhance;
+  $("export-heard").onchange = () => { S.enh.exportHeard = $("export-heard").checked; };
+  // The panel closes with Escape or a click elsewhere.
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !$("enhance-panel").hidden) { openEnhancePanel(false); $("enhance-toggle").focus(); }
+  });
+  window.addEventListener("pointerdown", (e) => {
+    if ($("enhance-panel").hidden || $("enhance-panel").contains(e.target) || $("enhance-toggle").contains(e.target)) return;
+    openEnhancePanel(false);
+  }, true);
+}
+
+function resetEnhance() { setEnhance({ ...ENH_DEFAULT }); }
 
 // ---- Selection: drag across the waveform to pick a part; play or loop just that part ----
 function fmtPrecise(s) {
@@ -2432,7 +2655,7 @@ function setCurrent(label, r) {
   S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
-  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null,
+  S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null, rate: r.rate || 0,
                     markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
@@ -2441,6 +2664,7 @@ function setCurrent(label, r) {
   $("reviewed").checked = !!(r && r.reviewed);
   renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
   renderMarks();
+  showEnhance(); applyEnhance();                // Cut hiss and the filters depend on its sample rate
 }
 
 function sortMarks(marks) { return marks.slice().sort((a, b) => a.start - b.start); }
@@ -2755,10 +2979,11 @@ async function exportMarked() {
   if (!S.current) return;
   const rec = S.current.rec;
   const at = exportSpeed();
-  S.speedWork = at[0] === 1 ? "" : `Saving a WAV with the marks at ${at[0]}×…`;
+  const heard = exportHeard();
+  S.speedWork = at[0] === 1 && !heard ? "" : `Saving a WAV with the marks${atSpeed()}${heard ? ", enhanced" : ""}…`;
   S.exportingMarked = true; renderMarks(); scheduleLibraryRender(); status(S.speedWork || "Saving a WAV with the marks…");
   let r;
-  try { r = await api().export_marked(rec, ...at); } finally {
+  try { r = await api().export_marked(rec, ...at, heard); } finally {
     S.exportingMarked = false; S.speedWork = ""; status(""); progress(0, null); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }
@@ -2803,10 +3028,11 @@ function clipsSummary(p) {
 async function exportClips(mark) {
   if (!S.current || S.savingClips) return;
   const rec = S.current.rec;
-  const at = exportSpeed();
-  S.savingClips = true; renderMarks(); scheduleLibraryRender(); status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}…`);
+  const at = exportSpeed(), heard = exportHeard();
+  S.savingClips = true; renderMarks(); scheduleLibraryRender();
+  status(`${mark ? "Saving the clip" : "Saving the clips"}${atSpeed()}${heard ? ", enhanced" : ""}…`);
   let r;
-  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at); } finally {
+  try { r = await api().export_clips(rec, mark ? mark.id : null, ...at, heard); } finally {
     S.savingClips = false; status(""); renderMarks(); scheduleLibraryRender();
   }
   if (!r.ok) { showError(r); return; }

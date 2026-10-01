@@ -41,7 +41,10 @@ format is a setting (clip_format: "mp3" by default, or "wav"; set_clip_format())
 The player's export_clips() and export_marked() can save at the player's speed
 (speed, keep_pitch: openevp.stretch; the names end in the speed, "-tape" without
 Keep pitch; the library's clips job never does); the player's speed and Keep pitch
-are settings too (playback_speed / keep_pitch; set_playback_speed()).
+are settings too (playback_speed / keep_pitch; set_playback_speed()). They can also
+save "as heard" (heard: the player's Enhance settings, openevp.enhance, applied
+after the speed, as the player applies them to what it plays; the names then end
+in "_enhanced"); the Enhance settings are a setting too (enhance; set_enhance()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
 counts them as EVPs and never cuts clips from them again.
@@ -57,7 +60,7 @@ import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, formats, mp3, recorders, stretch, wavinfo
+from openevp import __version__, clips, enhance, formats, mp3, recorders, stretch, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -93,6 +96,7 @@ CLIPS_BUSY_UPDATE = "An update is being installed; the clips were not saved."
 CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
 PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
+ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -116,6 +120,25 @@ def _export_speed(speed, keep_pitch):
 
 NORMAL = (1.0, True)                # an export at normal speed
 BAD_SPEED = "Unknown playback speed."
+BAD_HEARD = "Unknown enhancement settings."
+
+
+def _heard(value):
+    """An export's "as heard" argument from the page: None (as recorded), or
+    {"enhance": settings} -> {"enhance": the settings, normalized}. Raises ValueError."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) - {"enhance"}:
+        raise ValueError(BAD_HEARD)
+    out = {}
+    if value.get("enhance") is not None:
+        out["enhance"] = enhance.normalize(value["enhance"])
+    return out or None
+
+
+def _heard_on(heard, rate):
+    """Does "as heard" change anything for audio at this rate?"""
+    return bool(heard) and enhance.active(heard.get("enhance") or {}, rate)
 
 
 def _download(manager, key):
@@ -449,6 +472,7 @@ class Api(LibraryOps):
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
         self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
+        self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -513,7 +537,7 @@ class Api(LibraryOps):
                 "marks_read_only_reason": store.read_only_reason if store is not None else None,
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
-                **self.playback_speed(),
+                **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -970,7 +994,7 @@ class Api(LibraryOps):
         except ValueError as e:
             return wav, f"saved without its marks ({e})"
 
-    def export_marked(self, rec, speed=1, keep_pitch=True):
+    def export_marked(self, rec, speed=1, keep_pitch=True, heard=None):
         """Save a WAV with the current marks of the loaded recording into the Save-to
         folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
@@ -987,11 +1011,20 @@ class Api(LibraryOps):
         (openevp.stretch: keep_pitch, or tape-style), its marks moved to match, and
         its name ends in the speed (<stem>_0.5x.wav, <stem>_0.5x-tape.wav without
         keep_pitch); "speed-progress" events
-        ({"done", "total"}) report how far that is."""
+        ({"done", "total"}) report how far that is (and how far "as heard" is).
+
+        heard ({"enhance": settings}, see _heard()): saved as the player plays it,
+        the Enhance chain (openevp.enhance) applied after the speed; the name then
+        ends in "_enhanced" (<stem>_0.5x_enhanced.wav). Nothing on for this
+        recording: saved as it is, under its plain name."""
         at = _export_speed(speed, keep_pitch)
         if at is None:
             return _fail(BAD_SPEED)
-        return self._marked_call(rec, lambda entry: self._export_marked(entry, at))
+        try:
+            heard = _heard(heard)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        return self._marked_call(rec, lambda entry: self._export_marked(entry, at, heard))
 
     def clip_format(self):
         """The clip format, "mp3" or "wav" (clips.FORMATS): the one picked in this
@@ -1049,23 +1082,55 @@ class Api(LibraryOps):
         self._playback = None if remembered else (speed, keep_pitch)
         return {"ok": True, "playback_speed": speed, "keep_pitch": keep_pitch, "remembered": remembered}
 
+    def enhance_settings(self):
+        """The player's Enhance settings (openevp.enhance.DEFAULT's keys): the ones
+        picked in this session if they could not be remembered, else the remembered
+        ones (a damaged field falls back to its default), else all off."""
+        if self._enhance is not None:
+            return dict(self._enhance)
+        saved = self._store.get_setting(ENHANCE) if self._store is not None else None
+        return enhance.normalize(saved, strict=False)
+
+    def set_enhance(self, settings):
+        """Pick the Enhance settings and remember them (a second window: for this
+        session). {"ok", "enhance", "remembered"}."""
+        try:
+            settings = enhance.normalize(settings)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(ENHANCE, settings)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._enhance = None if remembered else settings
+        return {"ok": True, "enhance": settings, "remembered": remembered}
+
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""
         return _fail(mp3.UNAVAILABLE) if fmt == "mp3" and not mp3.available() else None
 
-    def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True):
+    def export_clips(self, rec, mark_id=None, speed=1, keep_pitch=True, heard=None):
         """Save each mark of the loaded recording (or only the mark mark_id) as its
         own clip (clip_format(): MP3 or WAV) into the Clips subfolder of the folder
         export_marked() would use: see openevp.clips. Never replaces a file (identical bytes count as
         already saved). Admitted, locked and waited for exactly as export_marked().
         {"ok", "saved", "already", "names", "notes", "folder" (where they are, or None)}.
-        speed, keep_pitch: clips at the player's speed (see export_marked())."""
+        speed, keep_pitch, heard: clips at the player's speed and as heard (see
+        export_marked(); each clip, its pads included, is enhanced on its own)."""
         if mark_id is not None and not isinstance(mark_id, str):
             return _fail("That mark is no longer there.")
         at = _export_speed(speed, keep_pitch)
         if at is None:
             return _fail(BAD_SPEED)
-        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id, at), CLIPS_BUSY, CLIPS_BUSY_UPDATE)
+        try:
+            heard = _heard(heard)
+        except ValueError:
+            return _fail(BAD_HEARD)
+        return self._marked_call(rec, lambda entry: self._export_clips(entry, mark_id, at, heard),
+                                 CLIPS_BUSY, CLIPS_BUSY_UPDATE)
 
     def _marked_call(self, rec, work, busy=MARKED_BUSY, busy_update=MARKED_BUSY_UPDATE):
         """Run work(entry) for a loaded recording on the caller's thread, holding
@@ -1164,7 +1229,7 @@ class Api(LibraryOps):
         investigation = _investigation(path, self._library_path() if library is None else library)
         return os.path.join(dest, investigation) if investigation else dest
 
-    def _export_marked(self, entry, at=NORMAL):
+    def _export_marked(self, entry, at=NORMAL, heard=None):
         marks = self._store.marks(entry["fp"])
         if not marks:
             return _fail("This recording has no marks yet.")
@@ -1191,6 +1256,25 @@ class Api(LibraryOps):
             except Exception as e:
                 return _error(e)
             marks = stretch.scale_marks(marks, speed)
+        try:
+            on = _heard_on(heard, clips._layout(memoryview(wav))[1])
+        except ValueError as e:
+            return _fail(f"Could not add the marks to {entry['name']}: {e}")
+        if on:
+            out_name = out_name[:-len(".wav")] + enhance.SUFFIX + ".wav"
+            try:
+                wav = enhance.process(wav, heard.get("enhance") or {}, should_stop=self._stop.is_set,
+                                      progress=self._speed_progress())
+            except enhance.Cancelled:
+                return _fail(CLOSING)
+            except ValueError as e:
+                return _fail(f"Could not enhance {entry['name']}: {e}")
+            except MemoryError:
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} as heard.",
+                             "Close other programs and try again, or save it as recorded.")
+            except Exception as e:
+                return _error(e)
         try:
             marked = wavinfo.marked_parts(wav, marks)
         except ValueError as e:
@@ -1220,7 +1304,7 @@ class Api(LibraryOps):
                 self._emit("speed-progress", {"done": done, "total": total})
         return progress
 
-    def _export_clips(self, entry, mark_id, at=NORMAL):
+    def _export_clips(self, entry, mark_id, at=NORMAL, heard=None):
         src = entry["source"]
         if src.get("kind") == "file" and _is_clip(src["path"], self._library_path()):
             return _fail(CLIPS_AGAIN)                    # never a Clips folder inside a Clips folder
@@ -1242,22 +1326,28 @@ class Api(LibraryOps):
         del got
         outdir = os.path.join(outdir, CLIPS)
         try:
-            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at)
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at, heard)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
 
-    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL):
+    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL, heard=None):
         """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"), at
-        (speed, keep_pitch) (the name then ends in the speed: clips.name()):
+        (speed, keep_pitch) (the name then ends in the speed: clips.name()), as
+        heard (see export_marked(); the name then ends in "_enhanced"):
         (saved, already there, file names, notes on clips not made). Raises OSError
         when a clip cannot be written."""
         saved = already = 0
         names, notes = [], []
+        try:
+            on = _heard_on(heard, clips._layout(memoryview(wav))[1])
+        except ValueError:
+            on = False                           # clips.make() says why, per clip
+        process = (lambda w: enhance.process(w, heard.get("enhance") or {})) if on else None
         for m in marks:
             try:
-                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1])
+                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1], process=process)
             except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue
@@ -1265,9 +1355,10 @@ class Api(LibraryOps):
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut "
                              "(not enough memory; close other programs and try again)")
                 continue
-            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1])
+            name = clips.name(stem, m, fmt=fmt, speed=at[0], keep_pitch=at[1], enhanced=on)
             if folders.too_long(os.path.join(outdir, name)):
-                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1])   # the note can go
+                name = clips.name(stem, m, with_note=False, fmt=fmt, speed=at[0], keep_pitch=at[1],
+                                  enhanced=on)   # the note can go
                 if folders.too_long(os.path.join(outdir, name)):
                     notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not saved "
                                  "(the path would be too long for Windows)")

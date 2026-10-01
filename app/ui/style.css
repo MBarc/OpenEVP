@@ -174,9 +174,26 @@ td.note { color: var(--warn); }
 #view-controls { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
 #view-controls label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 #view-controls input[type="range"] { width: 110px; }
-#view-controls #keep-pitch-label, #view-controls #export-speed-label { justify-content: flex-end; gap: 4px; }
+#view-controls #keep-pitch-label, #view-controls #export-speed-label, #view-controls #export-heard-label { justify-content: flex-end; gap: 4px; }
 #view-controls label[hidden] { display: none; }
 #speed-label.changed { color: var(--accent); font-weight: 600; }
+/* Enhance: the button turns solid while anything is on, and the tag above the waveform says so */
+#enhance-toggle { font-size: 12px; border: 1px solid var(--line); background: var(--panel); color: var(--text);
+                  border-radius: 4px; padding: 1px 8px; cursor: pointer; }
+#enhance-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--panel); font-weight: 600; }
+.enhanced-tag { font-size: 11px; font-weight: 600; padding: 0 6px; border-radius: 4px; background: var(--accent); color: var(--panel); }
+.enhanced-tag[hidden] { display: none; }
+#player { position: relative; }
+.enhance-panel { position: absolute; right: 12px; bottom: calc(100% + 6px); z-index: 15; display: flex; flex-direction: column;
+                 gap: 6px; min-width: 260px; padding: 10px 12px; font-size: 12px; background: var(--panel); color: var(--text);
+                 border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 6px 20px rgba(0, 0, 0, .25); }
+.enhance-panel[hidden] { display: none; }
+.enhance-panel label, .enhance-row { display: flex; align-items: center; gap: 6px; }
+.enhance-panel input[type="range"] { flex: 1; }
+.enhance-head { display: flex; align-items: baseline; gap: 6px; }
+.enhance-head .muted { padding: 0; flex: 1; }
+.enhance-foot { display: flex; justify-content: flex-end; }
+#boost-value { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
 #speed-value { font-variant-numeric: tabular-nums; }
 #version { font-size: 12px; color: var(--muted); }
 .legal { font-size: 12px; color: var(--muted); }

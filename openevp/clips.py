@@ -13,7 +13,9 @@ encoded, with the mark as its ID3 title and the note as its comment.
 
 At the player's speed (0.25x to 2x, openevp.stretch) the cut, pads included, is
 slowed down or sped up before it is marked or encoded; its name ends in the
-speed ("..._0.5x.mp3").
+speed ("..._0.5x.mp3"). "As heard" (openevp.enhance, a `process` given by the
+caller) is applied after that; the name then ends in "_enhanced"
+("..._0.5x_enhanced.mp3").
 """
 import math
 import re
@@ -66,12 +68,14 @@ def bounds(start, end, duration, pad=PAD):
     return max(0.0, start - pad), min(float(duration), max(end, start) + pad)
 
 
-def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True):
+def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True, process=None):
     """A clip of one mark ({"start", "end", "cls", "note"}, seconds) as WAV bytes in
     the recording's own format, with the mark written in as a marker. At a speed
     other than 1 the cut (pad included) is then slowed down or sped up
     (openevp.stretch: pitch kept, or tape-style) and the marker moved to match.
-    Raises ValueError when the WAV cannot be read or the mark is not inside it."""
+    process(wav bytes) -> wav bytes of the same length, if given, runs after that
+    (the enhancements). Raises ValueError when the WAV cannot be read or the mark
+    is not inside it."""
     buf = memoryview(wav_bytes)
     fmt, rate, align, data_at, data_len = _layout(buf)
     frames = data_len // align
@@ -94,6 +98,8 @@ def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True):
         from . import stretch
         plain = stretch.change_speed(plain, speed, keep_pitch)
         inside = stretch.scale_marks([inside], speed)[0]
+    if process is not None:
+        plain = process(plain)
     return wavinfo.with_markers(plain, [inside])
 
 
@@ -115,15 +121,18 @@ def stamp(seconds):
     return f"{tenths // 600:02d}m{(tenths % 600) // 10:02d}.{tenths % 10}s"
 
 
-def name(stem, mark, with_note=True, fmt="wav", speed=1, keep_pitch=True):
-    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>][_<speed>x[-tape]].<fmt>
-    (the speed only when it is not 1, "-tape" when the pitch was not kept; the time
-    is where the mark is in the recording)."""
+def name(stem, mark, with_note=True, fmt="wav", speed=1, keep_pitch=True, enhanced=False):
+    """A clip's file name: <stem>_EVP-<cls>_<MMmSS.s>s[_<note>][_<speed>x[-tape]][_enhanced].<fmt>
+    (the speed only when it is not 1, "-tape" when the pitch was not kept,
+    "_enhanced" when it was saved as heard; the time is where the mark is in the
+    recording)."""
     note = safe_note(mark.get("note")) if with_note else ""
     tail = ""
     if speed != 1:
         from . import stretch
         tail = stretch.suffix(speed, keep_pitch)
+    if enhanced:
+        tail += "_enhanced"
     return f"{stem}_EVP-{mark['cls']}_{stamp(mark['start'])}" + (f"_{note}" if note else "") + f"{tail}.{fmt}"
 
 
@@ -135,12 +144,12 @@ def title(mark):
     return f"{text}: {note}" if note else text
 
 
-def make(wav_bytes, mark, fmt="wav", pad=PAD, speed=1, keep_pitch=True):
+def make(wav_bytes, mark, fmt="wav", pad=PAD, speed=1, keep_pitch=True, process=None):
     """A clip of one mark in fmt ("wav": cut(); "mp3": that cut encoded, see
-    openevp.mp3), at speed (see cut()). Raises ValueError as cut() does (or when
-    the MP3 encoder cannot take the audio), RuntimeError (mp3.UNAVAILABLE) when
-    MP3 is not available."""
-    clip = cut(wav_bytes, mark, pad, speed, keep_pitch)
+    openevp.mp3), at speed and processed (see cut()). Raises ValueError as cut()
+    does (or when the MP3 encoder cannot take the audio), RuntimeError
+    (mp3.UNAVAILABLE) when MP3 is not available."""
+    clip = cut(wav_bytes, mark, pad, speed, keep_pitch, process)
     if fmt == "wav":
         return clip
     if fmt != "mp3":

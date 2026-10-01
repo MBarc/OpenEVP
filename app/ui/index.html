@@ -75,6 +75,7 @@
     <div id="player-main">
       <div id="now-line">
         <div id="now-playing"></div>
+        <span id="enhanced-tag" class="enhanced-tag" hidden title="You hear this recording enhanced (Enhance, on the right). The file itself is never changed.">Enhanced</span>
         <label id="reviewed-label" title="Tick when you have listened through this recording"><input type="checkbox" id="reviewed"> Reviewed</label>
       </div>
       <div id="waveform"></div>
@@ -133,6 +134,25 @@
         <input id="keep-pitch" type="checkbox" checked> Keep pitch</label>
       <label id="export-speed-label" hidden title="The player's Export WAV with marks, Export clips and Save clip at this speed (named …_0.5x, or …_0.5x-tape without Keep pitch). The library's Export clips stays at normal speed.">
         <input id="export-speed" type="checkbox"> <span id="export-speed-text">Exports at 1×</span></label>
+      <button id="enhance-toggle" type="button" aria-expanded="false" aria-controls="enhance-panel"
+              title="Boost, level and filter what you hear. The recording itself is never changed.">Enhance</button>
+      <label id="export-heard-label" hidden title="The player's Export WAV with marks, Export clips and Save clip as you hear them, enhanced (named …_enhanced; with a speed, …_0.5x_enhanced). The library's Export clips stays as recorded.">
+        <input id="export-heard" type="checkbox"> Exports enhanced</label>
+    </div>
+    <div id="enhance-panel" class="enhance-panel" role="group" aria-label="Enhance" hidden>
+      <div class="enhance-head"><strong>Enhance</strong> <span class="muted">what you hear; the file is never changed</span>
+        <button id="enhance-close" type="button" class="link" title="Close (Esc)">✕</button></div>
+      <label title="Make the recording louder (double-click the slider for 0 dB). A soft limiter keeps it from clipping.">Boost
+        <input id="boost" type="range" min="0" max="24" step="1" value="0"> <span id="boost-value">0 dB</span></label>
+      <span class="enhance-row"><label title="Evens out the level: quiet parts come up, loud ones go down."><input type="checkbox" id="leveler"> Leveler</label>
+        <select id="leveler-strength" aria-label="Leveler strength" title="How strongly the Leveler evens out the level">
+          <option value="light">Light</option><option value="medium">Medium</option><option value="strong">Strong</option></select></span>
+      <label title="Keep the voice band, about 300 to 3400 Hz, and lower what is below and above it"><input type="checkbox" id="voice-filter"> Voice filter</label>
+      <label title="Lower everything below about 120 Hz: handling noise, wind, traffic rumble"><input type="checkbox" id="cut-rumble"> Cut rumble</label>
+      <label id="cut-hiss-label" title="Lower everything above 5 kHz (hiss)"><input type="checkbox" id="cut-hiss"> Cut hiss</label>
+      <label title="Remove mains hum (and its next three harmonics): 60 Hz in the Americas, 50 Hz in most other places">Hum remover
+        <select id="hum"><option value="off">Off</option><option value="60">60 Hz</option><option value="50">50 Hz</option></select></label>
+      <div class="enhance-foot"><button id="enhance-reset" type="button" title="Turn every enhancement off">Reset</button></div>
     </div>
     <button id="open-wav-2" class="link" title="Open another WAV file">Open WAV file…</button>
   </div>

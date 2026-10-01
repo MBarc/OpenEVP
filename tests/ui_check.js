@@ -117,6 +117,8 @@ const anything = new Proxy(function () {}, {        // WaveSurfer and its plugin
 
 // ---- the stubbed backend -----------------------------------------------------------
 const calls = [];
+// capabilities().enhance_spec: openevp.enhance.spec() (test_enhance.py checks that the two agree).
+const ENHANCE_SPEC = {"boost_max": 24, "q": 0.7071067811865475, "rumble": 120.0, "voice": [300.0, 3400.0], "hiss": 5000.0, "hiss_min_rate": 12000, "hum_harmonics": 4, "hum_width": 5.0, "leveler": {"light": {"threshold": -24.0, "knee": 12.0, "ratio": 2.0, "attack": 0.01, "release": 0.25}, "medium": {"threshold": -32.0, "knee": 10.0, "ratio": 4.0, "attack": 0.005, "release": 0.25}, "strong": {"threshold": -42.0, "knee": 6.0, "ratio": 8.0, "attack": 0.003, "release": 0.2}}, "limit_range": 64.0, "limit_knee": 0.8, "limit_points": 32769};
 const BETA = "beta#1";
 const listing = {
   [BETA]: { ok: true, model: "Fake Beta", model_id: "fake-beta", playable: false, play_reason: "no decoder",
@@ -144,6 +146,7 @@ const listing = {
 };
 const api = {
   capabilities: async () => ({ models: ["Sony ICD-ST25"], wav: true, wav_status: null, version: "0.0", marks: true, marks_read_only: false,
+                               enhance_spec: ENHANCE_SPEC,
                                store_problems: [], formats: { dvf: { playable: true }, wav: { playable: true } } }),
   default_destination: async () => "C:\\save",
   check_update: async () => ({ ok: true, available: false, current: "0.0" }),
@@ -160,8 +163,47 @@ const api = {
   audio: async (...args) => { calls.push(["audio", ...args]); return { ok: false, error: "stub" }; },
 };
 
+// ---- a fake Web Audio: nodes that remember their params and connections -------------------
+const audioContexts = [];
+class FakeParam { constructor(v) { this.value = v; } }
+class FakeNode {
+  constructor(ctx, kind) { this.kind = kind; this.outs = []; ctx.nodes.push(this); }
+  connect(n) { this.outs.push(n); return n; }
+  disconnect() { this.outs = []; }
+}
+class FakeAudioContext {
+  constructor() { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
+                  this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
+  resume() { this.resumes++; this.state = "running"; return Promise.resolve(); }
+  createMediaElementSource(m) { this.sources++; const n = new FakeNode(this, "source"); n.media = m; return n; }
+  createBiquadFilter() { const n = new FakeNode(this, "biquad"); n.type = "lowpass"; n.frequency = new FakeParam(350); n.Q = new FakeParam(1); return n; }
+  createDynamicsCompressor() {
+    const n = new FakeNode(this, "compressor");
+    for (const k of ["threshold", "knee", "ratio", "attack", "release"]) n[k] = new FakeParam(0);
+    return n;
+  }
+  createGain() { const n = new FakeNode(this, "gain"); n.gain = new FakeParam(1); return n; }
+  createWaveShaper() { const n = new FakeNode(this, "shaper"); n.curve = null; return n; }
+}
+// The chain from the media element to the speakers, as [kind, ...its settings].
+function audioChain(ctx) {
+  const out = [];
+  let n = ctx.nodes.find((x) => x.kind === "source");
+  for (let guard = 0; n && guard < 50; guard++) {
+    if (n.outs.length !== 1) return [...out, `${n.kind} has ${n.outs.length} outputs`];
+    n = n.outs[0];
+    if (n.kind === "destination") return out;
+    if (n.kind === "biquad") out.push([n.type, n.frequency.value, Math.round(n.Q.value * 1000) / 1000]);
+    else if (n.kind === "gain") out.push(["gain", Math.round(n.gain.value * 10000) / 10000]);
+    else if (n.kind === "compressor") out.push(["compressor", n.threshold.value, n.knee.value, n.ratio.value, n.attack.value, n.release.value]);
+    else out.push(["shaper", n.curve.length]);
+  }
+  return out;
+}
+
 let ready = null;
 const window = {
+  AudioContext: FakeAudioContext,
   pywebview: { api },
   addEventListener(name, fn, capture) { if (name === "pywebviewready") ready = fn; else listen(window, name, fn, capture); },
   innerWidth: 1000, innerHeight: 700,
@@ -1345,8 +1387,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await context.exportClips(null);
   const libJob = vm.runInContext("S.clips.job", context) + 1;
   assert.deepStrictEqual(JSON.parse(JSON.stringify(speedExports)), [
-    ["marked", "h12", 0.5, false], ["clips", "h12", null, 0.5, false], ["clips", "h12", "e1", 0.5, false],
-    ["files", ["f1"], libJob - 1], ["clips", "h12", null, 1, true], ["clips", "h12", null, 1, true]]);
+    ["marked", "h12", 0.5, false, null], ["clips", "h12", null, 0.5, false, null], ["clips", "h12", "e1", 0.5, false, null],
+    ["files", ["f1"], libJob - 1], ["clips", "h12", null, 1, true, null], ["clips", "h12", null, 1, true, null]]);
   slide(1);
   assert.deepStrictEqual(Array.from(context.exportSpeed()), [0.5, true]);
   $("player-loaded").hidden = true;                                                // no player, no box shown: normal speed
@@ -1392,6 +1434,143 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     $("loop-selection").checked = false;
   }
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
+
+  // ---- Enhance: Boost, Leveler, filters, Hum remover through Web Audio; never on unnoticed ----
+  // The real media element (ours, asking for CORS) went to WaveSurfer.create().
+  assert.ok(/<button id="enhance-toggle"[^>]*aria-controls="enhance-panel"/.test(html));
+  assert.ok(/id="export-heard-label" hidden/.test(html) && /id="enhanced-tag"[^>]*hidden/.test(html));
+  assert.ok(html.includes('<input id="boost" type="range" min="0" max="24" step="1" value="0">'));
+  for (const id of ["leveler", "leveler-strength", "voice-filter", "cut-rumble", "cut-hiss", "hum", "enhance-reset"]) {
+    assert.ok(html.includes(`id="${id}"`), id);
+  }
+  context.setSpeed(1); await speedSaved();
+  // Startup with nothing remembered: all off, the plain label, no audio graph at all.
+  const enh = () => JSON.parse(vm.runInContext("JSON.stringify(S.enh.settings)", context));
+  const enhShown = () => [$("enhance-toggle").textContent, $("enhance-toggle").classList.contains("on"), $("enhanced-tag").hidden,
+                          $("export-heard-label").hidden, $("export-heard").checked];
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
+  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, false]);
+  assert.strictEqual(audioContexts.length, 0, "no AudioContext until something is on");
+  // The panel opens from the button and closes with Escape or a click elsewhere.
+  $("enhance-toggle").onclick();
+  assert.ok(!$("enhance-panel").hidden && $("enhance-toggle")["aria-expanded"] === "true");
+  key("Escape");
+  assert.ok($("enhance-panel").hidden);
+  $("enhance-toggle").onclick();
+  fire([window], "pointerdown", { target: $("enhance-panel") });
+  assert.ok(!$("enhance-panel").hidden, "a click inside keeps it open");
+  fire([window], "pointerdown", { target: document.body });
+  assert.ok($("enhance-panel").hidden);
+  // A player with a media element playing at 0.5×, Keep pitch, mid-play.
+  const enhMedia = { playbackRate: 0.5, defaultPlaybackRate: 0.5, preservesPitch: true };
+  let enhPlaying = true;
+  const enhWs = new Proxy({ getMediaElement: () => enhMedia, isPlaying: () => enhPlaying, getCurrentTime: () => 1.5,
+                            getDuration: () => 3, setPlaybackRate: (r, k) => { enhMedia.playbackRate = r; enhMedia.preservesPitch = k; },
+                            stop: () => { throw new Error("Enhance must not stop playback"); } },
+                          { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = enhWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const enhCalls = [];
+  api.set_enhance = async (st) => { enhCalls.push(st); return { ok: true, enhance: st, remembered: true }; };
+  const enhSaved = () => vm.runInContext("S.enh.save || Promise.resolve()", context);
+  vm.runInContext(`setCurrent("Recording A-001", { rec: "e1", duration: 3, fp: "fpe", rate: 8000, marks: [],
+                                                      backup: { status: null, detail: "" }, reviewed: false });`, context);
+  $("player-loaded").hidden = false;
+  // Boost: the graph is made once, from the media element; gain then the soft limiter; applied at once.
+  $("boost").value = "6"; $("boost").oninput();
+  assert.strictEqual(audioContexts.length, 1);
+  const actx = audioContexts[0];
+  assert.strictEqual(actx.nodes.find((n) => n.kind === "source").media, enhMedia);
+  assert.deepStrictEqual(audioChain(actx), [["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
+  assert.ok(actx.resumes >= 1 && actx.state === "running", "resumed (autoplay rules)");
+  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);   // turned on by the user: exports follow
+  assert.strictEqual($("boost-value").textContent, "+6 dB");
+  assert.deepStrictEqual([enhMedia.playbackRate, enhMedia.preservesPitch, enhPlaying], [0.5, true, true]);
+  // The limiter's curve: linear to 0.8, then soft towards 1 (the WaveShaper's input is scaled by 1/64).
+  const shaper = actx.nodes.find((n) => n.kind === "shaper");
+  const at = (v) => shaper.curve[Math.round((v / 64 + 1) * (shaper.curve.length - 1) / 2)];
+  assert.ok(Math.abs(at(0.5) - 0.5) < 0.003 && Math.abs(at(-0.8) + 0.8) < 0.003 && at(1) < 0.96 && at(3) > 0.99 && at(64) <= 1);
+  await enhSaved();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(enhCalls)), [{ boost: 6, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" }]);
+  // Each filter, at this recording's 8 kHz: Q in dB for a high- or low-pass (Butterworth: -3.01 dB), a notch's as is.
+  $("voice-filter").checked = true; $("voice-filter").onchange();
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  $("hum").value = "60"; $("hum").onchange();
+  $("leveler").checked = true; $("leveler").onchange();
+  $("leveler-strength").value = "strong"; $("leveler-strength").onchange();
+  assert.deepStrictEqual(audioChain(actx), [["highpass", 120, -3.01], ["highpass", 300, -3.01], ["lowpass", 3400, -3.01],
+                                            ["notch", 60, 12], ["notch", 120, 24], ["notch", 180, 36], ["notch", 240, 48],
+                                            ["compressor", -42, 6, 8, 0.003, 0.2], ["gain", 1.9953], ["gain", 0.0156], ["shaper", 32769]]);
+  assert.strictEqual(audioContexts.length, 1, "one graph, rebuilt in place");
+  assert.strictEqual(actx.sources, 1, "the media element is routed once");
+  assert.ok(!$("leveler-strength").disabled);
+  // Cut hiss: nothing above 4 kHz at 8 kHz, so it is off (and says why); a 44.1 kHz recording gets it.
+  $("cut-hiss").checked = true; $("cut-hiss").onchange();
+  assert.ok($("cut-hiss").disabled && /no hiss band/.test($("cut-hiss-label").title));
+  assert.ok(!audioChain(actx).some((st) => st[0] === "lowpass" && st[1] === 5000));
+  vm.runInContext(`setCurrent("x.wav", { rec: "e2", duration: 3, fp: "fpx", rate: 44100, marks: [], backup: { status: null, detail: "" }, reviewed: false });`, context);
+  assert.ok(!$("cut-hiss").disabled);
+  assert.deepStrictEqual(audioChain(actx).slice(2, 5), [["lowpass", 3400, -3.01], ["lowpass", 5000, -3.01], ["notch", 60, 12]]);
+  assert.deepStrictEqual([enhMedia.playbackRate, enhMedia.preservesPitch, enhPlaying], [0.5, true, true]);
+  await enhSaved();
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(enhCalls[enhCalls.length - 1])), { boost: 6, leveler: true, strength: "strong", voice: true, rumble: true, hiss: true, hum: "60" });
+  // Exports pass the settings while "Exports enhanced" is ticked; unticked (or nothing on): null.
+  const heardExports = [];
+  const savedEnhApi = { clips: api.export_clips, marked: api.export_marked };
+  api.export_clips = async (...a) => { heardExports.push(a); return { ok: true, saved: 1, already: 0, names: [], notes: [], folder: null }; };
+  api.export_marked = async (...a) => { heardExports.push(a); return { ok: true, saved: true, already: false, name: "x_enhanced.wav", folder_name: "" }; };
+  api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 1, exists: false, truncated: false, indexing: false, pending: 0, files: [], folders: [] });
+  vm.runInContext(`S.marks = [{ id: "m1", start: 1, end: 1.5, cls: "A", note: "" }];`, context);
+  await context.exportClips({ id: "m1" });
+  const statusSeen = [];
+  api.export_marked = async (...a) => { statusSeen.push($("status").textContent); heardExports.push(a);
+                                        return { ok: true, saved: true, already: false, name: "x_enhanced.wav", folder_name: "" }; };
+  await context.exportMarked();
+  assert.deepStrictEqual(statusSeen, ["Saving a WAV with the marks, enhanced…"]);
+  $("export-heard").checked = false; $("export-heard").onchange();
+  await context.exportClips(null);
+  const on = { boost: 6, leveler: true, strength: "strong", voice: true, rumble: true, hiss: true, hum: "60" };
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(heardExports)),
+                         [["e2", "m1", 1, true, { enhance: on }], ["e2", 1, true, { enhance: on }], ["e2", null, 1, true, null]]);
+  // Unticked, it stays so while things change; Reset turns everything off, and the source plays straight out.
+  $("boost").value = "3"; $("boost").oninput();
+  assert.strictEqual($("export-heard").checked, false);
+  $("enhance-reset").onclick();
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "off" });
+  assert.deepStrictEqual(audioChain(actx), []);
+  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, false]);
+  assert.strictEqual(context.exportHeard(), null);
+  // On again from all off: ticked again (as "Exports at 0.5×" is when the speed leaves 1×).
+  $("hum").value = "50"; $("hum").onchange();
+  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);
+  assert.deepStrictEqual(audioChain(actx).map((st) => st[1]), [50, 100, 150, 200]);
+  $("boost").value = "0"; fire([$("boost")], "dblclick", { target: $("boost") });
+  // A player that is not shown exports as recorded.
+  $("player-loaded").hidden = true;
+  assert.strictEqual(context.exportHeard(), null);
+  $("player-loaded").hidden = false;
+  // Playing resumes a suspended context.
+  actx.state = "suspended";
+  context.resumeAudio();
+  assert.strictEqual(actx.state, "running");
+  // Remembered settings at the next start: on (and shown on), but "Exports enhanced" not ticked.
+  vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: 12, leveler: false, strength: "light", voice: true, rumble: false, hiss: false, hum: "off" } }; setupEnhance();`, context);
+  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, false]);
+  assert.strictEqual(context.exportHeard(), null);
+  vm.runInContext(`S.caps = { ...S.caps, enhance: { boost: "lots", voice: 3, hum: "50" } }; setupEnhance();`, context);   // damaged: field by field
+  assert.deepStrictEqual(enh(), { boost: 0, leveler: false, strength: "medium", voice: false, rumble: false, hiss: false, hum: "50" });
+  // A refused save says why; the settings still apply for now.
+  api.set_enhance = async () => ({ ok: false, error: "Unknown enhancement settings." });
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  await enhSaved();
+  assert.ok($("banner-text").textContent.includes("Unknown enhancement settings."));
+  assert.strictEqual(audioChain(actx)[0][1], 120);
+  $("enhance-reset").onclick();
+  api.set_enhance = async (st) => ({ ok: true, enhance: st, remembered: true });
+  await enhSaved();
+  Object.assign(api, { export_clips: savedEnhApi.clips, export_marked: savedEnhApi.marked });
+  context.banner("");
+  vm.runInContext(`setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   console.log("ok");

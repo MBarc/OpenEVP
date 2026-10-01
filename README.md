@@ -239,6 +239,41 @@ it. Untick it for normal-speed exports. The library's Export clips is always at
 normal speed. Slowing down a whole recording with Keep pitch takes a few
 seconds (a progress bar shows how far it is).
 
+### Enhance
+
+**Enhance**, under the speed, opens a small panel of listening aids. They change
+only what you hear, live while it plays; the recording itself and its marks are
+never touched:
+
+- **Boost**: up to +24 dB louder. A soft limiter keeps it from clipping.
+- **Leveler** (Light, Medium, Strong): a compressor that brings quiet parts up
+  and loud ones down.
+- **Voice filter**: keeps the voice band, about 300 to 3400 Hz.
+- **Cut rumble**: lowers everything below about 120 Hz (handling noise, wind).
+- **Cut hiss**: lowers everything above 5 kHz. An ICD-ST25 recording (8 kHz) has
+  nothing up there, so it is greyed out for those.
+- **Hum remover**: notches out 60 Hz (or 50 Hz) mains hum and its next three
+  harmonics.
+- **Reset** turns everything off.
+
+The settings are remembered. While any of them is on, the button reads
+**Enhance: on** and an **Enhanced** tag sits above the waveform, so it is never
+left on unnoticed. **Exports enhanced** then shows under it: like **Exports at
+0.5×** it is ticked only when you turn enhancement on in this session, and it
+makes the player's Export WAV with marks, Export clips and Save clip save what
+you hear, named `…_enhanced` (`…_0.5x_enhanced.wav` with a speed: the speed is
+applied first, then the enhancements, as the player does). The library's Export
+clips always saves as recorded. Saving the same thing again gives identical
+files, so it says "already saved".
+
+The player runs the enhancements in Web Audio; an export runs the same chain in
+numpy (`openevp/enhance.py`, with the Leveler ported from the browser's own
+compressor in `openevp/leveler.py`). Against Chromium's offline renderer they
+agree to within rounding (87 dB or more below the signal). What you hear can
+still differ very slightly: the player filters at the sound card's rate after
+resampling, and its Leveler delays the sound by 6 ms (an export keeps every
+position, so its marks stay put).
+
 ### EVP clips
 
 **Export clips** (next to Export WAV with marks) saves every mark of the loaded
