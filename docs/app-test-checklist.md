@@ -155,3 +155,16 @@ Enhance:
     plain names. Close and start OpenEVP: the settings are still on (button solid,
     tag shown), **Exports enhanced** unticked. A second OpenEVP window keeps its
     own changes for that session only.
+
+Spectrogram:
+
+31. Tick **Spectrogram** (under Height) with a recording loaded: within a couple
+    of seconds a spectrogram appears under the waveform, labelled 1, 2, 3 kHz on
+    an ICD-ST25 recording (up to 8 kHz on an ICD-ST10 one); speech shows as
+    bright stacked bands. Zoom in with the wheel: it stays lined up with the
+    waveform and gets sharper (harmonics visible); scroll along: the labels stay
+    at the left edge; the cursor, the marks and a drag selection cover it; a click
+    on it seeks. Zoom right out on the longest recording (30 minutes): no freeze,
+    the whole length drawn. Open another recording: its own spectrogram. An MP3
+    clip says it has none. Untick it: gone, the player its usual height. Close
+    and start OpenEVP: it is still on (or off) as you left it.

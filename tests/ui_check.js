@@ -1571,6 +1571,81 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   Object.assign(api, { export_clips: savedEnhApi.clips, export_marked: savedEnhApi.marked });
   context.banner("");
   vm.runInContext(`setCurrent(null);`, context);
+
+  // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
+  assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
+  assert.ok(!$("spectrogram").checked && !vm.runInContext("S.spec.on", context), "off unless remembered on");
+  const wrapper = document.createElement("div");
+  let wrapW = 800, wsScroll = 0;
+  Object.defineProperty(wrapper, "clientWidth", { get: () => wrapW });
+  const specWs = new Proxy({ getWrapper: () => wrapper, getScroll: () => wsScroll, getDuration: () => 100, getMediaElement: () => enhMedia },
+                           { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = specWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const specCalls = [], specSaves = [];
+  const specInfo = { ok: true, tiles: "http://t/spec/abc", columns: 12500, rows: 129, column_seconds: 0.008, levels: 6, tile: 512,
+                     fmax: 4000, fft: 256 };
+  let specAnswer = null;
+  api.spectrogram = (rec, url) => { specCalls.push([rec, url]); return new Promise((res) => { specAnswer = res; }); };
+  api.set_spectrogram = async (on) => { specSaves.push(on); return { ok: true, spectrogram: on, remembered: true }; };
+  const loadSp = (rec, extra = {}) => vm.runInContext(`setCurrent("Recording", ${JSON.stringify({ rec, duration: 100, fp: "f" + rec, rate: 8000,
+    url: `http://a/${rec}.wav`, marks: [], backup: { status: null, detail: "" }, reviewed: false, ...extra })});`, context);
+  const specEl = () => vm.runInContext("S.spec.el", context);
+  const tiles = () => [...vm.runInContext("S.spec.imgs", context).keys()];
+  const answer = async (r) => { specAnswer(r); await new Promise((res) => setImmediate(res)); };
+  loadSp("s1");
+  $("spectrogram").checked = true; $("spectrogram").onchange();
+  assert.deepStrictEqual(specCalls, [["s1", "http://a/s1.wav"]]);                  // the audio the player plays
+  assert.ok(wrapper.children.includes(specEl()), "inside wavesurfer's wrapper: scrolled and zoomed with it");
+  assert.strictEqual(specEl().msg.textContent, "Computing the spectrogram…");
+  await answer(specInfo);
+  assert.strictEqual(specEl().msg.textContent, "");
+  assert.deepStrictEqual(specEl().labels.children.map((c) => [c.textContent, c.style.bottom]),
+                         [["1 kHz", "25.00%"], ["2 kHz", "50.00%"], ["3 kHz", "75.00%"]]);
+  // Fit to 800 px: level 3 (782 columns would be too few, 1563 is enough); its 4 tiles, placed by time.
+  assert.deepStrictEqual(tiles(), ["3/0", "3/1", "3/2", "3/3"]);
+  const img0 = vm.runInContext(`S.spec.imgs.get("3/1")`, context);
+  assert.deepStrictEqual([img0.src, img0.style.left, img0.style.width, img0.style.imageRendering],
+                         ["http://t/spec/abc/3/1.png", "32.76400%", "32.76800%", "auto"]);
+  await vm.runInContext("S.spec.save || Promise.resolve()", context);
+  assert.deepStrictEqual(specSaves, [true]);
+  // Zoomed in (400 px per second) and scrolled: full detail, only the tiles in view (and one each side).
+  wrapW = 40000; wsScroll = 20000;
+  context.renderSpectrogram();
+  assert.deepStrictEqual(tiles(), ["0/11", "0/12", "0/13"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("0/12").style.imageRendering`, context), "pixelated");
+  assert.strictEqual(specEl().children.filter((c) => c.tagName === "IMG").length, 3, "tiles out of view are removed");
+  wrapW = 800; wsScroll = 0;
+  // Another recording before the answer: that answer is dropped; the new one asks again.
+  loadSp("s2");
+  assert.deepStrictEqual(tiles(), []);
+  const late = specAnswer;
+  vm.runInContext("loadSpectrogram()", context);
+  const second = specAnswer;
+  late(specInfo); await new Promise((res) => setImmediate(res));
+  assert.deepStrictEqual(tiles(), []);
+  specAnswer = second;
+  await answer({ ok: false, error: "No spectrogram for x: the file changed on disk: load it again" });
+  assert.strictEqual(specEl().msg.textContent, "No spectrogram for x: the file changed on disk: load it again");
+  // An MP3 clip: says why, asks nothing.
+  specCalls.length = 0;
+  loadSp("s3", { compressed: true });
+  vm.runInContext("loadSpectrogram()", context);
+  assert.deepStrictEqual(specCalls, []);
+  assert.match(specEl().msg.textContent, /MP3 clips have no spectrogram/);
+  // Off: gone, and remembered.
+  loadSp("s4");
+  vm.runInContext("loadSpectrogram()", context);
+  await answer(specInfo);
+  assert.strictEqual(tiles().length, 4);
+  $("spectrogram").checked = false; $("spectrogram").onchange();
+  assert.ok(specEl() === null && tiles().length === 0 && !wrapper.children.some((c) => c.className === "spectrogram"));
+  await vm.runInContext("S.spec.save || Promise.resolve()", context);
+  assert.deepStrictEqual(specSaves, [true, false]);
+  // Remembered on at the next start.
+  vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
+  assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context));
+  vm.runInContext(`S.spec.on = false; hideSpectrogram(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   console.log("ok");

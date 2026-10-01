@@ -12,6 +12,8 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
             // Enhance (see enhanceGraph): the settings, the Web Audio graph once one was needed, "Exports enhanced"
             enh: { settings: null, ctx: null, source: null, nodes: [], topology: null, exportHeard: false,
                    save: null, dirty: false, curve: null },
+            // The spectrogram under the waveform (see loadSpectrogram): shown?, its answer, its element and tiles
+            spec: { on: false, seq: 0, info: null, url: null, el: null, imgs: new Map(), queued: false, save: null, dirty: false },
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -276,6 +278,7 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   if (seq !== S.playSeq) return;
   status("");
   drawMarks(seq);
+  loadSpectrogram();
   if (r.imported) banner(`Loaded ${plural(r.imported, "EVP mark")} stored in this file.`, "ok");
   if (autoplay) S.ws.play();
 }
@@ -1445,6 +1448,7 @@ function heldLibraryFile() {                   // the library file in the player
 
 function unloadPlayer() {                      // stop, and let go of the file
   S.playSeq++;
+  hideSpectrogram();
   S.ws.pause();
   S.ws.empty();
   const media = S.ws.getMediaElement && S.ws.getMediaElement();
@@ -2050,6 +2054,7 @@ function setupPlayer() {
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
   setupSpeed();
   setupEnhance();
+  setupSpectrogram();
   setupSelection();                         // once: the plugin stays registered across loads
   setupMarks();
   $("open-wav").onclick = openWav;
@@ -2393,6 +2398,154 @@ function setupEnhance() {
 
 function resetEnhance() { setEnhance({ ...ENH_DEFAULT }); }
 
+// ---- Spectrogram: under the waveform, scrolled and zoomed with it ----------------------------
+// The backend computes it from the audio the player plays (openevp/spectrogram.py) and serves it
+// as PNG tiles at several levels of detail (each half the columns of the one before). The page
+// shows only the tiles in view, at the coarsest level that still has a column for every pixel,
+// in an element inside wavesurfer's own scrolling wrapper (so the cursor, the marks and a drag
+// selection cover it too). Shown or not is remembered.
+const SPEC_HEIGHT = 120;
+
+function setupSpectrogram() {
+  S.spec.on = S.caps.spectrogram === true;
+  $("spectrogram").checked = S.spec.on;
+  $("spectrogram").onchange = () => setSpectrogram($("spectrogram").checked);
+  for (const ev of ["zoom", "scroll", "redraw"]) S.ws.on(ev, queueSpectrogram);
+}
+
+function setSpectrogram(on) {
+  S.spec.on = !!on;
+  $("spectrogram").checked = S.spec.on;
+  if (S.spec.on) loadSpectrogram(); else hideSpectrogram();
+  S.spec.dirty = true;
+  if (!S.spec.save) {
+    S.spec.save = (async () => {
+      while (S.spec.dirty) {
+        await null;
+        S.spec.dirty = false;
+        let r;
+        try { r = await api().set_spectrogram(S.spec.on); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+        if (r.ok) S.caps.spectrogram = r.spectrogram;
+        else showError(r);
+      }
+      S.spec.save = null;
+    })();
+  }
+  return S.spec.save;
+}
+
+// Ask for the spectrogram of what the player plays now (a newer request wins).
+async function loadSpectrogram() {
+  const seq = ++S.spec.seq;
+  clearSpectrogramTiles();
+  S.spec.info = null;
+  if (!S.spec.on || !S.current || !S.ws.getDuration()) return;
+  if (S.current.compressed) { specMessage("MP3 clips have no spectrogram here. The recording they came from does."); return; }
+  const { rec } = S.current, url = S.current.playing;
+  specMessage("Computing the spectrogram…");
+  let r;
+  try { r = await api().spectrogram(rec, url); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (seq !== S.spec.seq || !S.spec.on || !S.current || S.current.rec !== rec || S.current.playing !== url) return;
+  if (!r.ok) { specMessage(errorText(r)); return; }
+  S.spec.info = r; S.spec.url = url;
+  specMessage("");
+  specLabels(r.fmax);
+  renderSpectrogram();
+}
+
+function hideSpectrogram() {
+  S.spec.seq++;
+  S.spec.info = null;
+  clearSpectrogramTiles();
+  if (S.spec.el) { S.spec.el.remove(); S.spec.el = null; }
+}
+
+function clearSpectrogramTiles() {
+  for (const img of S.spec.imgs.values()) img.remove();
+  S.spec.imgs.clear();
+}
+
+// Its element, inside wavesurfer's wrapper (a shadow DOM: styles inline): tiles, the frequency
+// labels (sticky at the left edge of the view) and a line for messages.
+function specElement() {
+  if (S.spec.el) return S.spec.el;
+  const el = document.createElement("div");
+  el.className = "spectrogram";
+  Object.assign(el.style, { position: "relative", height: `${SPEC_HEIGHT}px`, marginTop: "2px", background: "#000004" });
+  const labels = document.createElement("div");
+  Object.assign(labels.style, { position: "sticky", left: "0", width: "44px", height: "100%", zIndex: "4", pointerEvents: "none",
+                                font: "10px/1 Segoe UI, sans-serif", color: "#fff", textShadow: "0 0 2px #000, 0 0 2px #000" });
+  const msg = document.createElement("div");
+  Object.assign(msg.style, { position: "sticky", left: "48px", top: "0", padding: "4px", font: "12px Segoe UI, sans-serif",
+                             color: "#ccc", pointerEvents: "none", zIndex: "4" });
+  el.append(labels, msg);
+  el.labels = labels; el.msg = msg;
+  S.ws.getWrapper().appendChild(el);
+  S.spec.el = el;
+  return el;
+}
+
+function specMessage(text) {
+  const el = specElement();
+  el.msg.textContent = text;
+  el.msg.hidden = !text;
+}
+
+function specLabels(fmax) {
+  const box = specElement().labels;
+  box.textContent = "";
+  const step = fmax > 6000 ? 2000 : 1000;
+  for (let f = step; f < fmax; f += step) {
+    const s = document.createElement("span");
+    Object.assign(s.style, { position: "absolute", left: "3px", bottom: `${(100 * f / fmax).toFixed(2)}%`, transform: "translateY(50%)" });
+    s.textContent = `${f / 1000} kHz`;
+    box.appendChild(s);
+  }
+}
+
+function queueSpectrogram() {
+  if (S.spec.queued || !S.spec.info) return;
+  S.spec.queued = true;
+  requestAnimationFrame(renderSpectrogram);
+}
+
+// The coarsest level with at least one column per pixel of the waveform's full width.
+function specLevel(info, width) {
+  let level = 0;
+  while (level + 1 < info.levels && Math.ceil(info.columns / 2 ** (level + 1)) >= width) level++;
+  return level;
+}
+
+function renderSpectrogram() {
+  S.spec.queued = false;
+  const info = S.spec.info, duration = S.ws.getDuration();
+  if (!info || !S.spec.on || !duration) return;
+  const el = specElement();
+  const width = Math.max(1, S.ws.getWrapper().clientWidth || 0), view = $("waveform").clientWidth || width;
+  const level = specLevel(info, width), span = info.tile * 2 ** level;      // base columns per tile
+  const perPx = info.columns / width, scroll = S.ws.getScroll() || 0;
+  const first = Math.max(0, Math.floor(scroll * perPx / span) - 1);
+  const last = Math.min(Math.ceil(info.columns / span) - 1, Math.floor((scroll + view) * perPx / span) + 1);
+  const wanted = new Set();
+  for (let i = first; i <= last; i++) {
+    const k = `${level}/${i}`;
+    wanted.add(k);
+    if (S.spec.imgs.has(k)) continue;
+    const img = document.createElement("img");
+    const c0 = i * span, cols = Math.min(span, info.columns - c0);
+    Object.assign(img.style, { position: "absolute", top: "0", height: "100%", pointerEvents: "none",
+                               left: `${(100 * (c0 - 0.5) * info.column_seconds / duration).toFixed(5)}%`,
+                               width: `${(100 * cols * info.column_seconds / duration).toFixed(5)}%`,
+                               imageRendering: perPx < 1 ? "pixelated" : "auto" });
+    img.alt = "";
+    img.draggable = false;
+    img.src = `${info.tiles}/${level}/${i}.png`;
+    el.insertBefore(img, el.labels);
+    S.spec.imgs.set(k, img);
+  }
+  for (const [k, img] of S.spec.imgs) if (!wanted.has(k)) { img.remove(); S.spec.imgs.delete(k); }
+}
+
 // ---- Selection: drag across the waveform to pick a part; play or loop just that part ----
 function fmtPrecise(s) {
   const m = Math.floor(s / 60);
@@ -2656,6 +2809,7 @@ function setCurrent(label, r) {
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
   S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null, rate: r.rate || 0,
+                    url: r.url || null, playing: r.url || null, compressed: !!r.compressed,
                     markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
@@ -2665,6 +2819,7 @@ function setCurrent(label, r) {
   renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
   renderMarks();
   showEnhance(); applyEnhance();                // Cut hiss and the filters depend on its sample rate
+  hideSpectrogram();                            // drawn again once the new one is loaded
 }
 
 function sortMarks(marks) { return marks.slice().sort((a, b) => a.start - b.start); }

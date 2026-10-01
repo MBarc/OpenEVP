@@ -128,6 +128,8 @@
         <input id="zoom" type="range" min="0" max="1000" step="any" value="0"></label>
       <label title="Make quiet parts taller (or hold Shift and scroll over the waveform)">Height
         <input id="height" type="range" min="1" max="100" step="any" value="1"></label>
+      <label id="spectrogram-label" title="Show a spectrogram under the waveform: time across, pitch up (0 Hz at the bottom), loudness as colour (dark: quiet, yellow: loud). Voices show as stacked bright bands.">
+        <input id="spectrogram" type="checkbox"> Spectrogram</label>
       <label id="speed-label" title="Playback speed: [ slower, ] faster, \ back to 1× (or double-click the slider)"><span>Speed <span id="speed-value">1×</span></span>
         <input id="speed" type="range" min="0" max="6" step="1" value="3"></label>
       <label id="keep-pitch-label" title="On: slower or faster speech at its normal pitch. Off: like a tape, the pitch changes with the speed.">

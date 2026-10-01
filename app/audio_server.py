@@ -24,6 +24,11 @@ prepare_mp3() registers an MP3 clip (one in a Clips folder OpenEVP made) the
 same way, served in place as audio/mpeg: the page decodes it itself (WebView2
 plays and decodes MP3), so it has no peaks and no fingerprint (it is never
 marked). Its rate, channels and length come from its frame headers.
+
+The listening tools read the audio a URL serves (open_audio(): the cached
+decode, or the user's file, refused once it changed on disk), and the player's
+spectrogram is served from here too: add_spectrogram() keeps the last few
+(openevp.spectrogram) and serves their tiles as PNG images.
 """
 import errno
 import hashlib
@@ -40,6 +45,7 @@ import numpy as np
 
 from openevp import mp3, wavinfo
 
+SPECTROGRAMS = 3                       # spectrograms kept (a 30-minute ICD-ST25 one is about 60 MB)
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
 MAX_PEAKS = 400_000                    # longer files get fewer per second (keeps the page responsive)
 _RANGE = re.compile(r"bytes=(\d*)-(\d*)$")
@@ -207,6 +213,7 @@ class AudioServer:
         self._by_file = {}                   # file id -> key
         self._lock = threading.Lock()
         self._inflight = {}                  # key -> threading.Lock (one decode per key)
+        self._specs = OrderedDict()          # spectrogram id -> (file id, openevp.spectrogram.Spectrogram); LRU order
         self._httpd = None
 
     def start(self):
@@ -375,6 +382,70 @@ class AudioServer:
             info["compressed"] = True
         return info
 
+    def _file_of(self, url):
+        """(path, entry) of the audio a URL of this server serves; ValueError if none."""
+        m = re.fullmatch(r"http://127\.0\.0\.1:\d+/([^/]+)/([0-9a-f]{16})\.(wav|mp3)", url or "")
+        with self._lock:
+            key = self._by_file.get(m.group(2)) if m and secrets.compare_digest(m.group(1), self._token) else None
+            e = self._entries.get(key) if key is not None else None
+            if e is None:
+                raise ValueError("that audio is no longer loaded: load the recording again")
+            path = e.get("path") or os.path.join(self._dir, e["file"] + ".wav")
+            return path, dict(e)
+
+    def file_id(self, url):
+        """The file id of a URL of this server (ValueError if it serves nothing)."""
+        return self._file_of(url)[1]["file"]
+
+    def open_audio(self, url):
+        """The WAV a URL serves, opened for reading (a binary file; close it). A file
+        served in place that changed on disk since it was loaded is refused
+        (ValueError), as the player's requests are. An MP3 clip is refused too."""
+        path, e = self._file_of(url)
+        if e.get("ext", "wav") != "wav":
+            raise ValueError("an MP3 clip can't be analysed here")
+        f = _open_shared(path)
+        if "stat" in e and _stat_of(os.fstat(f.fileno())) != e["stat"]:
+            f.close()
+            raise ValueError("the file changed on disk: load it again")
+        return f
+
+    def add_spectrogram(self, url, spec):
+        """Keep a spectrogram of the audio at url; returns its tiles' base URL
+        (<base>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""
+        file_id = self.file_id(url)
+        sid = secrets.token_hex(8)
+        with self._lock:
+            self._specs[sid] = (file_id, spec)
+            while len(self._specs) > SPECTROGRAMS:
+                self._specs.popitem(last=False)
+        return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/spec/{sid}"
+
+    def spectrogram_of(self, url):
+        """(tiles base URL, spectrogram) already kept for the audio at url, or None."""
+        file_id = self.file_id(url)
+        with self._lock:
+            for sid, (fid, spec) in reversed(self._specs.items()):
+                if fid == file_id:
+                    self._specs.move_to_end(sid)
+                    return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/spec/{sid}", spec
+        return None
+
+    def _tile(self, h, m):
+        with self._lock:
+            ok = secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._specs
+            spec = self._specs[m.group(2)][1] if ok else None
+        png = spec.tile(int(m.group(3)), int(m.group(4))) if spec is not None and len(m.group(3)) < 4 and len(m.group(4)) < 9 else None
+        if png is None:
+            h.send_error(404)
+            return
+        h.send_response(200)
+        h.send_header("Content-Type", "image/png")
+        h.send_header("Content-Length", str(len(png)))
+        h.send_header("Cache-Control", "max-age=3600")
+        h.end_headers()
+        h.wfile.write(png)
+
     def retarget_prefix(self, old, new):
         """A file or folder moved from `old` to `new` (same volume, so the same
         size and mtime): every file served in place from `old` or under it is
@@ -425,6 +496,10 @@ class AudioServer:
             pass                                     # still being served; the temp dir is removed at exit
 
     def _handle(self, h):
+        t = re.fullmatch(r"/([^/]+)/spec/([0-9a-f]{16})/(\d+)/(\d+)\.png", h.path)
+        if t:
+            self._tile(h, t)
+            return
         m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.(wav|mp3)", h.path)
         with self._lock:
             ok = m and secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._by_file

@@ -45,6 +45,9 @@ are settings too (playback_speed / keep_pitch; set_playback_speed()). They can a
 save "as heard" (heard: the player's Enhance settings, openevp.enhance, applied
 after the speed, as the player applies them to what it plays; the names then end
 in "_enhanced"); the Enhance settings are a setting too (enhance; set_enhance()).
+The player's spectrogram (spectrogram(): openevp.spectrogram, served as tiles by
+the audio server) is computed here from the audio the player plays; whether it is
+shown is a setting (spectrogram; set_spectrogram()).
 The Clips folders it creates hold a marker file: the library lists their clips
 (playable, in the folder view only) but never imports their markers, never
 counts them as EVPs and never cuts clips from them again.
@@ -60,7 +63,7 @@ import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, enhance, formats, mp3, recorders, stretch, wavinfo
+from openevp import __version__, clips, enhance, formats, mp3, pcm, recorders, spectrogram, stretch, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -97,6 +100,7 @@ CLIP_FORMAT = "clip_format"         # the setting: one of clips.FORMATS
 PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
 ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
+SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool)
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -473,6 +477,7 @@ class Api(LibraryOps):
         self._clip_format = None              # the clip format picked in this session (when it could not be remembered)
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
+        self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -538,6 +543,7 @@ class Api(LibraryOps):
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
                 **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
+                "spectrogram": self.spectrogram_shown(),
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -702,7 +708,7 @@ class Api(LibraryOps):
         rec handle, and the recording's marks, reviewed flag and backup status."""
         rec = secrets.token_hex(8)
         entry = {"fp": info.get("fp"), "duration": info.get("duration"), "name": name, "label": label,
-                 "source": source}
+                 "source": source, "url": info.get("url"), "variants": set()}
         with self._recs_lock:
             _bounded_put(self._recs, rec, entry)
         return {"ok": True, **info, **(extra or {}), "rec": rec, **self._marks_state(entry["fp"], source)}
@@ -1107,6 +1113,66 @@ class Api(LibraryOps):
                 pass
         self._enhance = None if remembered else settings
         return {"ok": True, "enhance": settings, "remembered": remembered}
+
+    def spectrogram_shown(self):
+        """Is the player's spectrogram shown? (Picked in this session if it could not be
+        remembered, else remembered, else False.)"""
+        if self._spectrogram is not None:
+            return self._spectrogram
+        saved = self._store.get_setting(SPECTROGRAM) if self._store is not None else None
+        return saved if isinstance(saved, bool) else False
+
+    def set_spectrogram(self, shown):
+        """Show the spectrogram or not, and remember it. {"ok", "spectrogram", "remembered"}."""
+        if not isinstance(shown, bool):
+            return _fail("Unknown spectrogram setting.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(SPECTROGRAM, shown)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._spectrogram = None if remembered else shown
+        return {"ok": True, "spectrogram": shown, "remembered": remembered}
+
+    def _audio_url(self, entry, url):
+        """The URL of audio the player has for this recording: url if it is one of
+        them (its own audio, or a noise-reduced version of it), its own if url is None."""
+        with self._recs_lock:
+            ok = url is None or url == entry.get("url") or url in entry.get("variants", ())
+        return (entry.get("url") if url is None else url) if ok else None
+
+    def spectrogram(self, rec, url=None):
+        """The spectrogram of the loaded recording's audio (or of url, a version of it
+        the player has, e.g. noise-reduced): computed once (openevp.spectrogram) and
+        served as PNG tiles by the audio server. {"ok", "tiles" (the tiles' base URL:
+        <tiles>/<level>/<index>.png), "columns", "rows", "column_seconds", "levels",
+        "tile", "fmax", "fft"}. Runs on the caller's thread; stops when the app closes."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        url = self._audio_url(entry, url)
+        if not url:
+            return _fail("That audio is not loaded. Load the recording again.")
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        try:
+            found = self._server.spectrogram_of(url)
+            if found is None:
+                with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
+                    spec = spectrogram.compute(reader, should_stop=self._stop.is_set)
+                found = self._server.add_spectrogram(url, spec), spec
+        except spectrogram.Cancelled:
+            return _fail(CLOSING)
+        except (OSError, ValueError) as e:
+            return _fail(f"No spectrogram for {entry['name']}: {_plain(e)}")
+        except MemoryError:
+            return _fail(f"There is not enough memory for the spectrogram of {entry['name']}.",
+                         "Close other programs and try again.")
+        except Exception as e:
+            return _error(e)
+        return {"ok": True, "tiles": found[0], **found[1].info()}
 
     def _clip_format_refused(self, fmt):
         """Why clips in fmt cannot be made in this build (no MP3 encoder), or None."""

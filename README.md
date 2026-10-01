@@ -274,6 +274,22 @@ still differ very slightly: the player filters at the sound card's rate after
 resampling, and its Leveler delays the sound by 6 ms (an export keeps every
 position, so its marks stay put).
 
+### Spectrogram
+
+Tick **Spectrogram** (under Height) to see one under the waveform: time across,
+pitch up (0 Hz at the bottom, labelled in kHz), loudness as colour from black
+through purple and red to pale yellow. A voice shows as stacked bright bands
+(its harmonics) shaped by its formants, which is often easier to spot than in
+the waveform, even under noise. It scrolls and zooms with the waveform, and the
+cursor, the marks and a drag selection cover it too. The choice is remembered.
+
+It is computed by OpenEVP itself, not the page: about 32 ms windows (256-point
+FFT at 8 kHz, 512 at 16 kHz, 1024 at 44.1/48 kHz), up to 8 kHz (a 44.1 kHz
+recording has little but hiss above that), at several levels of detail served
+as image tiles, so only what is on screen is drawn. A 30-minute ICD-ST25
+recording takes under 2 seconds and about 60 MB; MP3 clips have none (open the
+recording they came from).
+
 ### EVP clips
 
 **Export clips** (next to Export WAV with marks) saves every mark of the loaded
