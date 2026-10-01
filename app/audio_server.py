@@ -43,6 +43,10 @@ import numpy as np
 
 from openevp import wavinfo
 
+# Sent with every response (Handler.end_headers): any origin may read it (only this machine can connect,
+# and every URL carries the per-run token); the page may read the range headers of a partial answer.
+CORS_HEADERS = (("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges"))
 SPECTROGRAMS = 3                       # spectrograms kept (a 30-minute ICD-ST25 one is about 60 MB)
 PEAKS_PER_SECOND = 400                 # the player's deepest zoom (px per second), so zooming shows real detail
 MAX_PEAKS = 400_000                    # longer files get fewer per second (keeps the page responsive)
@@ -222,6 +226,22 @@ class AudioServer:
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 server._handle(self)
+
+            def do_OPTIONS(self):                # a CORS preflight (a fetch with a Range header, say)
+                self.send_response(204)
+                self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Range")
+                self.send_header("Access-Control-Max-Age", "600")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def end_headers(self):
+                # Every answer, errors included, carries the CORS headers: the UI is served from
+                # another local port and its media element asks for CORS (Web Audio needs it), so
+                # without them a 404/409/416 would reach the page as an opaque network failure.
+                for k, v in CORS_HEADERS:
+                    self.send_header(k, v)
+                super().end_headers()
 
             def log_message(self, *args):
                 pass
@@ -505,7 +525,6 @@ class AudioServer:
             h.send_header("Content-Type", "audio/wav")
             h.send_header("Accept-Ranges", "bytes")
             h.send_header("Content-Length", str(end - start + 1))
-            h.send_header("Access-Control-Allow-Origin", "*")   # the UI is served from another local port
             if status == 206:
                 h.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             h.end_headers()
