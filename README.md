@@ -243,8 +243,9 @@ Right of the waveform, three small tabs hold the player's settings: **View**
 use the arrow keys on it (Home and End for the first and last); the last one
 you picked is shown again next time. A tab with something changed from its
 default shows a dot (**Speed •** while the speed isn't 1×, **Enhance •** while
-anything there is on, **View •** with the spectrogram off or the height raised),
-and its tooltip says what, so a setting is never hidden behind another tab. The
+anything there is on, **View •** with the spectrogram off, the height raised or
+the waveform zoomed in past fit-to-width), and its tooltip says what, so a
+setting is never hidden behind another tab. The
 keyboard shortcuts (`[` `]` `\`, M, Space) work whichever tab is shown.
 
 ### Playback speed

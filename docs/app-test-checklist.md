@@ -215,8 +215,10 @@ Player settings tabs:
     and their tooltips say "On now: Speed 0.5×" / "On now: Boost +6 dB". With
     the View tab shown, `]` `[` `\` change the speed (the Speed tab's dot follows),
     M marks a selection, Space plays and pauses, a mark's 🔁 loops. Untick
-    Spectrogram: **View •**. Close and start OpenEVP: the tab you last picked is
-    shown.
+    Spectrogram: **View •**. Zoom in (the slider or the mouse wheel over the
+    waveform): **View •** with "On now: Zoom …×"; zoom back out to fit the
+    whole file: the dot clears. Close and start OpenEVP: the tab you last
+    picked is shown.
 
 Show in File Explorer:
 

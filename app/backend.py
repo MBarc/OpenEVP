@@ -2333,7 +2333,9 @@ class Api(LibraryOps):
 
     # ---- updates ------------------------------------------------------------------
     def check_update(self):
-        """Is a newer release out? {ok, available, current[, version, notes, page]}."""
+        """Is a newer release out? {ok, available, current[, version, notes, page, releases,
+        earlier, can_install]}: releases are the notes of every release skipped over,
+        newest first ({version, date, notes}), earlier how many more there are."""
         current = {"ok": True, "available": False, "current": __version__}
         if self._updater is None:
             return current
@@ -2345,7 +2347,9 @@ class Api(LibraryOps):
         if not info:
             return current
         return {**current, "available": True, "version": info["version"], "notes": info["notes"],
-                "page": info["page"], "can_install": self._can_install}
+                "page": info["page"], "can_install": self._can_install,
+                "releases": info.get("releases") or [{"version": info["version"], "date": "", "notes": info["notes"]}],
+                "earlier": info.get("earlier", 0)}
 
     def install_update(self):
         """Download the release found by check_update(), check its signature, start

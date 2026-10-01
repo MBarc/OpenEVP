@@ -209,7 +209,12 @@ td.note { color: var(--warn); }
 .modal[hidden] { display: none; }
 .modal-card { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 20px 24px; width: min(520px, 90vw); box-shadow: 0 8px 30px rgba(0, 0, 0, .3); }
 .modal-card h2 { margin: 0 0 12px; font-size: 18px; }
-#update-notes { max-height: 240px; overflow: auto; font-size: 13px; border-left: 3px solid var(--line); padding-left: 10px; }
+#update-notes { max-height: min(360px, 55vh); overflow: auto; font-size: 13px; border-left: 3px solid var(--line); padding-left: 10px; }
+#update-notes .release + .release { margin-top: 6px; }
+#update-notes summary { cursor: pointer; font-weight: 600; font-size: 14px; padding: 2px 0; }
+#update-notes .release-date { font-weight: normal; font-size: 12px; color: var(--muted); margin-left: 8px; }
+#update-notes .release-notes { padding: 4px 0 2px 16px; }
+#update-notes .muted { padding: 0; }
 #update-notes p, #update-notes ul, #update-notes ol { margin: 0 0 8px; }
 #update-notes ul, #update-notes ol { padding-left: 20px; }
 #update-notes h4 { margin: 8px 0 4px; font-size: 13px; }

@@ -134,7 +134,7 @@ async function checkForUpdate(manual) {
   if (!r.ok) { if (manual) showError(r); return; }
   if (!r.available) { if (manual) banner(`You have the latest version (${r.current}).`, "ok"); return; }
   $("update-title").textContent = `OpenEVP ${r.version} is available`;
-  renderNotes($("update-notes"), r.notes || "");
+  renderReleaseNotes($("update-notes"), r.releases || [{ version: r.version, notes: r.notes || "" }], r.earlier || 0);
   $("update-status").textContent = r.can_install
     ? `You have ${r.current}. Windows will ask for permission, then OpenEVP reopens on the new version. ` +
       "If it doesn't, start it from the Start menu."
@@ -254,6 +254,7 @@ function setZoom(px) {                             // zoom the waveform and move
   S.zoomPx = px;
   $("zoom").value = zoomSlider(px, S.zoomMax);
   S.ws.zoom(px);
+  showTabMarks();
 }
 
 async function loadIntoPlayer(seq, label, r, autoplay) {
@@ -280,6 +281,7 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
   }
   if (seq !== S.playSeq) return;
   status("");
+  showTabMarks();                               // the zoom factor depends on this file's duration
   drawMarks(seq);
   scheduleSpectrogram(seq);                     // after the waveform has painted: opening is never slower
   if (r.imported) banner(`Loaded ${plural(r.imported, "EVP mark")} stored in this file.`, "ok");
@@ -2064,7 +2066,7 @@ function setupPlayer() {
   S.ws.on("pause", () => { $("play").textContent = "▶"; });
   S.ws.on("error", (e) => { $("play").disabled = true; audioFailed(e); });
   $("play").onclick = () => S.ws.playPause();
-  $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); };
+  $("zoom").oninput = () => { S.zoomPx = zoomPx($("zoom").value, S.zoomMax); S.ws.zoom(S.zoomPx); showTabMarks(); };
   $("height").oninput = () => { S.ws.setOptions({ barHeight: Number($("height").value) }); showTabMarks(); };
   setupTabs();
   $("waveform").addEventListener("wheel", wheelZoom, { passive: false });
@@ -2154,10 +2156,17 @@ function tabKeys(e) {
   selectTab(next, true);
 }
 
-// What differs from the defaults, per tab ([] when nothing does). Zoom is not counted: it is
-// navigation, and the waveform itself shows it.
+// What differs from the defaults, per tab ([] when nothing does). Panning is not counted (the
+// waveform itself shows it), but zooming in past fit-to-width is: it is easy to forget the view
+// is narrowed, so the dot and "Zoom …×" say so.
 function tabChanges() {
   const view = [], speed = [], enhance = [];
+  const duration = S.ws && S.ws.getDuration();
+  if (S.zoomPx > 0 && typeof duration === "number" && duration > 0) {
+    const fit = $("waveform").clientWidth / duration;         // px per second at fit-to-width
+    const factor = fit > 0 ? S.zoomPx / fit : 1;
+    view.push(`Zoom ${factor.toFixed(1).replace(/\.0$/, "")}×`);
+  }
   if (S.spec && !S.spec.on) view.push("Spectrogram off");
   if (Number($("height").value) > 1) view.push("Height raised");
   if (S.speed !== 1) speed.push(`Speed ${S.speed}×`);

@@ -97,6 +97,8 @@ const byId = new Map();
 const document = {
   getElementById(id) { if (!byId.has(id)) byId.set(id, new Element(id === "format" ? "select" : "div", id)); return byId.get(id); },
   createElement(tag) { return new Element(tag); },
+  createTextNode(t) { return String(t); },                 // text: a plain string child
+  createDocumentFragment() { return new Element("#fragment"); },
   querySelectorAll() { return []; },
   querySelector() { return null; },
   addEventListener(type, fn, capture) { listen(document, type, fn, capture); },
@@ -213,6 +215,7 @@ const context = { window, document, WaveSurfer: anything, console, getComputedSt
                   setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, localStorage: window.localStorage,
                   Map, Set, JSON, Promise, Number, String, Math, Object, Array, RegExp };
 vm.createContext(context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "notes.js"), "utf8"), context);   // as index.html loads it
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "app.js"), "utf8"), context);
 
 const $ = (id) => document.getElementById(id);
@@ -1292,6 +1295,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     play: (t) => { spPlaying = true; if (t != null) spTime = t; }, pause: () => { spPlaying = false; },
     stop: () => { throw new Error("a speed change must not stop playback"); },
     isPlaying: () => spPlaying, getCurrentTime: () => spTime, getDuration: () => 3,
+    getScroll: () => 0, setScroll: () => {}, zoom: () => {},
     playPause: () => { spPlaying = !spPlaying; },
     load: async () => { media.playbackRate = media.defaultPlaybackRate; },          // the HTML load algorithm
   }, { get: (t, k) => (k in t ? t[k] : anything) });
@@ -1758,10 +1762,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   loopBtn(0).onclick(ev);
   assert.ok(vm.runInContext("S.markLoop && S.activeMark === 't1'", context));
   loopBtn(0).onclick(ev);
-  // View's dot: the spectrogram turned off, or Height raised (zoom is navigation: no dot).
+  // View's dot: the spectrogram turned off, Height raised, or the waveform zoomed in past fit
+  // (fit-to-width itself is plain navigation: no dot). Its tooltip names the zoom, like Speed's "…×".
   vm.runInContext(`S.spec.on = true; showTabMarks();`, context);
-  $("zoom").value = "500";
-  assert.ok(!tabMarked().includes("view"));
+  vm.runInContext(`S.zoomPx = 1200; showTabMarks();`, context);        // fit is 800/3 px/s here: 4.5×
+  assert.ok(tabMarked().includes("view"), "zoomed in past fit marks View");
+  assert.strictEqual($("tab-view").title, "Zoom, Height and the spectrogram. On now: Zoom 4.5×.");
+  vm.runInContext(`S.zoomPx = 0; showTabMarks();`, context);
+  assert.ok(!tabMarked().includes("view"), "back at fit (0): the dot clears");
+  // The zoom slider and the mouse wheel over the waveform both move S.zoomPx, and both refresh the dot.
+  $("zoom").value = String(context.zoomSlider(2000, vm.runInContext("S.zoomMax", context))); $("zoom").oninput();
+  assert.ok(vm.runInContext("S.zoomPx", context) > 0 && tabMarked().includes("view"), "the slider marks View once zoomed in");
+  $("zoom").value = "0"; $("zoom").oninput();
+  assert.ok(vm.runInContext("S.zoomPx", context) === 0 && !tabMarked().includes("view"), "the slider back at fit clears the dot");
+  fire([$("waveform")], "wheel", { deltaY: -100, clientX: 400 });
+  assert.ok(vm.runInContext("S.zoomPx", context) > 0 && tabMarked().includes("view"), "wheel-zooming in marks View");
+  for (let i = 0; i < 20 && vm.runInContext("S.zoomPx", context) > 0; i++) fire([$("waveform")], "wheel", { deltaY: 100, clientX: 400 });
+  assert.ok(vm.runInContext("S.zoomPx", context) === 0 && !tabMarked().includes("view"), "wheel-zooming back out to fit clears the dot");
   $("height").value = "20"; $("height").oninput();
   assert.ok(tabMarked().includes("view") && $("tab-view").title.endsWith("On now: Height raised."));
   $("height").value = "1"; $("height").oninput();
@@ -1999,5 +2016,28 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
+
+  // The update dialog lists every release the update skips over, newest first, each under its
+  // version heading with its notes beneath; markup in the notes stays text.
+  api.check_update = async () => ({ ok: true, available: true, current: "0.9.7", version: "0.10.0", notes: "n",
+    page: "p", can_install: true, earlier: 2, releases: [
+      { version: "0.10.0", date: "2026-10-01", notes: "## Fixes\n- <img src=x onerror=alert(1)>" },
+      { version: "0.9.9", date: "2026-09-20", notes: "y".repeat(800) },
+      { version: "0.9.8", date: "2026-09-10", notes: "" }] });
+  await context.checkForUpdate(false);
+  const dlg = $("update-notes");
+  assert.ok(!$("update-dialog").hidden);
+  assert.strictEqual($("update-title").textContent, "OpenEVP 0.10.0 is available");
+  const sections = dlg.children.filter((c) => c.tagName === "DETAILS");
+  assert.deepStrictEqual(sections.map((d) => d.children[0].children[0].textContent), ["What's new in 0.10.0", "0.9.9", "0.9.8"]);
+  assert.deepStrictEqual(sections.map((d) => d.open), [true, false, false]);
+  const first = sections[0].children[1];
+  assert.deepStrictEqual(first.children.map((c) => c.tagName), ["H4", "UL"]);
+  assert.strictEqual(first.children[1].textContent, "<img src=x onerror=alert(1)>");
+  assert.ok(!dlg.innerHTML && !first.children[1].children[0].innerHTML, "notes are built from text, not HTML");
+  assert.strictEqual(sections[2].children[1].textContent, "No notes for this release.");
+  assert.strictEqual(dlg.lastChild.textContent, "…and 2 earlier updates.");
+  $("update-later").onclick();
+  assert.ok($("update-dialog").hidden);
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

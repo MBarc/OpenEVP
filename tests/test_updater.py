@@ -76,6 +76,111 @@ class CheckTests(unittest.TestCase):
             updater._open("http://example.com/x")
 
 
+def listed(tag, body=None, names=(), **extra):
+    """One release as GitHub's releases list gives it."""
+    return {"tag_name": tag, "body": body if body is not None else f"Notes for {tag}",
+            "published_at": "2026-09-01T10:00:00Z", "html_url": f"https://github.com/{tag}",
+            "assets": [{"name": n, "size": 5, "browser_download_url": f"https://dl/old/{n}"} for n in names],
+            **extra}
+
+
+def page(url_page):
+    return f"{updater.RELEASES}&page={url_page}"
+
+
+class ReleaseNotesTests(unittest.TestCase):
+    """check() also returns the notes of every release the update skips over."""
+    LATEST_TAG = "v0.10.0"
+
+    def latest(self):
+        return release(tag=self.LATEST_TAG, names=("OpenEVP-Setup-0.10.0.exe", "OpenEVP-Setup-0.10.0.exe.sig"),
+                       body="Latest notes", published_at="2026-10-01T09:00:00Z")
+
+    def check(self, current, pages, latest=None):
+        web = Web({updater.LATEST: latest or self.latest(),
+                   **{page(i + 1): json.dumps(p).encode() for i, p in enumerate(pages)}})
+        return updater.check(current, opener=web)
+
+    def test_every_skipped_release_newest_first(self):
+        listing = [listed("v0.10.0", "Latest notes"),
+                   listed("v0.9.9", names=("OpenEVP-Setup-0.9.9.exe", "OpenEVP-Setup-0.9.9.exe.sig")),
+                   listed("v0.9.10-beta"),                         # not a plain version
+                   listed("v0.9.11", prerelease=True),
+                   listed("v0.9.12", draft=True),
+                   listed("v0.9.8"),                               # no installer: its notes still count
+                   listed("v0.11.0"),                              # newer than the latest (shouldn't happen): not shown
+                   listed("v0.9.7"), listed("v0.9.6")]             # not newer than this app
+        info = self.check("0.9.7", [[listing[i] for i in (5, 0, 2, 7, 1, 3, 4, 6, 8)]])   # GitHub's order isn't relied on
+        self.assertEqual([r["version"] for r in info["releases"]], ["0.10.0", "0.9.9", "0.9.8"])
+        self.assertEqual(info["releases"][0], {"version": "0.10.0", "date": "2026-10-01", "notes": "Latest notes"})
+        self.assertEqual(info["releases"][1], {"version": "0.9.9", "date": "2026-09-01", "notes": "Notes for v0.9.9"})
+        self.assertEqual((info["earlier"], info["notes"]), (0, "Latest notes"))
+
+    def test_installer_and_signature_are_the_latest_releases(self):
+        listing = [listed("v0.9.9", names=("OpenEVP-Setup-0.9.9.exe", "OpenEVP-Setup-0.9.9.exe.sig")),
+                   listed("v0.9.8", names=("OpenEVP-Setup-0.9.8.exe", "OpenEVP-Setup-0.9.8.exe.sig"))]
+        info = self.check("0.9.7", [listing])
+        self.assertEqual((info["version"], info["installer"], info["signature"], info["size"], info["page"]),
+                         ("0.10.0", "https://dl/OpenEVP-Setup-0.10.0.exe", "https://dl/OpenEVP-Setup-0.10.0.exe.sig",
+                          len(INSTALLER), "https://github.com/x"))
+        self.assertEqual([r["version"] for r in info["releases"]], ["0.10.0", "0.9.9", "0.9.8"])
+
+    def test_numeric_versions_across_0_9_to_0_10(self):
+        listing = [listed(f"v0.9.{n}") for n in (8, 9, 10, 11)] + [listed("v0.10.0")]
+        info = self.check("0.9.9", [listing])
+        self.assertEqual([r["version"] for r in info["releases"]], ["0.10.0", "0.9.11", "0.9.10"])
+
+    def test_capped_with_a_count_of_earlier_ones(self):
+        listing = [listed(f"v0.9.{n}") for n in range(1, 31)] + [listed("v0.10.0")]
+        info = self.check("0.9.0", [listing])
+        self.assertEqual(len(info["releases"]), updater.MAX_RELEASES)
+        self.assertEqual([r["version"] for r in info["releases"][:3]], ["0.10.0", "0.9.30", "0.9.29"])
+        self.assertEqual(info["releases"][-1]["version"], "0.9.12")
+        self.assertEqual(info["earlier"], 31 - updater.MAX_RELEASES)
+
+    def test_pages_are_followed_up_to_a_limit(self):
+        full = [listed(f"v0.{m}.{n}") for m in (1, 2, 3, 4) for n in range(25)]     # 100: a full page
+        later = [listed(f"v0.5.{n}") for n in range(100)]
+        last = [listed("v0.0.9")]                                                    # a short page: the end
+        info = self.check("0.0.1", [full, later, last])
+        self.assertEqual(info["earlier"], 1 + 200 + 1 - updater.MAX_RELEASES)      # 0.10.0, two full pages, the last
+        with mock.patch.object(updater, "MAX_PAGES", 1):
+            self.assertEqual(self.check("0.0.1", [full, later, last])["earlier"], 100 + 1 - updater.MAX_RELEASES)
+        info = self.check("0.0.1", [[listed("v0.0.9")]])                           # page 2 is never asked for
+        self.assertEqual([r["version"] for r in info["releases"]], ["0.10.0", "0.0.9"])
+
+    def test_a_failed_list_shows_the_latest_notes_only(self):
+        class Failing(Web):
+            def __call__(self, url, accept=None):
+                if url.startswith(updater.RELEASES):
+                    raise OSError("connection reset")
+                return super().__call__(url, accept)
+        for name, web in (("network", Failing({updater.LATEST: self.latest()})),
+                          ("not JSON", Web({updater.LATEST: self.latest(), page(1): b"<html>"})),
+                          ("not a list", Web({updater.LATEST: self.latest(), page(1): b'{"message": "x"}'})),
+                          ("second page fails", Web({updater.LATEST: self.latest(),
+                                                     page(1): json.dumps([listed("v0.9.9")] * 100).encode()}))):
+            with self.subTest(name):
+                info = updater.check("0.9.7", opener=web)
+                self.assertEqual(info["releases"], [{"version": "0.10.0", "date": "2026-10-01", "notes": "Latest notes"}])
+                self.assertEqual((info["earlier"], info["version"], info["installer"]),
+                                 (0, "0.10.0", "https://dl/OpenEVP-Setup-0.10.0.exe"))
+
+    def test_odd_entries_are_skipped(self):
+        info = self.check("0.9.7", [[None, "x", {"tag_name": None}, listed("v0.9.8", body=None) | {"body": None}]])
+        self.assertEqual(info["releases"][1], {"version": "0.9.8", "date": "2026-09-01", "notes": ""})
+
+    def test_not_asked_for_when_up_to_date(self):
+        asked = []
+
+        class Watch(Web):
+            def __call__(self, url, accept=None):
+                asked.append(url)
+                return super().__call__(url, accept)
+        self.assertIsNone(updater.check("0.10.0", opener=Watch({updater.LATEST: self.latest()})))
+        self.assertEqual(asked, [updater.LATEST])
+
+
 @unittest.skipIf(Ed25519PrivateKey is None, "needs the cryptography package")
 class DownloadTests(unittest.TestCase):
     def setUp(self):
@@ -195,6 +300,13 @@ class BackendUpdateTests(unittest.TestCase):
         return backend.Api(None, lambda *e: self.events.append(e), None, "D", None, updater=up,
                            quit_app=lambda: self.quits.append(1), can_install=can_install,
                            before_install=lambda: self.order.append("mutex dropped"))
+
+    def test_release_notes_are_passed_on(self):
+        releases = [{"version": "9.0.0", "date": "2026-10-01", "notes": "n"}, {"version": "8.9.0", "date": "", "notes": "m"}]
+        r = self.api(FakeUpdater({**self.INFO, "releases": releases, "earlier": 4})).check_update()
+        self.assertEqual((r["releases"], r["earlier"], r["notes"]), (releases, 4, "n"))
+        r = self.api(FakeUpdater(self.INFO)).check_update()                       # an updater without them
+        self.assertEqual((r["releases"], r["earlier"]), ([{"version": "9.0.0", "date": "", "notes": "n"}], 0))
 
     def test_no_update(self):
         r = self.api(FakeUpdater()).check_update()
