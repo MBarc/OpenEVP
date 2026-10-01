@@ -7,3 +7,7 @@ tests/vectors/lpec_st/*.pcm binary
 # LPEC SP test vectors: exact bytes (Sony-encoded synthetic frames in .dvf files and Sony's PCM for them).
 tests/vectors/lpec_sp/*.dvf binary
 tests/vectors/lpec_sp/*.pcm binary
+# MP3 decoder test vectors: exact bytes (tools/make_mp3_vectors.py).
+tests/vectors/mp3/*.mp3 binary
+tests/vectors/mp3/*.mp2 binary
+tests/vectors/mp3/*.mpeg binary

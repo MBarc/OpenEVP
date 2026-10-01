@@ -95,16 +95,16 @@ window.addEventListener("pywebviewready", async () => {
   $("dest").textContent = S.dest;
   $("version").textContent = `v${S.caps.version}`;
   $("about-version").textContent = `v${S.caps.version}`;
-  // The player always accepts a WAV file from disk. Clicking a recording to play it
+  // The player always accepts a WAV or MP3 file from disk. Clicking a recording to play it
   // (and WAV export) needs our LPEC decoder; without it rows are not clickable.
   setupPlayer();
   setupLibrary();
   loadLibrary();
   if (S.caps.wav) {
-    $("player-hint").textContent = "Select a recording, or open a WAV file, to analyze it here.";
+    $("player-hint").textContent = "Select a recording, or open an audio file, to analyze it here.";
     $("device-table").classList.add("playable");
   } else {
-    $("player-hint").textContent = "Open a WAV file to analyze it here. Recordings can't be played " +
+    $("player-hint").textContent = "Open an audio file to analyze it here. Recordings can't be played " +
                                    "here. " + wavStatus();
     const wav = $("format").querySelector('option[value="wav"]');
     wav.disabled = true;
@@ -214,8 +214,8 @@ function showPlayerLoaded(label) {
 const FULL_DETAIL_SAMPLES = 30 * 60 * 8000;
 
 function fullDetail(r) {                          // drawn from the audio itself?
-  // An MP3 clip (r.compressed) always is: the server has no peaks for it, the page decodes it.
-  return !!r.rate && (!!r.compressed || r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES);
+  // Every file arrives as a WAV from the audio server (a .dvf or an MP3 decoded there), with peaks.
+  return !!r.rate && r.duration * r.rate * (r.channels || 1) <= FULL_DETAIL_SAMPLES;
 }
 
 function maxZoom(r) {                             // px per second: one pixel per sample at the deepest zoom
@@ -955,11 +955,6 @@ function clipsOnly(folderId, ids) {
   const d = S.lib.folderById.get(folderId);
   return !!(d && d.in_clips) && !ids.every((id) => { const f = S.lib.byId.get(id); return f && f.clip; });
 }
-// An MP3 clip is listed only in a Clips folder: moved anywhere else it would vanish from the library.
-function mp3StaysInClips(folderId, ids) {
-  const d = S.lib.folderById.get(folderId);
-  return !(d && d.in_clips) && ids.some((id) => { const f = S.lib.byId.get(id); return f && f.type === "mp3"; });
-}
 function canRenameRecording(g) { return libraryToolsReady() && groupPickIds(g).length > 0; }
 
 function typePlayable(type) {                  // can files of this type ("dvf", "wav"...) be played here?
@@ -1646,10 +1641,8 @@ function moveDialog(ids = [...S.lib.selected]) {
     b.folderId = d.id;
     // The folder every picked file is in already (the folder shown, in the folder view).
     const here = ids.every((id) => L.byId.get(id).folder_id === d.id);
-    const mp3 = mp3StaysInClips(d.id, ids);
-    b.disabled = here || clipsOnly(d.id, ids) || mp3;
+    b.disabled = here || clipsOnly(d.id, ids);
     if (here) b.title = "They are in this folder already";
-    else if (mp3) b.title = "MP3 clips stay in Clips folders";
     else if (b.disabled) b.title = "A Clips folder is for EVP clips only";
     b.onclick = () => {
       target = d.id;
@@ -1725,7 +1718,6 @@ function dropTarget(e) {
   const el = e.target.closest("tr.lib-folder, #library-crumbs button.crumb");
   if (!el || !L.folderById.has(el.folderId) || el.folderId === L.folderId) return null;
   if (clipsOnly(el.folderId, S.drag.ids)) return null;   // a Clips folder takes clips only
-  if (mp3StaysInClips(el.folderId, S.drag.ids)) return null;   // and an MP3 clip stays in one
   return el;
 }
 
@@ -2201,7 +2193,7 @@ function setupSelection() {
 }
 
 // Playback that reaches the end of the file never leaves a region that ends there: loop it from here.
-// Nothing else happens at the end (an MP3 clip, say, which has no marks: only its selection can loop).
+// Nothing else happens at the end (a recording without marks, say: only its selection can loop).
 function playbackFinished() {
   const r = S.region && $("loop-selection").checked ? S.region : S.markLoop ? activeRegion() : null;
   if (r) r.play();
@@ -2352,7 +2344,7 @@ const NO_MARKS_TIP = "Marks are not available here.";
 const NO_LOOP_TIP = "A point marker has no length to loop.";
 
 function isMark(r) { return r.id.startsWith("mark-"); }
-// Marks can be changed: the store is writable, and the recording loaded can be marked (an MP3 clip can't).
+// Marks can be changed: the store is writable, and the recording loaded can be marked (the backend may say why not).
 function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only && !(S.current && S.current.markReason); }
 // Why the store is read-only, in the backend's words (another OpenEVP, or its lock file could not be opened).
 function readOnlyTip() { return S.caps.marks_read_only_reason || READ_ONLY_TIP; }
@@ -2439,7 +2431,7 @@ function setCurrent(label, r) {
   S.backupNeeded = !!(r && r.backup_needed);
   S.backupRunning = false;
   $("reviewed").checked = !!(r && r.reviewed);
-  renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
+  renderMarkTools();                            // a recording that can't be marked: the tools say why
   renderMarks();
 }
 

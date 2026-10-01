@@ -27,3 +27,5 @@ st25/lpec/lpec_core.dll
 driver-setup/
 # driver manifest, generated at build time (tools/make_driver_manifest.py)
 app/driver/models.json
+# the MP3 decoder's C core (minimp3), built by tools/build_lpec_core.py
+openevp/decoders/mp3/mp3_core.dll

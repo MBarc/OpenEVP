@@ -1,0 +1,32 @@
+{
+ "tone-16k-mono.mp3": {
+  "channels": 1,
+  "frames": 17280,
+  "pcm_sha256": "6a64186ca7e8054b4a7f1a1a9b70cd135ebf6585ee50332176925e37d29ed4d0",
+  "rate": 16000
+ },
+ "tone-32k-stereo.mp2": {
+  "channels": 2,
+  "frames": 32256,
+  "pcm_sha256": "150aed3097a91d615a4b73a824d992a4af99d24a0010d8e667bd9d64666c4414",
+  "rate": 32000
+ },
+ "tone-44k-stereo.mp3": {
+  "channels": 2,
+  "frames": 46080,
+  "pcm_sha256": "3c947f6534aa818d8432f13a60c3d18a4e6163eef29e2f78256a3125bd77ae28",
+  "rate": 44100
+ },
+ "tone-8k-mono.mp3": {
+  "channels": 1,
+  "frames": 9216,
+  "pcm_sha256": "e6e566f377c13f56d8eec6dc2a0dd577b5044b1da67594f3f3ca09f56577f6cc",
+  "rate": 8000
+ },
+ "vbr-xing-22k.mp3": {
+  "channels": 1,
+  "frames": 23616,
+  "pcm_sha256": "7ff9e07bc9b691a3f0a852a6b315aef9efb16dcd94d5d31b6b0d3bfcf8242d52",
+  "rate": 22050
+ }
+}
