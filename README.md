@@ -247,14 +247,21 @@ with **Open folder**.
   the WAV with marks.
 - Nothing is overwritten: a clip already saved with the same bytes counts as
   "already there"; a different one gets a numbered name ("… (2).wav").
-- Clips are for sharing, so the EVP Library ignores the `Clips` folders OpenEVP
-  creates: they are not listed, checked or counted, their markers are not read
-  as marks, and clips are never cut from clips. Open them with **Open folder**.
-  OpenEVP recognises its own `Clips` folders by a small hidden file inside,
-  `.openevp-clips`; delete that file and the folder shows up in the library
-  again. A folder you named `Clips` yourself is an ordinary folder (clips saved
-  into it show up in the library). Renaming, moving or deleting a folder takes
-  its `Clips` folder along untouched.
+- The EVP Library lists the `Clips` folders OpenEVP creates, with a film icon
+  and a **Clips** tag. Open one to see its clips; click a clip to play it. A clip
+  is an EVP already, so it never counts as one: its marker is not read as a
+  mark, clips are left out of **Has EVPs** (and the other filters), the folder
+  counts, the library total and the EVP chips, and **All recordings** leaves
+  them out (they are copies of parts of recordings). You can still mark a clip
+  in the player; the mark is kept, but it doesn't count either. Export clips
+  never cuts clips from clips.
+- Rename or delete a `Clips` folder like any other folder (delete goes to the
+  Recycle Bin), and renaming, moving or deleting a folder takes its `Clips`
+  folder along. Recordings can't be moved into a `Clips` folder: it is for
+  clips only. Clips can be moved out of it, and then are ordinary WAVs.
+- OpenEVP recognises its own `Clips` folders by a small hidden file inside,
+  `.openevp-clips`; delete that file and its clips count as ordinary recordings.
+  A folder you named `Clips` yourself is an ordinary folder.
 
 ### Where marks live
 

@@ -461,9 +461,10 @@ class LibraryClipsTests(unittest.TestCase):
         self.assertEqual(api.export_clips_folder("root", 1)["error"], backend.NO_MARKS)
 
 
-class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
-    """The Clips folders OpenEVP made (they hold its marker file, at any depth) hold output for
-    sharing: the library does not list, index, count or import markers from them; folder
+class ClipsFoldersInTheLibraryTests(tf.FolderApiBase):
+    """The Clips folders OpenEVP made (they hold its marker file, at any depth) are listed
+    with their clips, which play; but their markers are never imported, they never count
+    as EVPs, Export clips never cuts them again and recordings cannot be moved in. Folder
     operations carry them along. A folder the user named Clips is an ordinary folder."""
 
     def populate(self):
@@ -484,36 +485,99 @@ class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
     def fp(self, data):
         return wavinfo.wav_fingerprint(io.BytesIO(data))
 
-    def test_not_listed_indexed_imported_or_counted(self):
+    def row(self, r, name):
+        return next(f for f in r["files"] if f["name"] == name)
+
+    def test_listed_with_their_clips_but_never_imported_or_counted(self):
         self.populate()
         api = self.new_api()
         r = self.index(api)
-        self.assertEqual([f["name"] for f in r["files"]], ["real.wav", "user.wav"])
-        self.assertEqual(sorted(tuple(d["rel"]) for d in r["folders"]),
-                         [(), ("Case",), ("Case", "Night"), ("Other",), ("Other", "Clips")])
+        self.assertEqual(sorted((f["name"], f["clip"]) for f in r["files"]),
+                         [("a.wav", True), ("b.wav", True), ("c.wav", True), ("d.wav", True),
+                          ("real.wav", False), ("user.wav", False)])
+        self.assertTrue(all(f["fp"] for f in r["files"]))                       # indexed (and so playable)
+        flags = {tuple(d["rel"]): (d.get("clips", False), d.get("in_clips", False)) for d in r["folders"]}
+        self.assertEqual(flags, {(): (False, False), ("Case",): (False, False), ("Case", "Clips"): (True, True),
+                                 ("Case", "Clips", "Deeper"): (False, True), ("Case", "Night"): (False, False),
+                                 ("Case", "Night", "clips"): (True, True), ("CLIPS",): (True, True),
+                                 ("Other",): (False, False), ("Other", "Clips"): (False, False)})
+        self.assertEqual(self.row(r, "a.wav")["folder_id"], self.folder(r, "Case", "Clips"))
         self.assertEqual(len(self.store.marks(self.fp(self.real))), 1)          # markers outside Clips: imported
         for clip in (self.clip_a, self.clip_b):
             self.assertIsNone(self.store.recording(self.fp(clip)))              # never from a clip
+        self.assertEqual(self.row(r, "a.wav")["marks"], {"A": 0, "B": 0, "C": 0})
         self.assertEqual(set(self.store.summary()), {self.fp(self.real)})       # "Has EVPs" and counts: the recording only
         info = api.folder_info(self.folder(r, "Case"))
-        self.assertEqual({k: info[k] for k in ("recordings", "with_evps", "evps_at_least", "other_files", "subfolders")},
-                         {"recordings": 1, "with_evps": 1, "evps_at_least": False, "other_files": 5, "subfolders": 4})
+        self.assertEqual({k: info[k] for k in ("recordings", "with_evps", "clips", "evps_at_least", "other_files",
+                                               "subfolders")},
+                         {"recordings": 1, "with_evps": 1, "clips": 3, "evps_at_least": False, "other_files": 2,
+                          "subfolders": 4})
+        info = api.folder_info(self.folder(r, "Case", "Clips"))                  # the Clips folder itself
+        self.assertEqual({k: info[k] for k in ("recordings", "with_evps", "clips", "subfolders")},
+                         {"recordings": 0, "with_evps": 0, "clips": 2, "subfolders": 1})
+        info = api.folder_info(self.folder(r, "Case", "Clips", "Deeper"))        # a folder inside one
+        self.assertEqual((info["recordings"], info["clips"]), (0, 1))
+
+    def test_a_clip_plays_without_importing_its_markers_and_a_mark_added_never_counts(self):
+        self.populate()
+        api = self.new_api()
+        r = api.list_library()                                                   # not indexed yet: played first
+        loaded = api.play_library(self.file(r, "a.wav"))
+        self.assertTrue(loaded["ok"], loaded)
+        self.assertEqual((loaded["name"], loaded["imported"]), ("a.wav", 0))
+        self.assertIsNone(self.store.recording(self.fp(self.clip_a)))
+        self.assertEqual(api.get_marks(loaded["rec"])["marks"], [])
+        r = self.index(api)
+        self.assertIsNone(self.store.recording(self.fp(self.clip_a)))           # nor by the indexer
+        # Marked on purpose in the player: kept as usual, but the folders' figures stay the recordings'.
+        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "on the clip")["ok"])
+        self.assertEqual(len(self.store.marks(self.fp(self.clip_a))), 1)
+        r = self.index(api)
+        self.assertEqual(self.row(r, "a.wav")["marks"], {"A": 0, "B": 0, "C": 1})
+        self.assertTrue(self.row(r, "a.wav")["clip"])
+        self.assertEqual(len(api.library_marks(self.file(r, "a.wav"))["marks"]), 1)
+        for rel, evps in ((("Case",), 1), (("Case", "Clips"), 0)):
+            info = api.folder_info(self.folder(r, *rel))
+            self.assertEqual(info["with_evps"], evps, rel)
+        # Played again: still nothing imported, the mark is still the one added.
+        again = api.play_library(self.file(r, "a.wav"))
+        self.assertEqual(again["imported"], 0)
+        self.assertEqual([m["note"] for m in self.store.marks(self.fp(self.clip_a))], ["on the clip"])
+
+    def test_export_clips_never_cuts_clips(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
         self.store.add_mark(self.fp(self.user), 1.0, 1.2, "C", "", name="user.wav", duration=2.0)
+        self.store.add_mark(self.fp(self.clip_b), 0.1, 0.2, "A", "", name="b.wav", duration=1.0)   # a clip, marked
         event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_folder("root", 1))
         self.assertEqual((event, p["recordings"], p["saved"], p["skipped"]), ("clips-done", 2, 2, []))
         self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Clips"))),
                          [library_ops.CLIPS_MARKER, "Deeper", "a.wav", "real_EVP-A_00m00.5s_hi.wav"])
-        # The user's Clips folder got the clip, but no marker: OpenEVP did not create it, so it stays listed.
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Night", "clips"))),
+                         [library_ops.CLIPS_MARKER, "b.wav"])                    # the marked clip: not cut
+        # The user's Clips folder got the clip, but no marker: OpenEVP did not create it, so it stays ordinary.
         self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Other", "Clips"))),
                          ["user.wav", "user_EVP-C_00m01.0s.wav"])
-        self.assertEqual(sorted(f["name"] for f in self.index(api)["files"]),
-                         ["real.wav", "user.wav", "user_EVP-C_00m01.0s.wav"])     # OpenEVP's clips are not listed
+        r = self.index(api)
+        self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]),
+                         ["real.wav", "user.wav", "user_EVP-C_00m01.0s.wav"])
+        self.assertTrue(self.row(r, "real_EVP-A_00m00.5s_hi.wav")["clip"])
+        # A Clips folder (or one inside it), or clips picked as files: refused, nothing written.
+        for rel in (("Case", "Clips"), ("Case", "Clips", "Deeper"), ("Case", "Night", "clips")):
+            self.assertEqual(api.export_clips_folder(self.folder(r, *rel), 2)["error"], library_ops.CLIPS_AGAIN)
+        self.assertEqual(api.export_clips_files([self.file(r, "b.wav")], 3)["error"], library_ops.CLIPS_AGAIN)
+        self.assertFalse(api.clips_running())
+        self.assertEqual(sorted(os.listdir(os.path.join(self.lib, "Case", "Night", "clips"))),
+                         [library_ops.CLIPS_MARKER, "b.wav"])
 
-    def test_a_removed_marker_lists_the_folder_again(self):
+    def test_a_removed_marker_makes_them_recordings(self):
         self.populate()
         os.remove(os.path.join(self.lib, "Case", "Clips", library_ops.CLIPS_MARKER))
         r = self.index(self.new_api())
-        self.assertEqual(sorted(f["name"] for f in r["files"]), ["a.wav", "d.wav", "real.wav", "user.wav"])
+        self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]), ["a.wav", "d.wav", "real.wav", "user.wav"])
+        self.assertEqual(len(self.store.marks(self.fp(self.clip_a))), 1)        # an ordinary WAV's markers
+        self.assertIsNone(self.store.recording(self.fp(self.clip_b)))
 
     def test_a_save_to_folder_named_clips_is_an_ordinary_folder(self):
         self.lib = os.path.join(self.tmp, "Clips")                           # Save-to and library: "Clips"
@@ -521,11 +585,12 @@ class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
         self.write("Case/x.wav", tm.wav_bytes(b"x", seconds=2.0))
         api = self.new_api()
         r = self.index(api)
-        self.assertEqual([f["name"] for f in r["files"]], ["x.wav"])
+        self.assertEqual([(f["name"], f["clip"]) for f in r["files"]], [("x.wav", False)])
         self.store.add_mark(self.fp(tm.wav_bytes(b"x", seconds=2.0)), 0.5, 0.6, "A", "", name="x", duration=2.0)
         event, p = LibraryClipsTests.run_job(self, lambda: api.export_clips_folder("root", 1))
         self.assertEqual((event, p["saved"]), ("clips-done", 1))
-        self.assertEqual([f["name"] for f in self.index(api)["files"]], ["x.wav"])
+        self.assertEqual([(f["name"], f["clip"]) for f in self.index(api)["files"]],
+                         [("x.wav", False), ("x_EVP-A_00m00.5s.wav", True)])
 
     def test_rename_and_delete_carry_clips_along_untouched(self):
         self.populate()
@@ -537,7 +602,8 @@ class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
         with open(os.path.join(self.lib, "Case 2", "Night", "clips", "b.wav"), "rb") as f:
             self.assertEqual(f.read(), self.clip_b)
         r = self.index(api)
-        self.assertEqual([f["name"] for f in r["files"]], ["real.wav", "user.wav"])
+        self.assertEqual(sorted(f["name"] for f in r["files"] if f["clip"]), ["a.wav", "b.wav", "c.wav", "d.wav"])
+        self.assertTrue(next(d for d in r["folders"] if d["rel"] == ["Case 2", "Clips"])["clips"])
         with mock.patch.object(backend.Api, "_index_file", side_effect=AssertionError("clips are never read")):
             self.assertEqual(api.delete_folder(self.folder(r, "Case 2")), {"ok": True, "backups": 0})
         binned = os.path.join(self.tmp, "bin-1")
@@ -547,6 +613,90 @@ class ClipsFoldersAreNotLibraryTests(tf.FolderApiBase):
         self.assertIsNone(self.store.recording(self.fp(self.clip_a)))
         self.assertTrue(os.path.isfile(os.path.join(binned, "Clips", library_ops.CLIPS_MARKER)))
         self.assertEqual(self.names(), ["CLIPS", "Other"])
+
+    def test_a_clips_folder_itself_renames_and_deletes_like_any_folder(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        loaded = api.play_library(self.file(r, "c.wav"))
+        self.assertTrue(api.rename_folder(self.folder(r, "CLIPS"), "Shared EVPs")["ok"])
+        r = self.index(api)
+        renamed = next(d for d in r["folders"] if d["rel"] == ["Shared EVPs"])
+        self.assertTrue(renamed["clips"])                                       # its marker went along
+        self.assertTrue(self.row(r, "c.wav")["clip"])
+        self.assertEqual(api.recording_changed(loaded["rec"]), {"ok": True, "changed": False})
+        info = api.folder_info(renamed["id"])
+        self.assertEqual((info["recordings"], info["clips"], info["with_evps"]), (0, 1, 0))
+        self.assertEqual(api.delete_folder(renamed["id"]), {"ok": True, "backups": 0})
+        self.assertEqual(self.recycled, [os.path.join(self.lib, "Shared EVPs")])   # the Recycle Bin, never for good
+        self.assertTrue(os.path.isfile(os.path.join(self.tmp, "bin-1", "c.wav")))
+        self.assertEqual(self.names(), ["Case", "Other"])
+
+    def test_clips_never_push_recordings_off_the_list(self):
+        library_ops._make_clips_folder(os.path.join(self.lib, "A Clips"))     # walked before the recordings
+        for i in range(4):
+            self.write(f"A Clips/c{i}.wav", tm.wav_bytes(b"clip %d" % i))
+        for i in range(3):
+            self.write(f"B/r{i}.wav", tm.wav_bytes(b"rec %d" % i))
+        api = self.new_api()
+        with mock.patch.object(backend, "SAVED_LIMIT", 3):
+            r = api.list_library()
+            self.assertEqual(sorted(f["name"] for f in r["files"] if not f["clip"]), ["r0.wav", "r1.wav", "r2.wav"])
+            self.assertEqual(sorted(f["name"] for f in r["files"] if f["clip"]), ["c0.wav", "c1.wav", "c2.wav"])
+            self.assertTrue(r["truncated"])                                     # a clip was left off
+            os.remove(os.path.join(self.lib, "A Clips", "c3.wav"))
+            r = api.list_library()
+            self.assertEqual((len(r["files"]), r["truncated"]), (6, False))      # 3 recordings + 3 clips: all there
+            self.write("B/r3.wav", tm.wav_bytes(b"rec 3"))
+            r = api.list_library()
+            self.assertEqual(len([f for f in r["files"] if not f["clip"]]), 3)
+            self.assertTrue(r["truncated"])
+
+    def test_save_to_inside_a_clips_folder_is_refused(self):
+        self.populate()
+        api = self.new_api()
+        before = api.default_destination()
+        for rel in (("Case", "Clips"), ("Case", "Clips", "Deeper")):
+            picked = os.path.join(self.lib, *rel)
+            api._pick = lambda start, picked=picked: picked
+            self.assertEqual(api.choose_destination(), {**backend._fail(backend.SAVE_TO_CLIPS)})
+            self.assertEqual(api.default_destination(), before)
+            self.assertNotEqual(self.store.get_setting("save_folder"), picked)
+        ordinary = os.path.join(self.lib, "Other", "Clips")                      # the user's own: fine
+        api._pick = lambda start: ordinary
+        self.assertEqual(api.choose_destination(), ordinary)
+
+    def test_the_player_never_cuts_clips_from_a_clip(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        loaded = api.play_library(self.file(r, "a.wav"))
+        self.assertTrue(api.add_mark(loaded["rec"], 0.2, 0.4, "C", "")["ok"])
+        res = api.export_clips(loaded["rec"])
+        self.assertEqual((res["ok"], res["error"]), (False, library_ops.CLIPS_AGAIN))
+        self.assertFalse(os.path.exists(os.path.join(self.lib, "Case", "Clips", "Clips")))
+        self.assertFalse(api._busy.locked())
+
+    def test_recordings_cannot_be_moved_into_a_clips_folder(self):
+        self.populate()
+        api = self.new_api()
+        r = self.index(api)
+        for rel in (("Case", "Clips"), ("Case", "Clips", "Deeper")):
+            res = api.move_files([self.file(r, "real.wav")], self.folder(r, *rel))
+            self.assertEqual((res["ok"], res["error"]), (False, library_ops.CLIPS_ONLY))
+        res = api.move_files([self.file(r, "a.wav"), self.file(r, "real.wav")], self.folder(r, "Case", "Clips", "Deeper"))
+        self.assertEqual(res["error"], library_ops.CLIPS_ONLY)                  # any recording among them: none move
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, "Case", "Night", "real.wav")))
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, "Case", "Clips", "a.wav")))
+        # Clips move between Clips folders, and out of one (they are then ordinary WAVs).
+        res = api.move_files([self.file(r, "a.wav")], self.folder(r, "Case", "Clips", "Deeper"))
+        self.assertEqual(res["moved"], 1, res)
+        r = api.list_library()
+        res = api.move_files([self.file(r, "c.wav")], self.folder(r, "Other"))
+        self.assertEqual(res["moved"], 1, res)
+        r = api.list_library()
+        self.assertEqual({f["name"]: f["clip"] for f in r["files"] if f["name"] in ("a.wav", "c.wav")},
+                         {"a.wav": True, "c.wav": False})
 
 
 if __name__ == "__main__":

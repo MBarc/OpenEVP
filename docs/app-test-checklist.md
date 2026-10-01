@@ -67,8 +67,16 @@ EVP clips:
     the current recording. Close the window during one: the app asks first.
 23. A second OpenEVP window: Export clips (player and library) is refused with
     the "another OpenEVP is open" reason.
-24. After exporting clips into the library: the EVP Library shows no `Clips`
-    folder and no clip, "Has EVPs" and the folder counts are unchanged; the
-    `Clips` folder holds a hidden `.openevp-clips` file (Explorer: show hidden
-    items). Renaming the investigation folder keeps its `Clips` folder. Delete
-    `.openevp-clips`: the folder and its clips show up in the library again.
+24. After exporting clips into the library: the EVP Library lists the `Clips`
+    folder with the 🎞️ icon, a **Clips** tag and "N clips"; the library total,
+    "Has EVPs" and the folder counts and chips are unchanged. Open it: each clip
+    shows **Clip** in the EVP column and plays on a click, with no marks imported
+    (the marks list stays empty). Mark one in the player: the mark stays, but no
+    count, chip or "Has EVPs" changes. **All recordings** shows no clips. Export
+    clips is greyed out on the `Clips` folder and on a clip; Export clips on the
+    investigation cuts nothing from the clips. Moving a recording into `Clips`
+    is not offered (and dragging onto it does nothing). The `Clips` folder holds a
+    hidden `.openevp-clips` file (Explorer: show hidden items). Renaming the
+    investigation folder keeps its `Clips` folder; rename `Clips` itself (it keeps
+    its icon), then delete it: the dialog counts its clips, and it goes to the
+    Recycle Bin. Delete `.openevp-clips`: its clips count as recordings.
