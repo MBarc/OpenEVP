@@ -1646,6 +1646,117 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext(`S.caps = { ...S.caps, spectrogram: true }; setupSpectrogram();`, context);
   assert.ok($("spectrogram").checked && vm.runInContext("S.spec.on", context));
   vm.runInContext(`S.spec.on = false; hideSpectrogram(); setCurrent(null);`, context);
+
+  // ---- Noise reduction: Learn noise from a selection, Reduce noise plays a noise-reduced version ----
+  assert.ok(html.includes('<button id="learn-noise"'));
+  assert.ok(/id="reduce-noise"/.test(html) && /<input id="noise-amount" type="range" min="0" max="100" step="5" value="40"/.test(html));
+  assert.ok(/watery, warbling artefacts that can sound like whispers or voices/.test(html), "the tooltip warns");
+  const nLog = [];
+  let nTime = 12.5, nPlaying = true;
+  const nWs = new Proxy({ getMediaElement: () => enhMedia, getWrapper: () => wrapper, getScroll: () => 0, getDuration: () => 100,
+                          getCurrentTime: () => nTime, isPlaying: () => nPlaying,
+                          load: async (...a) => { nLog.push(JSON.parse(JSON.stringify(["load", ...a]))); nPlaying = false; },
+                          setTime: (t) => { nLog.push(["setTime", t]); nTime = t; }, play: () => { nLog.push(["play"]); nPlaying = true; },
+                          setOptions: () => {} },
+                        { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__ws = nWs;
+  vm.runInContext("S.ws = __ws;", context);
+  const nCalls = [];
+  let reduceAnswer = null;
+  api.learn_noise = async (...a) => { nCalls.push(["learn", ...a]); return { ok: true, profile: "p1", seconds: 0.8 }; };
+  api.reduce_noise = (...a) => { nCalls.push(["reduce", ...a]); return new Promise((res) => { reduceAnswer = res; }); };
+  api.cancel_denoise = async (job) => { nCalls.push(["cancel", job]); return { ok: true }; };
+  api.spectrogram = async () => ({ ok: false, error: "x" });
+  const loadN = (rec, extra = {}) => vm.runInContext(`setCurrent("Recording", ${JSON.stringify({ rec, duration: 100, fp: "fp-" + rec, rate: 44100,
+    url: `http://a/${rec}.wav`, peaks: [0.5], marks: [], backup: { status: null, detail: "" }, reviewed: false, ...extra })});`, context);
+  loadN("n1");
+  vm.runInContext("S.current.full = false;", context);
+  assert.ok($("reduce-noise").disabled && $("noise-amount").disabled, "no profile yet");
+  assert.match($("noise-status").textContent, /background noise only/);
+  assert.ok(!$("learn-noise").disabled);
+  // Learn noise from the selection.
+  const nSel = fakeRegions.addRegion({ id: "nsel", start: 2, end: 3.25 });
+  context.regionCreated(nSel);
+  await context.learnNoise();
+  assert.deepStrictEqual(nCalls, [["learn", "n1", 2, 3.25]]);
+  assert.ok(!$("reduce-noise").disabled);
+  assert.strictEqual($("noise-status").textContent, "Noise learnt from 0:02.0 – 0:03.3.");
+  assert.match($("banner-text").textContent, /Noise learnt/);
+  // Reduce noise: progress with Cancel, then the noise-reduced audio plays from where it was.
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  const job1 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls[1], ["reduce", "n1", "p1", 40, job1]);
+  assert.strictEqual($("noise-status").textContent, "Reducing the noise…");
+  window.onBackendEvent("denoise-progress", { job: job1, done: 25, total: 100 });
+  assert.deepStrictEqual([$("banner-text").textContent, $("banner-action").textContent, $("progress-fill").style.width],
+                         ["Reducing the noise… 25%", "Cancel", "25%"]);
+  window.onBackendEvent("denoise-progress", { job: job1 + 7, done: 90, total: 100 });             // another job's: ignored
+  assert.strictEqual($("banner-text").textContent, "Reducing the noise… 25%");
+  assert.ok($("enhanced-tag").hidden, "not on until it plays");
+  reduceAnswer({ ok: true, url: "http://a/n1-dn.wav", peaks: [0.2], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1-dn.wav", [[0.2]], 100], ["setTime", 12.5], ["play"]]);
+  assert.strictEqual(vm.runInContext("S.current.playing", context), "http://a/n1-dn.wav");
+  assert.deepStrictEqual(enhShown(), ["Enhance: on", true, false, false, true]);     // on, and exports follow (turned on now)
+  assert.ok($("banner").hidden && $("progress").hidden);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(context.exportHeard())), { denoise: { profile: "p1", amount: 40 } });
+  assert.strictEqual(vm.runInContext("S.current.fp", context), "fp-n1", "marks stay the recording's");
+  // A new amount: made again (the old one kept playing meanwhile); a newer answer wins.
+  $("noise-amount").value = "60"; $("noise-amount").oninput();
+  assert.strictEqual($("noise-amount-value").textContent, "60%");
+  $("noise-amount").onchange();
+  const job2 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls.slice(2), [["reduce", "n1", "p1", 60, job2]]);      // the first had finished: nothing to cancel
+  nLog.length = 0; nPlaying = false; nTime = 40;
+  reduceAnswer({ ok: true, url: "http://a/n1-dn60.wav", peaks: [0.1], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1-dn60.wav", [[0.1]], 100], ["setTime", 40]]);   // paused: stays paused
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(context.exportHeard())), { denoise: { profile: "p1", amount: 60 } });
+  // With Enhance on too, both go to exports.
+  $("cut-rumble").checked = true; $("cut-rumble").onchange();
+  assert.deepStrictEqual(Object.keys(context.exportHeard()), ["enhance", "denoise"]);
+  $("cut-rumble").checked = false; $("cut-rumble").onchange();
+  // Cancel while it runs: the job is stopped, Reduce noise goes off, the recording's own audio plays.
+  $("noise-amount").value = "20"; $("noise-amount").onchange();
+  const job2b = vm.runInContext("S.noise.job", context);
+  $("noise-amount").value = "30"; $("noise-amount").onchange();                     // changed again while it runs
+  const job3 = vm.runInContext("S.noise.job", context);
+  assert.deepStrictEqual(nCalls.slice(-2), [["cancel", job2b], ["reduce", "n1", "p1", 30, job3]]);
+  nLog.length = 0;
+  $("banner-action").onclick();
+  assert.deepStrictEqual(nCalls[nCalls.length - 1], ["cancel", job3]);
+  assert.ok(!$("reduce-noise").checked && !vm.runInContext("S.noise.on", context));
+  await settle();
+  assert.deepStrictEqual(nLog, [["load", "http://a/n1.wav", [[0.5]], 100], ["setTime", 40]]);
+  reduceAnswer({ ok: false, cancelled: true, error: "Stopped." });
+  await settle();
+  assert.deepStrictEqual(enhShown(), ["Enhance", false, true, true, true]);
+  assert.strictEqual(context.exportHeard(), null);
+  // A failure says why and turns it off.
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  reduceAnswer({ ok: false, error: "Could not reduce the noise of x: no memory." });
+  await settle();
+  assert.ok(!$("reduce-noise").checked && $("banner-text").textContent.includes("Could not reduce the noise"));
+  // Another recording: off, and no profile; back to the first one: its profile is still there (this session).
+  loadN("n2");
+  assert.ok($("reduce-noise").disabled && !$("reduce-noise").checked);
+  loadN("n1");
+  assert.ok(!$("reduce-noise").disabled && !$("reduce-noise").checked);
+  // An MP3 clip can't learn noise.
+  loadN("n3", { compressed: true, fp: null, markable: false });
+  assert.ok($("learn-noise").disabled && /MP3 clips/.test($("learn-noise").title));
+  // Reset turns Reduce noise off too.
+  loadN("n1");
+  vm.runInContext("S.current.full = true;", context);
+  $("reduce-noise").checked = true; $("reduce-noise").onchange();
+  reduceAnswer({ ok: true, url: "http://a/n1-dn.wav", peaks: [0.2], duration: 100, rate: 44100, channels: 1 });
+  await settle(); await settle();
+  const lastLoad = nLog.filter((x) => x[0] === "load").pop();
+  assert.deepStrictEqual(lastLoad, ["load", "http://a/n1-dn.wav"]);                   // full detail: decoded by the page
+  $("enhance-reset").onclick();
+  assert.ok(!$("reduce-noise").checked && vm.runInContext("S.current.playing", context) === "http://a/n1.wav");
+  context.banner("");
+  vm.runInContext(`clearSelection(); setCurrent(null);`, context);
   context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
   vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   console.log("ok");

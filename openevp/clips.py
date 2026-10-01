@@ -68,14 +68,15 @@ def bounds(start, end, duration, pad=PAD):
     return max(0.0, start - pad), min(float(duration), max(end, start) + pad)
 
 
-def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True, process=None):
+def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True, process=None, source=None):
     """A clip of one mark ({"start", "end", "cls", "note"}, seconds) as WAV bytes in
     the recording's own format, with the mark written in as a marker. At a speed
     other than 1 the cut (pad included) is then slowed down or sped up
     (openevp.stretch: pitch kept, or tape-style) and the marker moved to match.
     process(wav bytes) -> wav bytes of the same length, if given, runs after that
-    (the enhancements). Raises ValueError when the WAV cannot be read or the mark
-    is not inside it."""
+    (the enhancements). source(first, last) -> the PCM bytes of those frames, if
+    given, replaces the recording's own samples (a noise-reduced version of it).
+    Raises ValueError when the WAV cannot be read or the mark is not inside it."""
     buf = memoryview(wav_bytes)
     fmt, rate, align, data_at, data_len = _layout(buf)
     frames = data_len // align
@@ -85,7 +86,7 @@ def cut(wav_bytes, mark, pad=PAD, speed=1, keep_pitch=True, process=None):
     last = min(frames, math.ceil(hi * rate - 1e-9))
     if last <= first or start * rate >= frames:
         raise ValueError("the mark is not inside the recording")
-    audio = buf[data_at + first * align:data_at + last * align]
+    audio = buf[data_at + first * align:data_at + last * align] if source is None else source(first, last)
     offset = first / rate
     body = [b"WAVE",
             b"fmt " + struct.pack("<I", len(fmt)) + fmt + (b"\0" if len(fmt) & 1 else b""),
@@ -144,12 +145,12 @@ def title(mark):
     return f"{text}: {note}" if note else text
 
 
-def make(wav_bytes, mark, fmt="wav", pad=PAD, speed=1, keep_pitch=True, process=None):
+def make(wav_bytes, mark, fmt="wav", pad=PAD, speed=1, keep_pitch=True, process=None, source=None):
     """A clip of one mark in fmt ("wav": cut(); "mp3": that cut encoded, see
     openevp.mp3), at speed and processed (see cut()). Raises ValueError as cut()
     does (or when the MP3 encoder cannot take the audio), RuntimeError
     (mp3.UNAVAILABLE) when MP3 is not available."""
-    clip = cut(wav_bytes, mark, pad, speed, keep_pitch, process)
+    clip = cut(wav_bytes, mark, pad, speed, keep_pitch, process, source)
     if fmt == "wav":
         return clip
     if fmt != "mp3":

@@ -274,6 +274,36 @@ still differ very slightly: the player filters at the sound card's rate after
 resampling, and its Leveler delays the sound by 6 ms (an export keeps every
 position, so its marks stay put).
 
+### Noise reduction
+
+To take steady background noise down (hiss, fans, air conditioning, traffic),
+drag across a stretch with **only** that noise in it (no voices, at least a
+quarter of a second; a second or two is better) and click **Learn noise** under
+the waveform. Then tick **Reduce noise** in **Enhance**. OpenEVP makes a
+noise-reduced copy of the recording's audio (a progress bar with Cancel shows
+while it does; a 30-minute ICD-ST25 recording takes about 5 seconds) and the
+player switches to it where it was, playing on. Its **amount** sets how far the
+noise goes down: 40% (the default) lowers it by 12 dB, 100% by 30 dB.
+
+Keep it low. Strong noise reduction leaves watery, warbling artefacts, and those
+can sound like whispers or voices: an "EVP" heard only with Reduce noise on
+should be checked with it off.
+
+The copy has exactly the recording's length and sample rate, so marks,
+selections, loops, the speed and the other enhancements all work on it as
+usual, and marks stay the recording's own: the copy is never fingerprinted,
+never listed in the EVP Library, and lives only in OpenEVP's temporary cache.
+The noise profile is kept per recording until OpenEVP closes; loading another
+recording turns Reduce noise off. **Exports enhanced** includes it (named
+`…_enhanced`); it is applied first, then the speed, then the other
+enhancements, as the player does.
+
+How it works (`openevp/denoise.py`): a short-time Fourier transform (about 32 ms
+Hann windows, 75% overlap), each bin's power smoothed over 5 frames and 5 bins,
+then gated against the learnt profile (fully lowered up to 3 dB above the noise,
+untouched from 10 dB above), so a lone noise peak never opens on its own (the
+cause of the "musical noise" of simple spectral subtraction).
+
 ### Spectrogram
 
 Tick **Spectrogram** (under Height) to see one under the waveform: time across,

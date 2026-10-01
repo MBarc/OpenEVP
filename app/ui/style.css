@@ -194,7 +194,10 @@ td.note { color: var(--warn); }
 .enhance-head { display: flex; align-items: baseline; gap: 6px; }
 .enhance-head .muted { padding: 0; flex: 1; }
 .enhance-foot { display: flex; justify-content: flex-end; }
-#boost-value { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+#boost-value, #noise-amount-value { min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
+.enhance-noise { display: flex; flex-direction: column; gap: 2px; border-top: 1px solid var(--line); padding-top: 6px; }
+.enhance-noise .enhance-row input[type="range"] { flex: 1; }
+#noise-status { padding: 0; max-width: 280px; }
 #speed-value { font-variant-numeric: tabular-nums; }
 #version { font-size: 12px; color: var(--muted); }
 .legal { font-size: 12px; color: var(--muted); }

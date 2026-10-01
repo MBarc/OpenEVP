@@ -14,6 +14,9 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
                    save: null, dirty: false, curve: null },
             // The spectrogram under the waveform (see loadSpectrogram): shown?, its answer, its element and tiles
             spec: { on: false, seq: 0, info: null, url: null, el: null, imgs: new Map(), queued: false, save: null, dirty: false },
+            // Noise reduction (see reduceNoise): profiles learnt (fp -> {id, start, end}), wanted on?, the amount
+            // (percent), the job running ({job, rec}) and the amount the audio playing was reduced by.
+            noise: { profiles: new Map(), on: false, amount: 40, job: 0, running: null, used: null },
             capsAsked: 0, capsApplied: 0, destAsked: 0, destApplied: 0, started: false,
             playable: false, playReason: "", formats: [], model: "",   // the open recorder's: can it play (why not), its export menu
             dest: "", selected: new Map(), ws: null, playing: null,
@@ -2007,6 +2010,10 @@ window.onBackendEvent = (event, p) => {
     status(`${S.speedWork} ${p.total ? Math.floor(100 * p.done / p.total) : 100}%`);
     return;
   }
+  if (event === "denoise-progress") {                       // Reduce noise: the job running only
+    if (S.noise.running && S.noise.running.job === p.job) noiseProgress(p.done, p.total);
+    return;
+  }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (p.job !== S.job) return;
@@ -2225,7 +2232,9 @@ function enhanceGraph(s, rate) {
   if (s.leveler || s.boost > 0) out.push({ type: "limiter" });
   return out;
 }
-function enhanceOn() { return !!S.enh.settings && enhanceGraph(S.enh.settings, enhRate()).length > 0; }
+function enhanceOn() { return (!!S.enh.settings && enhanceGraph(S.enh.settings, enhRate()).length > 0) || noiseOn(); }
+// Is the player playing a noise-reduced version of the recording?
+function noiseOn() { return !!S.current && S.noise.used !== null && S.current.playing !== S.current.url; }
 
 function limitCurve() {                         // the soft limiter's WaveShaper curve (openevp.enhance.limit_curve)
   if (S.enh.curve) return S.enh.curve;
@@ -2309,8 +2318,11 @@ function resumeAudio() {
 // "Exports enhanced": shown while anything is on, ticked only when the user turns enhancement on in
 // this session (never by remembered settings at startup), like "Exports at 0.5×".
 function exportHeard() {
-  const on = enhanceOn() && S.enh.exportHeard && !$("player-loaded").hidden;
-  return on ? { enhance: { ...S.enh.settings } } : null;
+  if (!enhanceOn() || !S.enh.exportHeard || $("player-loaded").hidden) return null;
+  const out = {};
+  if (enhanceGraph(S.enh.settings, enhRate()).length) out.enhance = { ...S.enh.settings };
+  if (noiseOn()) out.denoise = { profile: S.noise.profiles.get(S.current.fp).id, amount: S.noise.used };
+  return out;
 }
 
 function showEnhance() {
@@ -2336,6 +2348,7 @@ function showEnhance() {
   $("enhanced-tag").hidden = !on;
   $("export-heard-label").hidden = !on;
   $("export-heard").checked = S.enh.exportHeard;
+  showNoise();
 }
 
 // A change from the panel: applied at once, shown, remembered (one save at a time, the latest last).
@@ -2386,6 +2399,7 @@ function setupEnhance() {
   $("hum").onchange = () => setEnhance({ hum: $("hum").value });
   $("enhance-reset").onclick = resetEnhance;
   $("export-heard").onchange = () => { S.enh.exportHeard = $("export-heard").checked; };
+  setupNoise();
   // The panel closes with Escape or a click elsewhere.
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !$("enhance-panel").hidden) { openEnhancePanel(false); $("enhance-toggle").focus(); }
@@ -2396,7 +2410,123 @@ function setupEnhance() {
   }, true);
 }
 
-function resetEnhance() { setEnhance({ ...ENH_DEFAULT }); }
+function resetEnhance() { setNoise(false); setEnhance({ ...ENH_DEFAULT }); }
+
+// ---- Noise reduction: learn the noise from a selection, then play a noise-reduced version ----
+// The backend makes it (openevp/denoise.py: spectral gating, smoothed over time and frequency) and
+// caches it; the player then plays it under the same handle, at the same positions, so marks,
+// selections, speed, loops and Enhance all work as before. Noise reduction is per recording:
+// a profile is kept for the session, and it is off again whenever another recording is loaded.
+function noiseProfile() { return S.current && S.current.fp ? S.noise.profiles.get(S.current.fp) || null : null; }
+
+function setupNoise() {
+  S.noise.amount = Number((S.caps.noise || {}).default_amount) || 40;
+  $("noise-amount").value = String(S.noise.amount);
+  $("learn-noise").onclick = learnNoise;
+  $("reduce-noise").onchange = () => setNoise($("reduce-noise").checked);
+  $("noise-amount").oninput = () => { S.noise.amount = Number($("noise-amount").value); showNoise(); };
+  $("noise-amount").onchange = () => { S.noise.amount = Number($("noise-amount").value); if (S.noise.on) reduceNoise(); };
+  showNoise();
+}
+
+function showNoise() {
+  const prof = noiseProfile(), can = !!S.current && !!S.current.fp && !S.current.compressed;
+  $("reduce-noise").checked = S.noise.on;
+  $("reduce-noise").disabled = !prof;
+  $("noise-amount").disabled = !prof;
+  $("noise-amount-value").textContent = `${S.noise.amount}%`;
+  $("learn-noise").disabled = !can;
+  $("learn-noise").title = can ? LEARN_TIP : S.current && S.current.compressed ? "MP3 clips can't be noise-reduced here."
+                                                                                : "Noise reduction works on recordings.";
+  $("noise-status").textContent = S.noise.running ? "Reducing the noise…"
+    : prof ? `Noise learnt from ${fmtPrecise(prof.start)} – ${fmtPrecise(prof.end)}.`
+    : "Select a stretch of background noise only (no voices), then click Learn noise under the waveform.";
+}
+const LEARN_TIP = "Learn the background noise from the selected part (it should hold noise only, no voices) for Reduce noise in Enhance";
+
+async function learnNoise() {
+  if (!S.current || !S.region) return;
+  const cur = S.current, { start, end } = S.region;
+  status("Learning the noise…");
+  let r;
+  try { r = await api().learn_noise(cur.rec, start, end); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  status("");
+  if (S.current !== cur) return;
+  if (!r.ok) { showError(r); return; }
+  S.noise.profiles.set(cur.fp, { id: r.profile, start, end });
+  banner(`✓ Noise learnt from ${fmtPrecise(start)} – ${fmtPrecise(end)}. Turn on Reduce noise in Enhance to hear it.`, "ok",
+         { label: "Enhance", run: () => openEnhancePanel(true) });
+  if (S.noise.on) reduceNoise(); else showNoise();
+}
+
+function setNoise(on) {
+  S.noise.on = !!on && !!noiseProfile();
+  if (S.noise.on) { reduceNoise(); return; }
+  stopNoiseJob();
+  if (S.current && S.current.playing !== S.current.url) playVersion(S.current.url, S.current.peaks);
+  S.noise.used = null;
+  showEnhance();
+}
+
+function stopNoiseJob() {
+  const run = S.noise.running;
+  if (!run) return;
+  S.noise.running = null;
+  api().cancel_denoise(run.job);
+  progress(0, null);
+  if ($("banner-text").textContent.startsWith("Reducing the noise")) banner("");
+}
+
+// Make (or fetch from the cache) the noise-reduced version at the current amount, then play it.
+async function reduceNoise() {
+  const cur = S.current, prof = noiseProfile();
+  if (!cur || !prof) return;
+  stopNoiseJob();
+  const was = enhanceOn(), amount = S.noise.amount, job = ++S.noise.job;
+  S.noise.running = { job, rec: cur.rec };
+  showNoise();
+  noiseProgress(0, null);
+  let r;
+  try { r = await api().reduce_noise(cur.rec, prof.id, amount, job); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+  if (!S.noise.running || S.noise.running.job !== job) return;          // cancelled, or a newer one runs
+  S.noise.running = null;
+  progress(0, null);
+  banner("");
+  if (S.current !== cur || !S.noise.on) { showEnhance(); return; }
+  if (!r.ok) {
+    S.noise.on = false; showEnhance();
+    if (!r.cancelled) showError(r);
+    return;
+  }
+  S.noise.used = amount;
+  await playVersion(r.url, r.peaks);
+  if (!was && enhanceOn()) S.enh.exportHeard = true;                    // turned on by the user: exports follow
+  showEnhance();
+}
+
+function noiseProgress(done, total) {
+  progress(done, total === null ? 1 : total);
+  const pct = total ? ` ${Math.floor(100 * done / total)}%` : "";
+  banner(`Reducing the noise…${pct}`, "ok", { label: "Cancel", run: () => { setNoise(false); } });
+}
+
+// Play another version of the loaded recording (url: its own audio, or a noise-reduced one) from
+// where it is, playing on if it was. Marks, the selection and the zoom stay (same length).
+async function playVersion(url, peaks) {
+  const cur = S.current;
+  if (!cur || cur.playing === url) return;
+  const t = S.ws.getCurrentTime(), playing = S.ws.isPlaying(), seq = S.playSeq;
+  cur.playing = url;
+  try {
+    if (cur.full) await S.ws.load(url); else await S.ws.load(url, [peaks], cur.duration);
+  } catch (e) {
+    return;                                                             // said by the "error" handler
+  }
+  if (seq !== S.playSeq || S.current !== cur) return;
+  S.ws.setTime(t);
+  if (playing) S.ws.play();
+  loadSpectrogram();                                                    // the spectrogram shows what plays
+}
 
 // ---- Spectrogram: under the waveform, scrolled and zoomed with it ----------------------------
 // The backend computes it from the audio the player plays (openevp/spectrogram.py) and serves it
@@ -2809,7 +2939,8 @@ function setCurrent(label, r) {
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
   S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null, rate: r.rate || 0,
-                    url: r.url || null, playing: r.url || null, compressed: !!r.compressed,
+                    url: r.url || null, playing: r.url || null, compressed: !!r.compressed, full: fullDetail(r),
+                    peaks: r.peaks || [],
                     markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
   S.backup = r ? r.backup : null;
@@ -2818,6 +2949,8 @@ function setCurrent(label, r) {
   $("reviewed").checked = !!(r && r.reviewed);
   renderMarkTools();                            // an MP3 clip can't be marked: the tools say why
   renderMarks();
+  stopNoiseJob();                               // noise reduction is per recording: off for the next one
+  S.noise.on = false; S.noise.used = null;
   showEnhance(); applyEnhance();                // Cut hiss and the filters depend on its sample rate
   hideSpectrogram();                            // drawn again once the new one is loaded
 }

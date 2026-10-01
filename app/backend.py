@@ -45,6 +45,12 @@ are settings too (playback_speed / keep_pitch; set_playback_speed()). They can a
 save "as heard" (heard: the player's Enhance settings, openevp.enhance, applied
 after the speed, as the player applies them to what it plays; the names then end
 in "_enhanced"); the Enhance settings are a setting too (enhance; set_enhance()).
+Noise reduction (learn_noise() keeps a noise profile per recording for this
+session; reduce_noise() makes a noise-reduced version of the recording,
+openevp.denoise, cached in the audio server under the recording, the profile and
+the amount, never fingerprinted, never in the library): the player plays it under
+the same handle, so marks stay the original's. Exports "as heard" include it
+(heard["denoise"]: applied first, before the speed and the Enhance chain).
 The player's spectrogram (spectrogram(): openevp.spectrogram, served as tiles by
 the audio server) is computed here from the audio the player plays; whether it is
 shown is a setting (spectrogram; set_spectrogram()).
@@ -57,13 +63,14 @@ and recordings moved between them: see app/library_ops.py (mixed into Api) and
 app/folders.py.
 """
 import datetime
+import math
 import os
 import secrets
 import threading
 import wave
 from collections import OrderedDict
 
-from openevp import __version__, clips, enhance, formats, mp3, pcm, recorders, spectrogram, stretch, wavinfo
+from openevp import __version__, clips, denoise, enhance, formats, mp3, pcm, recorders, spectrogram, stretch, wavinfo
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder
 from openevp.recorders import base as rbase
@@ -125,24 +132,39 @@ def _export_speed(speed, keep_pitch):
 NORMAL = (1.0, True)                # an export at normal speed
 BAD_SPEED = "Unknown playback speed."
 BAD_HEARD = "Unknown enhancement settings."
+NO_PROFILE = "Learn the noise again (select background noise only, then Learn noise)."
+NOISE_PROFILES = 32                 # noise profiles kept for this session
+
+
+def _amount(value):
+    """A noise reduction amount from the page (0..100, a whole percent), or None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 <= value <= 100:
+        return None
+    return int(round(value))
 
 
 def _heard(value):
     """An export's "as heard" argument from the page: None (as recorded), or
-    {"enhance": settings} -> {"enhance": the settings, normalized}. Raises ValueError."""
+    {"enhance": settings, "denoise": {"profile", "amount"}} (either may be left
+    out) -> the same, normalized. Raises ValueError."""
     if value is None:
         return None
-    if not isinstance(value, dict) or set(value) - {"enhance"}:
+    if not isinstance(value, dict) or set(value) - {"enhance", "denoise"}:
         raise ValueError(BAD_HEARD)
     out = {}
     if value.get("enhance") is not None:
         out["enhance"] = enhance.normalize(value["enhance"])
+    d = value.get("denoise")
+    if d is not None:
+        if not isinstance(d, dict) or not isinstance(d.get("profile"), str) or _amount(d.get("amount")) is None:
+            raise ValueError(BAD_HEARD)
+        out["denoise"] = {"profile": d["profile"], "amount": _amount(d["amount"])}
     return out or None
 
 
 def _heard_on(heard, rate):
     """Does "as heard" change anything for audio at this rate?"""
-    return bool(heard) and enhance.active(heard.get("enhance") or {}, rate)
+    return bool(heard) and (enhance.active(heard.get("enhance") or {}, rate) or "denoise" in heard)
 
 
 def _download(manager, key):
@@ -478,6 +500,8 @@ class Api(LibraryOps):
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
         self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
+        self._noise = OrderedDict()           # noise profile id -> (fp, openevp.denoise.Profile), this session only
+        self._denoising = {}                  # reduce_noise() job -> its cancel Event
         self._stop = threading.Event()
         self._workers = []                    # every background thread (export, backup); shutdown joins them
         self._workers_lock = threading.Lock()
@@ -544,6 +568,7 @@ class Api(LibraryOps):
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
                 **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
                 "spectrogram": self.spectrogram_shown(),
+                "noise": {"default_amount": denoise.DEFAULT_AMOUNT, "max_reduction_db": denoise.MAX_REDUCTION_DB},
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
     def watch_store(self):
@@ -1299,11 +1324,27 @@ class Api(LibraryOps):
         marks = self._store.marks(entry["fp"])
         if not marks:
             return _fail("This recording has no marks yet.")
+        noise = self._heard_noise(entry, heard)
+        if isinstance(noise, dict):
+            return noise
         got = self._entry_audio(entry, "add the marks to")
         if isinstance(got, dict):
             return got
         wav, outdir, stem = got
         del got
+        if noise is not None:
+            try:
+                wav = denoise.reduce_wav(wav, *noise, should_stop=self._stop.is_set, progress=self._speed_progress())
+            except denoise.Cancelled:
+                return _fail(CLOSING)
+            except ValueError as e:
+                return _fail(f"Could not reduce the noise of {entry['name']}: {e}")
+            except MemoryError:
+                del wav
+                return _fail(f"There is not enough memory to save {entry['name']} as heard.",
+                             "Close other programs and try again, or save it as recorded.")
+            except Exception as e:
+                return _error(e)
         speed, keep_pitch = at
         out_name = stem + ".wav"
         if speed != 1:
@@ -1323,11 +1364,12 @@ class Api(LibraryOps):
                 return _error(e)
             marks = stretch.scale_marks(marks, speed)
         try:
-            on = _heard_on(heard, clips._layout(memoryview(wav))[1])
+            rate = clips._layout(memoryview(wav))[1]
         except ValueError as e:
             return _fail(f"Could not add the marks to {entry['name']}: {e}")
-        if on:
+        if _heard_on(heard, rate):
             out_name = out_name[:-len(".wav")] + enhance.SUFFIX + ".wav"
+        if heard and enhance.active(heard.get("enhance") or {}, rate):
             try:
                 wav = enhance.process(wav, heard.get("enhance") or {}, should_stop=self._stop.is_set,
                                       progress=self._speed_progress())
@@ -1357,6 +1399,118 @@ class Api(LibraryOps):
         return {"ok": True, "saved": not already, "already": already, "name": os.path.basename(path),
                 "folder_name": folder_name}
 
+    # ---- noise reduction (openevp.denoise) ----------------------------------------------
+    def _heard_noise(self, entry, heard):
+        """(profile, amount) for an export's heard["denoise"], None without one, or
+        the _fail() when its profile is not this recording's (any more)."""
+        d = (heard or {}).get("denoise")
+        if d is None:
+            return None
+        with self._recs_lock:
+            found = self._noise.get(d["profile"])
+        if found is None or found[0] != entry["fp"]:
+            return _fail("The noise profile for this recording is gone. " + NO_PROFILE)
+        return found[1], d["amount"]
+
+    def learn_noise(self, rec, start, end):
+        """Learn the noise profile of the loaded recording from start..end (seconds,
+        a stretch of background noise only): kept for this session, for
+        reduce_noise(). {"ok", "profile" (its id), "seconds"}."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        if not entry["fp"]:
+            return _fail("Noise reduction works on recordings, not on MP3 clips." if entry["source"].get("path", "").lower()
+                         .endswith(".mp3") else NO_AUDIO)
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in (start, end)) \
+                or end <= start:
+            return _fail("Select a part of the recording first.")
+        try:
+            with self._server.open_audio(entry["url"]) as f, pcm.WavFile(f) as reader:
+                profile = denoise.learn(reader, round(start * reader.rate), round(end * reader.rate))
+        except (OSError, ValueError) as e:
+            return _fail(f"Could not learn the noise: {_plain(e)}.")
+        except Exception as e:
+            return _error(e)
+        with self._recs_lock:
+            _bounded_put(self._noise, profile.id, (entry["fp"], profile), NOISE_PROFILES)
+        return {"ok": True, "profile": profile.id, "seconds": round(end - start, 2)}
+
+    def reduce_noise(self, rec, profile_id, amount, job):
+        """A noise-reduced version of the loaded recording (openevp.denoise with a
+        profile from learn_noise(), amount 0..100 %), made once and kept in the
+        audio server's cache under (its fingerprint, the profile, the amount). It has
+        exactly the recording's length, rate and channels, is never fingerprinted
+        and never listed: the player plays it under the same handle, and marks stay
+        the recording's. "denoise-progress" events ({"job", "done", "total"}) report
+        how far it is; cancel_denoise(job) stops it. {"ok", "url", "peaks",
+        "duration", "rate", "channels"}, or {"ok": False, "cancelled": True}."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail(RELOAD)
+        amount = _amount(amount)
+        if amount is None:
+            return _fail("Unknown noise reduction amount.")
+        with self._recs_lock:
+            found = self._noise.get(profile_id) if isinstance(profile_id, str) else None
+        if found is None or found[0] != entry["fp"] or not entry["fp"]:
+            return _fail(NO_PROFILE)
+        profile = found[1]
+        cancel = threading.Event()
+        with self._workers_lock:
+            if self._stop.is_set():
+                return _fail(CLOSING)
+            self._denoising[job] = cancel
+        url = entry["url"]
+        last = [-1]
+
+        def progress(done, total):
+            pct = 100 * done // total if total else 100
+            if pct != last[0]:
+                last[0] = pct
+                self._emit("denoise-progress", {"job": job, "done": done, "total": total})
+
+        def stop():
+            return self._stop.is_set() or cancel.is_set()
+
+        def write(out):
+            with self._server.open_audio(url) as f, pcm.WavFile(f) as reader:
+                with wave.open(out, "wb") as w:
+                    w.setnchannels(reader.channels)
+                    w.setsampwidth(reader.width)
+                    w.setframerate(reader.rate)
+                    denoise.reduce(reader, lambda y: w.writeframesraw(pcm.encode(y, reader.kind, reader.width)),
+                                   profile, amount, should_stop=stop, progress=progress)
+        try:
+            info = self._server.prepare(("denoise", entry["fp"], profile.id, amount), write=write,
+                                        fingerprint=False)
+        except denoise.Cancelled:
+            return {"ok": False, "cancelled": True, "error": "Stopped." if not self._stop.is_set() else CLOSING}
+        except (OSError, ValueError) as e:
+            return _fail(f"Could not reduce the noise of {entry['name']}: {_plain(e)}.")
+        except MemoryError:
+            return _fail(f"There is not enough memory to reduce the noise of {entry['name']}.",
+                         "Close other programs and try again.")
+        except Exception as e:
+            return _error(e)
+        finally:
+            with self._workers_lock:
+                self._denoising.pop(job, None)
+        if entry["duration"] is not None and abs(info["duration"] - entry["duration"]) > 1e-9:
+            return _fail("The noise-reduced audio came out a different length; it was not used.")
+        with self._recs_lock:
+            entry["variants"].add(info["url"])
+        return {"ok": True, "url": info["url"], "peaks": info["peaks"], "duration": info["duration"],
+                "rate": info["rate"], "channels": info["channels"]}
+
+    def cancel_denoise(self, job):
+        """Stop a reduce_noise() job (its call answers {"ok": False, "cancelled": True})."""
+        with self._workers_lock:
+            cancel = self._denoising.get(job)
+        if cancel is not None:
+            cancel.set()
+        return {"ok": True}
+
     # ---- EVP clips: one WAV per mark (openevp.clips) ----------------------------------
     def _speed_progress(self):
         """A progress(done, total) for stretch.change_speed: "speed-progress" events,
@@ -1385,6 +1539,9 @@ class Api(LibraryOps):
         refused = self._clip_format_refused(fmt)
         if refused:
             return refused
+        noise = self._heard_noise(entry, heard)
+        if isinstance(noise, dict):
+            return noise
         got = self._entry_audio(entry, "cut clips from")
         if isinstance(got, dict):
             return got
@@ -1392,28 +1549,32 @@ class Api(LibraryOps):
         del got
         outdir = os.path.join(outdir, CLIPS)
         try:
-            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at, heard)
+            saved, already, names, notes = self._save_clips(wav, marks, outdir, stem, fmt, at, heard, noise)
         except OSError as e:
             return _fail(f"The clips were not saved: {_plain(e)}", DISK)
         return {"ok": True, "saved": saved, "already": already, "names": names, "notes": notes,
                 "folder": outdir if saved or already else None}
 
-    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL, heard=None):
+    def _save_clips(self, wav, marks, outdir, stem, fmt="wav", at=NORMAL, heard=None, noise=None):
         """Cut and save one clip per mark into outdir, in fmt ("mp3" or "wav"), at
         (speed, keep_pitch) (the name then ends in the speed: clips.name()), as
-        heard (see export_marked(); the name then ends in "_enhanced"):
+        heard (see export_marked(); noise: (profile, amount), each clip's samples
+        exactly those of the noise-reduced recording; the name then ends in "_enhanced"):
         (saved, already there, file names, notes on clips not made). Raises OSError
         when a clip cannot be written."""
         saved = already = 0
         names, notes = [], []
         try:
-            on = _heard_on(heard, clips._layout(memoryview(wav))[1])
+            rate = clips._layout(memoryview(wav))[1]
         except ValueError:
-            on = False                           # clips.make() says why, per clip
-        process = (lambda w: enhance.process(w, heard.get("enhance") or {})) if on else None
+            rate = None                          # clips.make() says why, per clip
+        on = rate is not None and _heard_on(heard, rate)
+        settings = (heard or {}).get("enhance") or {}
+        process = (lambda w: enhance.process(w, settings)) if on and enhance.active(settings, rate) else None
+        source = (lambda first, last: denoise.reduce_frames(wav, *noise, first, last)) if noise is not None else None
         for m in marks:
             try:
-                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1], process=process)
+                clip = clips.make(wav, m, fmt, speed=at[0], keep_pitch=at[1], process=process, source=source)
             except (ValueError, RuntimeError) as e:
                 notes.append(f"{stem}: the EVP at {clips.stamp(m['start'])} was not cut ({e})")
                 continue

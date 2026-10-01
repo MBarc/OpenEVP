@@ -65,13 +65,14 @@ def _samples(data, width):
     return np.frombuffer(data, dtype={2: "<i2", 4: "<i4"}[width]).astype(np.int64)
 
 
-def _analyze(f):
+def _analyze(f, fingerprint=True):
     """(peaks, duration, rate, fp) for a PCM WAV: PEAKS_PER_SECOND values in 0..1 per
     second of audio (at most MAX_PEAKS in all), each the loudest sample of any channel
     in its slice, plus the sample rate and the audio fingerprint (openevp.wavinfo) of the
     decoded samples. Reads in chunks, never the whole file. A WAV with no samples
     has fp None: every empty WAV of one format would otherwise share one identity
-    (and one set of marks), so it gets none and cannot be marked."""
+    (and one set of marks), so it gets none and cannot be marked. fingerprint False:
+    fp is None too (audio that must never be taken for a recording)."""
     try:
         w = wave.open(f)
     except (wave.Error, EOFError) as e:
@@ -95,12 +96,13 @@ def _analyze(f):
             if not data:
                 break
             total += len(data)
-            h.update(data)
+            if fingerprint:
+                h.update(data)
             mags = np.abs(_samples(data, width).reshape(-1, ch)).max(axis=1)
             peaks.extend((np.maximum.reduceat(mags, np.arange(0, len(mags), per)) / full).tolist())
         if total != expected:
             raise ValueError("the WAV file is truncated")
-        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest()
+        return [round(min(p, 1.0), 4) for p in peaks], n / rate, rate, h.hexdigest() if fingerprint else None
 
 
 def _channels(f):
@@ -238,7 +240,7 @@ class AudioServer:
     def _url(self, file_id, ext="wav"):
         return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.{ext}"
 
-    def prepare(self, key, make=None, write=None, expected=None):
+    def prepare(self, key, make=None, write=None, expected=None, fingerprint=True):
         """Decode a recording into the cache (once per key) and return _info().
         ``write(f)``, when given, decodes straight into the cache file ``f`` (a
         seekable binary file), so a long recording is never held in memory;
@@ -250,7 +252,9 @@ class AudioServer:
         Room is made first: older entries are evicted down to the budget minus
         ``expected`` (the WAV's expected size, when known; ``write`` can also
         call reserve() once it knows). If the disk fills up anyway, every other
-        entry is evicted and the decode is tried once more."""
+        entry is evicted and the decode is tried once more. fingerprint False: no
+        fingerprint is taken (fp None), for audio that is not a recording of its own
+        (a noise-reduced version of one)."""
         with self._lock:
             gate = self._inflight.setdefault(key, threading.Lock())
         with gate:                                   # concurrent requests wait for one decode
@@ -275,7 +279,7 @@ class AudioServer:
                             self._evict(keep=None, limit=0)      # everything else goes; then once more
                         self._produce(key, path, make, write)
                     with open(path, "rb") as f:
-                        peaks, duration, rate, fp = _analyze(f)
+                        peaks, duration, rate, fp = _analyze(f, fingerprint)
                         channels = _channels(f)
                         size = os.fstat(f.fileno()).st_size
                 except BaseException:

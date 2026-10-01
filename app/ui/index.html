@@ -84,6 +84,7 @@
         <span id="selection-controls" hidden>
           <button id="play-selection" title="Play only the selected part">▶ Selection</button>
           <button id="mark-evp" title="Mark the selected part as an EVP (M)">★ Mark EVP</button>
+          <button id="learn-noise" title="Learn the background noise from the selected part (it should hold noise only, no voices) for Reduce noise in Enhance">Learn noise</button>
           <label title="Repeat the selected part"><input type="checkbox" id="loop-selection"> Loop</label>
           <span id="selection-range" class="muted"></span>
           <button id="clear-selection" class="link">Clear</button>
@@ -154,6 +155,13 @@
       <label id="cut-hiss-label" title="Lower everything above 5 kHz (hiss)"><input type="checkbox" id="cut-hiss"> Cut hiss</label>
       <label title="Remove mains hum (and its next three harmonics): 60 Hz in the Americas, 50 Hz in most other places">Hum remover
         <select id="hum"><option value="off">Off</option><option value="60">60 Hz</option><option value="50">50 Hz</option></select></label>
+      <div class="enhance-noise">
+        <span class="enhance-row"><label title="Lower the background noise learnt with Learn noise. Keep the amount low: strong noise reduction leaves watery, warbling artefacts that can sound like whispers or voices."><input type="checkbox" id="reduce-noise"> Reduce noise</label>
+          <input id="noise-amount" type="range" min="0" max="100" step="5" value="40" aria-label="Noise reduction amount"
+                 title="How much to lower the noise (40% lowers it by 12 dB, 100% by 30 dB). More is not better: strong reduction leaves watery artefacts that can sound like voices.">
+          <span id="noise-amount-value">40%</span></span>
+        <span id="noise-status" class="muted"></span>
+      </div>
       <div class="enhance-foot"><button id="enhance-reset" type="button" title="Turn every enhancement off">Reset</button></div>
     </div>
     <button id="open-wav-2" class="link" title="Open another WAV file">Open WAV file…</button>

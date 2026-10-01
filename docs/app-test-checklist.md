@@ -168,3 +168,27 @@ Spectrogram:
     the whole length drawn. Open another recording: its own spectrogram. An MP3
     clip says it has none. Untick it: gone, the player its usual height. Close
     and start OpenEVP: it is still on (or off) as you left it.
+
+Noise reduction:
+
+32. On a recording with steady background noise, drag across a second of noise
+    only and click **Learn noise**: a banner says it was learnt (with an
+    **Enhance** button). In Enhance, the Reduce noise line says where it was
+    learnt from. Tick **Reduce noise** while playing: a progress bar with
+    **Cancel** shows, then playback goes on from where it was, quieter between
+    words; the voices sound the same. Hover Reduce noise and its slider: both
+    warn about watery artefacts. Move the amount to 100%: it is made again and
+    sounds watery (that is the warning); back to 40%. Marks, a selection's loop,
+    a mark's loop, the speed (0.5×, Keep pitch on and off) and the other
+    enhancements all work on it; the spectrogram shows the noise-reduced audio.
+    Add a mark while it is on: the mark is listed under the recording in the
+    EVP Library (not under anything new); the library shows no new file.
+    Untick it: the original plays on from where it was.
+33. On the 30-minute recording, time Reduce noise; Cancel halfway: it stops,
+    and Reduce noise is unticked. Load another recording: Reduce noise is off and
+    greyed (no profile); go back: the profile is still there. An MP3 clip:
+    Learn noise is greyed out with the reason.
+34. With Reduce noise on, **Exports enhanced** is ticked: Export WAV with marks
+    saves `<name>_enhanced.wav` that sounds like what you heard; with Speed 0.5×
+    and Boost too: `<name>_0.5x_enhanced.wav`; Save clip: `…_enhanced.mp3`.
+    Export again: "already saved".
