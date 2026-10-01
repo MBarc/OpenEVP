@@ -30,6 +30,7 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
                    subTokens: new Map(), subToken: 0 },   // key -> token of the subMarks fetch that may still answer
             // The loaded recording ({rec, name, duration}; rec is the backend's handle) and its EVP marks.
             current: null, marks: [], markRegions: new Map(), markTimers: new Map(), markForm: null,
+            activeMark: null, markLoop: false,               // the mark clicked (its id), shown in the bar; is it looping?
             formCls: "B", lastCls: "B", backup: null, backupNeeded: false, backupRunning: false, exportingMarked: false,
             backupEvents: new Map(), moveSeq: new Map(),     // rec -> backup events seen; mark id -> latest move
             moves: new Map(),                                // mark id -> {busy, next}: one update_mark move in flight per mark
@@ -1254,6 +1255,7 @@ function applyPlayerMarks(r) {
   const ids = new Set(S.marks.map((m) => m.id));
   for (const [id, region] of S.markRegions) if (!ids.has(id)) { region.remove(); S.markRegions.delete(id); }
   if (S.markForm && S.markForm.id && !ids.has(S.markForm.id)) closeMarkForm();
+  if (S.activeMark && !ids.has(S.activeMark)) deselectMark();   // deleted elsewhere: its loop ends
   const drawn = !!S.ws.getDuration();                           // otherwise drawMarks adds them on "ready"
   for (const m of S.marks) {
     const region = S.markRegions.get(m.id);
@@ -2071,21 +2073,23 @@ function setupSelection() {
   S.regions = S.ws.registerPlugin(WaveSurfer.Regions.create());
   S.regions.enableDragSelection({ color: "rgba(108, 195, 167, 0.28)" });
   S.region = null;
-  S.regions.on("region-created", (r) => {
-    if (isMark(r)) return;                                  // marks live beside the selection
-    for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
-    S.region = r; showSelection();
+  S.regions.on("region-created", regionCreated);
+  S.regions.on("region-updated", regionUpdated);
+  S.regions.on("region-out", regionOut);
+  S.regions.on("region-clicked", regionClicked);
+  // Playback that reaches the end of the file never leaves a region that ends there: loop it from here.
+  S.ws.on("finish", () => {
+    const r = S.region && $("loop-selection").checked ? S.region : S.markLoop ? activeRegion() : null;
+    if (r) r.play();
   });
-  S.regions.on("region-updated", (r) => {
-    if (r === S.region) showSelection();
-    else if (isMark(r)) scheduleMarkMove(r);
-  });
-  S.regions.on("region-out", (r) => {
-    if (r === S.region && $("loop-selection").checked) r.play();
-  });
-  S.regions.on("region-clicked", (r, e) => { e.stopPropagation(); isMark(r) ? r.play(true) : r.play(); });
+  // A click on the waveform anywhere but the active mark (another mark, or a seek) deselects it:
+  // in the capture phase, before the seek (and its region-out) happens.
+  $("waveform").addEventListener("click", waveformClick, true);
   $("play-selection").onclick = () => { if (S.region) S.region.play(); };
   $("clear-selection").onclick = clearSelection;
+  $("play-mark").onclick = playActiveMark;
+  $("loop-mark").onchange = () => setMarkLoop($("loop-mark").checked);
+  $("deselect-mark").onclick = deselectMark;
   document.addEventListener("keydown", (e) => {
     if (e.code !== "Space" || $("player-loaded").hidden || /INPUT|SELECT|BUTTON|TEXTAREA/.test(e.target.tagName)) return;
     e.preventDefault();
@@ -2093,11 +2097,121 @@ function setupSelection() {
   });
 }
 
+function regionCreated(r) {
+  if (isMark(r)) return;                                    // marks live beside the selection
+  for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
+  S.region = r;
+  if (S.activeMark) deselectMark();                         // the bar (and the loop) is the selection's now
+  showSelection();
+}
+
+function regionUpdated(r) {
+  if (r === S.region) showSelection();
+  else if (isMark(r)) {
+    scheduleMarkMove(r);
+    if (markId(r) === S.activeMark) showSelection();        // the bar shows the new times; a loop uses them at once
+  }
+}
+
+function regionOut(r) {
+  if (r === S.region && $("loop-selection").checked) r.play();
+  else if (S.markLoop && isMark(r) && markId(r) === S.activeMark) r.play();
+}
+
+// Clicking a mark selects it and plays it (once, or from its start round and round while looping).
+function regionClicked(r, e) {
+  e.stopPropagation();
+  if (!isMark(r)) { r.play(); return; }
+  selectMark(markId(r));
+  playActiveMark();
+}
+
+function waveformClick(e) {
+  if (!S.activeMark) return;
+  const r = activeRegion(), path = e.composedPath ? e.composedPath() : [e.target];
+  if (r && r.element && path.includes(r.element)) return;
+  deselectMark();
+}
+
+// The bar under the waveform: the selection, the active mark, or the mark form (which takes it while open).
 function showSelection() {
-  const r = S.region;
-  $("selection-hint").hidden = !!r || !!S.markForm;       // the mark form takes the bar while open
+  const r = S.region, m = r ? null : activeMarkData();
+  $("selection-hint").hidden = !!r || !!m || !!S.markForm;
   $("selection-controls").hidden = !r || !!S.markForm;
+  $("mark-controls").hidden = !m || !!S.markForm;
   if (r) $("selection-range").textContent = `${fmtPrecise(r.start)} – ${fmtPrecise(r.end)} (${(r.end - r.start).toFixed(1)} s)`;
+  renderActiveMark();
+}
+
+// ---- the active mark: a mark clicked (on the waveform or in the list), shown in the bar, maybe looping ----
+// One thing at a time has the bar, and so the loop: the selection or the active mark.
+function markId(r) { return r.id.slice("mark-".length); }
+function activeMarkData() { return S.activeMark ? S.marks.find((m) => m.id === S.activeMark) || null : null; }
+function activeRegion() { return S.activeMark ? S.markRegions.get(S.activeMark) || null : null; }
+function activeBounds() {                                   // where the mark is now (a band being dragged: there)
+  const r = activeRegion(), m = activeMarkData();
+  return r ? { start: r.start, end: r.end } : m ? { start: m.start, end: m.end } : null;
+}
+
+function selectMark(id) {
+  if (S.region) clearSelection();
+  if (S.activeMark !== id) { S.activeMark = id; S.markLoop = false; }
+  showSelection();
+}
+
+function deselectMark() {                                   // stops its loop too
+  if (!S.activeMark && !S.markLoop) return;
+  S.activeMark = null; S.markLoop = false;
+  showSelection();
+}
+
+// Play the active mark from its start: once (stopping at its end), or on past its end while
+// looping, where region-out brings it back to the start.
+function playActiveMark() {
+  const m = activeMarkData(), r = activeRegion();
+  if (!m) return;
+  if (r) r.play(!S.markLoop);
+  else S.ws.play(m.start, isPoint(m) || S.markLoop ? undefined : m.end);
+}
+
+// Loop on: it plays round and round (from where it is, if it is playing inside the mark already).
+// Loop off: this pass ends at the mark's end.
+function setMarkLoop(on) {
+  const m = activeMarkData(), b = activeBounds();
+  S.markLoop = !!on && !!m && !isPoint(m);
+  if (m) {
+    const t = S.ws.getCurrentTime(), inside = S.ws.isPlaying() && t >= b.start && t < b.end;
+    if (S.markLoop) { if (inside) S.ws.play(t); else playActiveMark(); }   // play(t) drops the stop at its end
+    else if (inside && !isPoint(m)) S.ws.play(t, b.end);
+  }
+  renderActiveMark();
+}
+
+// The row's 🔁: loop this mark (it becomes the active one), or stop looping it.
+function toggleMarkLoop(m) {
+  if (S.activeMark === m.id && S.markLoop) { setMarkLoop(false); return; }
+  selectMark(m.id);
+  setMarkLoop(true);
+}
+
+function renderActiveMark() {
+  const m = activeMarkData(), b = activeBounds();
+  if (m) {
+    const point = isPoint(m);
+    $("active-mark-label").textContent = `EVP ${m.cls} · ` +
+      (point ? fmtPrecise(b.start) : `${fmtPrecise(b.start)} – ${fmtPrecise(b.end)}`);
+    $("loop-mark").checked = S.markLoop;
+    $("loop-mark").disabled = point;
+    $("loop-mark-label").title = point ? NO_LOOP_TIP : "Repeat this EVP";
+  }
+  for (const row of $("marks-list").children) {
+    const on = row.dataset.id === S.activeMark, looping = on && S.markLoop, b2 = row.loopButton;
+    row.classList.toggle("active", on);
+    if (!b2 || b2.disabled) continue;
+    b2.setAttribute("aria-pressed", String(looping));
+    b2.title = looping ? "Stop looping this EVP" : "Loop this EVP";
+    b2.setAttribute("aria-label", b2.title);
+  }
 }
 
 function clearSelection() {                                 // the selection only: marks stay
@@ -2125,6 +2239,7 @@ const MARK_COLORS = { A: "rgba(220, 60, 60, .30)", B: "rgba(230, 150, 30, .30)",
 const MIN_MARK = 0.05;                        // seconds; the backend refuses shorter marks
 const READ_ONLY_TIP = "Marks can't be changed right now.";   // only if the backend gave no reason
 const NO_MARKS_TIP = "Marks are not available here.";
+const NO_LOOP_TIP = "A point marker has no length to loop.";
 
 function isMark(r) { return r.id.startsWith("mark-"); }
 function marksWritable() { return !!S.caps.marks && !S.caps.marks_read_only; }
@@ -2160,6 +2275,7 @@ async function storeWritable() {
   renderLibraryBar();
   if (S.current) {
     closeMarkForm();
+    deselectMark();                                                  // the store changed mode: nothing loops on
     for (const region of S.markRegions.values()) region.remove();   // redrawn draggable
     S.markRegions.clear();
     if (S.ws.getDuration()) for (const m of S.marks) addMarkRegion(m);
@@ -2197,6 +2313,7 @@ function setupMarks() {
 // The recording now in the player (its label and the backend's audio result), or none (null).
 function setCurrent(label, r) {
   closeMarkForm();
+  S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();
   S.current = r ? { rec: r.rec, name: label, duration: r.duration, fp: r.fp || null } : null;
@@ -2349,6 +2466,7 @@ function renderMarks() {
   list.innerHTML = "";
   list.hidden = !S.marks.length;
   for (const m of S.marks) list.appendChild(markRow(m));
+  showSelection();                                           // the bar's mark (its class, times) and the rows' states
   $("marks-empty").hidden = S.marks.length > 0;
   $("export-marked").disabled = !S.marks.length || savingAudio();
   $("export-clips").disabled = !S.marks.length || savingAudio();
@@ -2367,6 +2485,10 @@ function markButton(text, title, run, enabled = true) {
 function markRow(m) {
   const row = document.createElement("div");
   row.className = "mark-row";
+  row.dataset.id = m.id;
+  row.title = "Click to select this EVP";
+  // A click on the row (not its buttons, nor a note being edited) makes it the active mark.
+  row.onclick = (e) => { if (e.target === row || !/BUTTON|INPUT/.test(e.target.tagName)) selectMark(m.id); };
   const chip = document.createElement("span");
   chip.className = `cls-chip cls-${m.cls}`; chip.textContent = m.cls; chip.title = `Class ${m.cls}`;
   const time = document.createElement("span");
@@ -2378,9 +2500,15 @@ function markRow(m) {
   note.dataset.id = m.id;
   note.textContent = m.note || (writable ? "Add a note" : "No note");
   note.title = writable ? (m.note ? `${m.note}\n(click to edit)` : "Click to add a note") : [m.note, tip].filter(Boolean).join("\n");
-  if (writable) note.onclick = () => editNoteInline(note, m);
+  if (writable) note.onclick = (e) => { e.stopPropagation(); editNoteInline(note, m); };
+  const point = isPoint(m);
+  row.loopButton = markButton("🔁", point ? NO_LOOP_TIP : "Loop this EVP", () => toggleMarkLoop(m), !point);
+  row.loopButton.className = "mark-loop";
+  row.loopButton.setAttribute("aria-label", row.loopButton.title);
+  row.loopButton.setAttribute("aria-pressed", "false");
   row.append(chip, time, note,
     markButton("▶", "Play this EVP", () => playMark(m)),
+    row.loopButton,
     markButton("Save clip", "Save this EVP as its own WAV clip (in a Clips folder)", () => exportClips(m),
                !savingAudio()),
     markButton("✎", tip || "Change the class or note", () => openMarkForm(m), writable),
@@ -2388,9 +2516,9 @@ function markRow(m) {
   return row;
 }
 
-function playMark(m) {
-  const region = S.markRegions.get(m.id);
-  if (region) region.play(true); else S.ws.play(m.start, isPoint(m) ? undefined : m.end);
+function playMark(m) {                         // the row's ▶: it becomes the active mark, and plays
+  selectMark(m.id);
+  playActiveMark();
 }
 
 // Click a note to edit it in place: Enter or leaving the field saves, Escape cancels.
@@ -2440,6 +2568,7 @@ async function deleteMark(m) {
   S.markRegions.delete(m.id);
   S.marks = S.marks.filter((x) => x.id !== m.id);
   if (S.markForm && S.markForm.id === m.id) closeMarkForm();
+  if (S.activeMark === m.id) deselectMark();                 // its loop ends with it
   renderMarks();
 }
 

@@ -133,8 +133,9 @@ td.note { color: var(--warn); }
 #waveform { min-height: 80px; }
 #selection-bar { display: flex; align-items: center; gap: 10px; min-height: 28px; font-size: 12px; }
 #selection-bar .muted { padding: 0; }
-#selection-controls { display: inline-flex; align-items: center; gap: 10px; }
-#selection-controls[hidden] { display: none; }
+#selection-controls, #mark-controls { display: inline-flex; align-items: center; gap: 10px; }
+#selection-controls[hidden], #mark-controls[hidden] { display: none; }
+#active-mark-label { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 #waveform ::part(region-content) { font-weight: 700; }
 /* The mark form (in the selection bar) and the marks list under it */
 #mark-form { display: inline-flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
@@ -152,7 +153,10 @@ td.note { color: var(--warn); }
 #marks { font-size: 12px; }
 #marks[hidden], #marks-list[hidden] { display: none; }
 #marks-list { max-height: 112px; overflow: auto; border-top: 1px solid var(--line); }
-.mark-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--line); }
+.mark-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; border-bottom: 1px solid var(--line); cursor: pointer; }
+.mark-row.active { background: var(--accent-soft); }
+.mark-row button.mark-loop[aria-pressed="true"] { background: var(--accent); color: var(--panel); border-radius: 4px; }
+.mark-row button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 4px; }
 .cls-chip { display: inline-block; padding: 0 4px; }
 .mark-time { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
 .mark-note { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
