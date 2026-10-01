@@ -203,6 +203,9 @@ Right-click in the library for the same tools: on an empty part of the list,
 **Play**, **Rename…**, **Move to…** (all the ticked recordings, if you right-click a
 ticked one) or **Export clips**. A folder's **Export clips** does every marked recording
 in it and in its subfolders (see *EVP clips* below).
+**Show in File Explorer** (on a recording or clip) opens its folder in File Explorer with
+the file selected — the file the row names, so the `.dvf` when there's also a `.wav` copy;
+**Open in File Explorer** (on a folder, including a `Clips` folder) opens that folder.
 
 **Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that folder get the new name,
 each keeping its extension; a name that's already taken is refused, and marks stay with it.

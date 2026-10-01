@@ -1808,6 +1808,7 @@ function libraryMenuItems(target) {
     const inClips = !!L.folderById.get(id).in_clips;
     return [
       { label: "Open", run: () => openLibraryFolder(id) },
+      { label: "Open in File Explorer", run: () => exploreLibraryFolder(id) },
       { label: "Rename…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; renameFolderDialog(); } },
       { label: "Delete…", disabled: !canChangeFolder(id), title: why, run: () => { L.selFolder = id; deleteFolderDialog(); } },
       { label: "Export clips", disabled: !canExportClips() || inClips,
@@ -1824,6 +1825,8 @@ function libraryMenuItems(target) {
     return [
       { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
+      // The row's own file (the one it names: a recorder's .dvf before its WAV copy), not every copy.
+      { label: "Show in File Explorer", title: g.main.name, run: () => exploreLibraryFile(g.main) },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
       { label: "Rename…", disabled: !canRenameRecording(g),
         title: L.op ? "Wait for the operation to finish" : n > 1 ? "Renames this recording only" : "",
@@ -1839,6 +1842,18 @@ function libraryMenuItems(target) {
   }
   if (L.flat) return [];                       // no folders in the All recordings view
   return [{ label: "New folder…", disabled: !canNewFolder(), run: newFolderDialog }];
+}
+
+// Show in File Explorer / Open in File Explorer: the backend gets the id only, never a path,
+// and finds the file or folder inside the library folder itself.
+async function exploreLibraryFile(f) {
+  const r = await api().show_library_file(f.id);
+  if (!r.ok) showError(r);
+}
+
+async function exploreLibraryFolder(id) {
+  const r = await api().open_library_folder(id);
+  if (!r.ok) showError(r);
 }
 
 function libraryMenuOpen() { return !$("context-menu").hidden; }
