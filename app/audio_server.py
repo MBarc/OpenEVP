@@ -429,6 +429,19 @@ class AudioServer:
             raise ValueError("the file changed on disk: load it again")
         return f
 
+    def open_cached(self, key):
+        """The decoded WAV cached under key, opened for reading (a binary file; close
+        it), or None when nothing is cached under it (nothing is decoded here)."""
+        with self._lock:
+            e = self._entries.get(key)
+            if e is None or e.get("path"):           # a file served in place is not a decode
+                return None
+            path = os.path.join(self._dir, e["file"] + ".wav")
+        try:
+            return _open_shared(path)
+        except OSError:
+            return None
+
     def add_spectrogram(self, url, spec):
         """Keep a spectrogram of the audio at url; returns its tiles' base URL
         (<base>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""

@@ -12,7 +12,7 @@ import webview
 from openevp import __version__
 from openevp.paths import default_output
 
-from . import folders, updater
+from . import folders, native_share, sharing, updater
 from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
 from .backend import Api, recording_wav
 from .devices import DeviceManager
@@ -413,6 +413,9 @@ def _run_app(smoke=None):
             default_dest, _warning = default_output()   # Documents\OpenEVP; created by the first export
             store, store_problems = _open_store()       # the remembered Save-to folder replaces default_dest
         frozen = getattr(sys, "frozen", False) and not smoke
+        native = sys.platform == "win32" and not smoke   # drag out / Copy file (app.native_share)
+        if native:
+            sharing.clean()                             # MP3s made to share, SHARE_MAX_AGE old (another window's are younger)
         if frozen:
             updater.clean_old_downloads()
         api = Api(manager, emit, pick_folder, default_dest, server,
@@ -420,7 +423,9 @@ def _run_app(smoke=None):
                   pick_wav=pick_wav, updater=None if smoke else updater, quit_app=quit_for_update,
                   can_install=frozen and sys.platform == "win32",
                   before_install=lambda: _hand_over(running), store=store, store_problems=store_problems,
-                  recycle=lambda path: folders.recycle(path, owner=_window_handle(window)))
+                  recycle=lambda path: folders.recycle(path, owner=_window_handle(window)),
+                  drag_files=(lambda paths: native_share.drag_files(window.native, paths)) if native else None,
+                  copy_files=(lambda paths: native_share.copy_files(window.native, paths)) if native else None)
         api.watch_store()                               # read-only: keep trying for the store's lock
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
