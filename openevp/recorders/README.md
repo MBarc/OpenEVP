@@ -149,6 +149,6 @@ entry.
 
 A planned model with no code yet (`panasonic_rrdr60/`) sets only
 `model_id`, `name` and `supported = False`. It claims no USB ids and no driver,
-is never discovered or opened, and is not shown in the app. The README lists it
-as planned. To implement one, fill in its module following the steps above and
+is never discovered or opened, and is not shown in the app. The main README lists
+it as not supported (the RR-DR60 has no PC connection). To implement one, fill in its module following the steps above and
 remove `supported = False`.

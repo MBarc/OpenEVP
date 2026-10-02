@@ -21,7 +21,7 @@ class UsbError(Exception):
 
 
 class DriverMissing(UsbError):
-    """The recorder is attached but not bound to WinUSB (see the README)."""
+    """The recorder is attached but not bound to WinUSB (see docs/technical.md)."""
 
 
 class _DeviceDescriptor(ctypes.Structure):
