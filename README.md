@@ -200,12 +200,23 @@ could be recycled is, the rest stays where it was, and OpenEVP says so.
 
 Right-click in the library for the same tools: on an empty part of the list,
 **New folder**; on a folder, **Open**, **Rename** or **Delete**; on a recording,
-**Play**, **Rename…**, **Move to…** (all the ticked recordings, if you right-click a
-ticked one) or **Export clips**. A folder's **Export clips** does every marked recording
+**Play**, **Copy file**, **Rename…**, **Move to…** (all the ticked recordings, if you
+right-click a ticked one) or **Export clips**. A folder's **Export clips** does every marked recording
 in it and in its subfolders (see *EVP clips* below).
 **Show in File Explorer** (on a recording or clip) opens its folder in File Explorer with
 the file selected — the file the row names, so the `.dvf` when there's also a `.wav` copy;
 **Open in File Explorer** (on a folder, including a `Clips` folder) opens that folder.
+
+**Sharing a recording or clip.** Drag a row out of the library onto Discord, WhatsApp
+(the app or WhatsApp Web in a browser), an email, the desktop or a folder: it arrives as
+a file, just as if you had dragged it from File Explorer. Drag a ticked row to share every
+ticked recording at once. Or right-click it and choose **Copy file** (or press **Ctrl+C**
+on the row), then paste with **Ctrl+V** into the chat or folder. A WAV, MP3 or clip is
+shared as it is. A recorder's `.dvf` (which other programs can't play) is shared as the
+`.wav` beside it, if there is one, or else as an MP3 of the whole recording, made for you
+first ("Preparing … to share" — keep holding the mouse button; if you let go early, just
+drag again and it starts at once). These MP3s live in a temporary folder and are removed
+after a few hours. Sharing only ever copies: your original file stays where it is.
 
 **Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that folder get the new name,
 each keeping its extension; a name that's already taken is refused, and marks stay with it.
@@ -214,7 +225,8 @@ A second OpenEVP window can't create, rename, delete or move anything in the
 library, and can't export; do those in the first window.
 
 Move recordings between folders by ticking their checkboxes and clicking
-**Move to…**, or by dragging a row onto a folder or a breadcrumb step. Marks
+**Move to…**, or by dragging a row onto a folder or a breadcrumb step (dropped there it
+moves; dropped outside OpenEVP it is shared as a copy, see above). Marks
 travel with the audio automatically — nothing about a recording's marks
 changes when it moves. The **Investigation** column always shows the
 top-level folder a recording sits in, however deep it's nested.
