@@ -5,7 +5,10 @@ The page sends file ids from the latest listing, never paths; each id is resolve
 inside the library folder as Show in File Explorer resolves it. What is shared is a
 file other programs can play:
 
-- a WAV or MP3 (also .mpeg and the other MP3 extensions), a clip included: the file itself;
+- a WAV or .mp3, a clip included: the file itself;
+- an MP3 saved as .mpeg (WhatsApp Web's name), .mpga, .mp2 or .m2a: the same
+  file as <name>.mp3 in the share cache (a hard link, or a copy on another
+  volume), since some programs take .mpeg for video;
 - a recorder's own file (a .dvf): the WAV beside it (same name, .wav) if there is
   one, else an MP3 of the whole recording, made on demand with the clip MP3
   settings (openevp.mp3) into the share cache as <name>.mp3.
@@ -180,11 +183,51 @@ class ShareOps:
                         return got
                     made += got["made"]
                     path = got["path"]
+            elif fmt in formats.MP3_FORMATS and fmt.ext != ".mp3":
+                got = self._as_mp3(path)
+                if not got["ok"]:
+                    return got
+                path = got["path"]
             key = os.path.normcase(os.path.abspath(path))
             if key not in seen:
                 seen.add(key)
                 out.append(path)
         return {"ok": True, "paths": out, "made": made}
+
+    def _as_mp3(self, path):
+        """{ok, path}: an MP3 saved under another extension (.mpeg, .mpga, .mp2,
+        .m2a) as <name>.mp3 in the share cache: a hard link when the cache is on
+        the same volume, else a copy; reused while the file is unchanged (its
+        size and mtime are in the subfolder's name). Some programs take .mpeg for
+        video (WhatsApp desktop crashed sending one). Layer II audio is named .mp3
+        too: players accept it, the video path is the problem. The original is
+        never renamed or written."""
+        name = os.path.basename(path)
+        root = share_root()
+        try:
+            st = os.stat(path)
+            target = made_path(root, path, st)
+            if os.path.isfile(target) and os.path.getsize(target) == st.st_size:
+                _touch(os.path.dirname(target))
+                return {"ok": True, "path": target}
+            clean(root)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            part = target + f".{os.getpid()}-{threading.get_ident()}.part"
+            try:
+                try:
+                    os.link(path, part)
+                except OSError:                      # another volume, or links not supported there
+                    shutil.copyfile(path, part)
+                os.replace(part, target)
+            except BaseException:
+                try:
+                    os.remove(part)
+                except OSError:
+                    pass
+                raise
+        except Exception as e:
+            return _fail(f"Could not prepare {name} to share: {_plain(e)}")
+        return {"ok": True, "path": target}
 
     def _made_mp3(self, path, fmt):
         """{ok, path, made}: the MP3 of a recorder's file in the share cache,

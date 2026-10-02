@@ -65,18 +65,67 @@ class ShareBase(FolderApiBase):
 
 
 class SharePathTests(ShareBase):
-    def test_wav_mp3_mpeg_and_clips_are_shared_as_themselves(self):
+    def test_wav_mp3_and_clips_are_shared_as_themselves(self):
         wav = self.write("Old Mill/a.wav", wav_bytes(b"a"))
-        clip_mp3 = mp3.encode(wav_bytes(b"c"), "clip")
-        mpeg = self.write("b.mpeg", clip_mp3)                    # WhatsApp Web's name for an MP3
+        song = self.write("b.mp3", mp3.encode(wav_bytes(b"b"), "b"))
         library_ops._make_clips_folder(os.path.join(self.lib, "Clips"))
-        clip = self.write("Clips/a_EVP-A_00m01.0s.mp3", clip_mp3)
+        clip = self.write("Clips/a_EVP-A_00m01.0s.mp3", mp3.encode(wav_bytes(b"c"), "clip"))
         api = self.new_api()
         ids = self.ids(api)
-        r = api.drag_out([ids["a.wav"], ids["b.mpeg"], ids["a_EVP-A_00m01.0s.mp3"]])
+        r = api.drag_out([ids["a.wav"], ids["b.mp3"], ids["a_EVP-A_00m01.0s.mp3"]])
         self.assertEqual(r, {"ok": True, "started": True, "count": 3, "effect": "copy"})
-        self.assertEqual(self.norm(self.dragged[0]), self.norm([wav, mpeg, clip]))
+        self.assertEqual(self.norm(self.dragged[0]), self.norm([wav, song, clip]))
         self.assertFalse(os.path.exists(self.share), "nothing made")
+
+    def test_an_mp3_under_another_extension_goes_as_name_mp3(self):
+        """WhatsApp desktop crashed sending a .mpeg (it takes it for video): an MP3
+        saved as .mpeg, .mpga, .mp2 or .m2a goes as <name>.mp3, a hard link in the
+        share cache; the original is left as it is."""
+        data = mp3.encode(wav_bytes(b"m"), "m")
+        names = ["WhatsApp Audio 2026-09-30.mpeg", "b.mpga", "c.mp2", "d.m2a"]
+        originals = [self.write(n, data) for n in names]
+        before = [(os.path.getsize(p), os.stat(p).st_mtime_ns) for p in originals]
+        api = self.new_api()
+        ids = self.ids(api)
+        self.assertTrue(api.drag_out([ids[n] for n in names])["ok"])
+        shared = self.dragged[0]
+        self.assertEqual([os.path.basename(p) for p in shared],
+                         ["WhatsApp Audio 2026-09-30.mp3", "b.mp3", "c.mp3", "d.mp3"])
+        for orig, link in zip(originals, shared):
+            self.assertEqual(os.path.dirname(os.path.dirname(link)), self.share)
+            self.assertTrue(os.path.samefile(orig, link), "a hard link on the same volume")
+        self.assertEqual([(os.path.getsize(p), os.stat(p).st_mtime_ns) for p in originals], before)
+        self.assertEqual(sorted(os.listdir(self.lib)), sorted(names), "nothing renamed or added")
+        # Copy file: the same .mp3, reused (nothing linked again) while the original is unchanged.
+        with mock.patch.object(sharing.os, "link", side_effect=AssertionError("not again")):
+            self.assertEqual(api.copy_files([ids[names[0]]]), {"ok": True, "count": 1})
+        self.assertEqual(self.copied, [[shared[0]]])
+        # Changed since: a new one (the old one goes with the 6-hour cleanup).
+        with open(originals[0], "ab") as f:
+            f.write(data)
+        api.drag_out([self.ids(api)[names[0]]])
+        self.assertNotEqual(os.path.normcase(self.dragged[-1][0]), os.path.normcase(shared[0]))
+        self.assertTrue(os.path.samefile(self.dragged[-1][0], originals[0]))
+
+    def test_an_mp3_on_another_volume_is_copied(self):
+        data = mp3.encode(wav_bytes(b"m"), "m")
+        orig = self.write("x.mpeg", data)
+        api = self.new_api()
+        fid = self.ids(api)["x.mpeg"]
+        with mock.patch.object(sharing.os, "link", side_effect=OSError(17, "not the same device")):
+            self.assertTrue(api.drag_out([fid])["ok"])
+        (copy,) = self.dragged[0]
+        self.assertEqual(os.path.basename(copy), "x.mp3")
+        self.assertFalse(os.path.samefile(orig, copy))
+        with open(copy, "rb") as f:
+            self.assertEqual(f.read(), data)
+        self.assertEqual(os.listdir(os.path.dirname(copy)), ["x.mp3"], "no partial file left")
+        with mock.patch.object(sharing.shutil, "copyfile", side_effect=OSError(28, "disk full")), \
+                mock.patch.object(sharing.os, "link", side_effect=OSError(17, "not the same device")):
+            with open(orig, "ab") as f:
+                f.write(b"\0")
+            r = api.drag_out([self.ids(api)["x.mpeg"]])
+        self.assertTrue(r["error"].startswith("Could not prepare x.mpeg to share: "), r)
 
     def test_a_dvf_goes_as_the_wav_beside_it(self):
         self.write("Old Mill/x.dvf", dvf_bytes())

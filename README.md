@@ -212,7 +212,8 @@ the file selected — the file the row names, so the `.dvf` when there's also a 
 a file, just as if you had dragged it from File Explorer. Drag a ticked row to share every
 ticked recording at once. Or right-click it and choose **Copy file** (or press **Ctrl+C**
 on the row), then paste with **Ctrl+V** into the chat or folder. A WAV, MP3 or clip is
-shared as it is. A recorder's `.dvf` (which other programs can't play) is shared as the
+shared as it is; an MP3 saved as `.mpeg` (as WhatsApp Web saves voice notes), `.mpga`,
+`.mp2` or `.m2a` is shared as `<name>.mp3`, because some apps take `.mpeg` for video. A recorder's `.dvf` (which other programs can't play) is shared as the
 `.wav` beside it, if there is one, or else as an MP3 of the whole recording, made for you
 first ("Preparing … to share" — keep holding the mouse button; if you let go early, just
 drag again and it starts at once). These MP3s live in a temporary folder and are removed
