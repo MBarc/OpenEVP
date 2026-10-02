@@ -23,6 +23,7 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
             drag: null,                                   // recordings being dragged in the library: {ids}
+            sharing: false, sharePreparing: false,        // a drag out or Copy file running; its MP3 being made
             // The EVP library: the listing, its scan, what is shown (see loadLibrary).
             lib: { seq: 0, loading: false, listed: false, scanId: 0, buffer: [], folder: "", exists: true,
                    truncated: false, indexing: false, done: 0, total: 0, checkError: "", problem: "",
@@ -867,11 +868,20 @@ function loadLibraryView() {
 }
 
 // Enter on a folder row opens it; Backspace goes up a level; Escape clears the recordings
-// picked (not while typing or in a dialog).
+// picked; Ctrl+C on a recording row copies its file (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
-  if (S.view !== "library" || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (S.view !== "library" || e.altKey || e.metaKey) return;
   if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
+  if (e.ctrlKey) {                             // Ctrl+C on a recording row: Copy file
+    const row = e.target.closest && e.target.closest("tr.lib-row");
+    if (!e.shiftKey && (e.key === "c" || e.key === "C") && row && row === e.target && row.group) {
+      e.preventDefault();
+      const g = row.group;
+      copyLibraryFiles(groupPicked(g) ? [...L.selected].filter((id) => L.byId.has(id)) : groupPickIds(g));
+    }
+    return;
+  }
   if (e.key === "Escape" && L.selected.size) {
     e.preventDefault();
     L.selected.clear();
@@ -1010,7 +1020,6 @@ function libraryRow(g) {
     toggle.onclick = (e) => { e.stopPropagation(); toggleLibraryRow(tr.group); };
     tr.cells[0].append(pick, toggle);
     tr.ondragstart = (e) => startDrag(e, tr.group);
-    tr.ondragend = endDrag;
     tr.onclick = () => {
       if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
       playLibrary(tr.group, null);
@@ -1021,7 +1030,7 @@ function libraryRow(g) {
   const picked = groupPicked(g);
   tr.cells[0].firstChild.checked = picked;
   tr.classList.toggle("picked", picked);
-  tr.draggable = !L.flat;                      // onto a folder row or a breadcrumb segment
+  tr.draggable = true;                         // out of the window, or onto a folder row or a breadcrumb segment
   const total = g.marks.A + g.marks.B + g.marks.C;
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
@@ -1702,18 +1711,80 @@ async function moveRecordings(ids, targetId) {
   if (touched) reloadHeld(held, newIds[held.id] || held.id);
 }
 
-// ---- drag and drop: recording rows onto a folder row or a breadcrumb segment ----
+// ---- drag and drop: library rows out to other programs, or onto a folder row or a breadcrumb ----
+// Every drag of a row is a real Windows file drag (app/native_share.py): the browser's own drag is
+// cancelled and the backend starts one with the row's files, as File Explorer would, so Discord,
+// WhatsApp, a browser, the desktop or an email take them like files from Explorer. A recorder's file
+// (.dvf) goes as the WAV beside it, or as an MP3 made for it first ("Preparing…"). The drag offers
+// Copy only: nothing dropped anywhere can move or delete the original.
+// The same drag dropped back on a library folder in this window moves the recordings, as before:
+// the page sees it as a file drag (dataTransfer "Files", effect copy) while S.drag says which rows
+// it carries. One mechanism, so a drag that leaves the window and comes back still works.
 function startDrag(e, g) {
   const L = S.lib;
-  if (L.flat || L.op) { e.preventDefault(); return; }
+  e.preventDefault();                          // not the browser's drag: the backend starts a file drag
+  if (L.op || S.drag) return;
   // A picked row drags every picked recording; any other row just itself.
   const ids = groupPicked(g) ? [...L.selected].filter((id) => L.byId.has(id)) : groupPickIds(g);
+  if (!ids.length) return;
   S.drag = { ids };
-  e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setData("application/x-openevp-recordings", JSON.stringify(ids));
-  const label = $("drag-label"), n = recordingsIn(ids);
-  label.textContent = n === 1 ? g.main.name : plural(n, "recording");
-  e.dataTransfer.setDragImage(label, -12, -12);
+  dragOut(ids);
+}
+
+// The files that stand for these recordings outside OpenEVP: one per recording (its WAV or MP3
+// copy when it has one, else its own file, which the backend shares as a playable copy).
+function shareIds(ids) {
+  const L = S.lib, byRec = new Map();
+  for (const id of ids) {
+    const f = L.byId.get(id);
+    if (!f) continue;
+    const k = (L.flat ? "" : f.folder_id) + "|" + libFileKey(f);
+    const held = byRec.get(k);
+    if (!held || (!playsAnywhere(held) && playsAnywhere(f))) byRec.set(k, f);
+  }
+  return [...byRec.values()].map((f) => f.id);
+}
+function playsAnywhere(f) { return SHARED_AS_IS.has(f.type); }
+const SHARED_AS_IS = new Set(["wav", "mp3", "mpeg", "mpga", "mp2", "m2a"]);   // openevp.formats: WAV, MP3_FORMATS
+
+async function dragOut(ids) {
+  const share = shareIds(ids);
+  S.sharing = true;
+  try {
+    const r = await api().drag_out(share);
+    if (!r.ok) showError(r);
+    else if (!r.started && r.made) status(`Ready to share: drag ${r.count === 1 ? "it" : "them"} again.`);
+    else if (S.sharePreparing) status("");
+  } catch (err) {
+    banner(String(err));
+  } finally {
+    S.sharing = false;
+    S.sharePreparing = false;
+    endDrag();
+  }
+}
+
+// Copy file (the row's right-click menu, or Ctrl+C on a row): the same files a drag shares, on the
+// clipboard as files, so Ctrl+V pastes them into Discord, WhatsApp or a folder.
+async function copyLibraryFiles(ids) {
+  const share = shareIds(ids);
+  if (!share.length || S.sharing) return;
+  S.sharing = true;
+  try {
+    const r = await api().copy_files(share);
+    if (!r.ok) showError(r);
+    else status(`Copied ${r.count === 1 ? "1 file" : plural(r.count, "file")}. Paste it with Ctrl+V into a chat, an email or a folder.`);
+  } catch (err) {
+    banner(String(err));
+  } finally {
+    S.sharing = false;
+    S.sharePreparing = false;
+  }
+}
+
+function sharePreparing(p) {
+  S.sharePreparing = true;
+  status(`Preparing ${p.name} to share…`);
 }
 
 function endDrag() {
@@ -1739,7 +1810,7 @@ function setupDragAndDrop() {
       const el = dropTarget(e);
       if (!el) return;
       e.preventDefault();                      // on a valid target only
-      e.dataTransfer.dropEffect = "move";
+      e.dataTransfer.dropEffect = "copy";      // what the file drag offers; the page moves the recordings
       for (const x of document.querySelectorAll(".drop-target")) if (x !== el) x.classList.remove("drop-target");
       el.classList.add("drop-target");
     });
@@ -1770,10 +1841,11 @@ function setupDragAndDrop() {
     endDrag();
   });
   // No pointer goes down and the window is not focused again while a drag runs: if either
-  // happens with a drag still recorded, its dragend was missed. Clear it.
-  window.addEventListener("pointerdown", () => { if (S.drag) endDrag(); }, true);
-  window.addEventListener("mousedown", () => { if (S.drag) endDrag(); }, true);
-  window.addEventListener("focus", () => { if (S.drag) endDrag(); });
+  // happens with a drag still recorded and no drag out running, its end was missed. Clear it.
+  const stale = () => { if (S.drag && !S.sharing) endDrag(); };
+  window.addEventListener("pointerdown", stale, true);
+  window.addEventListener("mousedown", stale, true);
+  window.addEventListener("focus", stale);
 }
 
 function setupFolderTools() {
@@ -1829,6 +1901,11 @@ function libraryMenuItems(target) {
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
       // The row's own file (the one it names: a recorder's .dvf before its WAV copy), not every copy.
       { label: "Show in File Explorer", title: g.main.name, run: () => exploreLibraryFile(g.main) },
+      // The files a drag out shares (Ctrl+C on the row does the same), for pasting into a chat.
+      { label: n > 1 ? `Copy ${n} files` : "Copy file", disabled: S.sharing,
+        title: n > 1 ? "Put them on the clipboard as files: paste them with Ctrl+V into Discord, WhatsApp, an email or a folder"
+                     : "Put it on the clipboard as a file: paste it with Ctrl+V into Discord, WhatsApp, an email or a folder",
+        run: () => copyLibraryFiles(ids) },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
       { label: "Rename…", disabled: !canRenameRecording(g),
         title: L.op ? "Wait for the operation to finish" : n > 1 ? "Renames this recording only" : "",
@@ -2008,6 +2085,7 @@ $("export").onclick = async () => {
 
 // Called by app/main.py through evaluate_js. Events for an older job are ignored.
 window.onBackendEvent = (event, p) => {
+  if (event === "share-preparing") { sharePreparing(p); return; }   // a drag out or Copy file
   if (event === "update-progress") {        // not tied to an export job
     $("update-status").textContent = `Downloading… ${p.percent}%`;
     return;

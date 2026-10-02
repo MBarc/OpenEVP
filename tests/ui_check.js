@@ -502,7 +502,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const realTimeout = context.setTimeout;
   context.setTimeout = (fn, ms) => { if (!ms) setImmediate(fn); return 0; };   // finishFolderOp runs
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Copy file", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
   choose("Play");
   await settle();
   assert.deepStrictEqual(ops.pop(), ["play", "r3"]);
@@ -534,7 +534,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);                                  // ticked: both ticked recordings
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move 2 recordings to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Copy 2 files", false], ["Rename…", false], ["Move 2 recordings to…", false], ["Export clips", true]]);
   choose("Move 2 recordings to…");
   assert.strictEqual($("folder-dialog-title").textContent, "Move 2 recordings to…");
   pick("f2").onclick();
@@ -544,10 +544,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r3").cells[1]);                                  // not ticked: just itself
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Copy file", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
   L.op = true;
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", true], ["Move to…", true], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Copy file", false], ["Rename…", true], ["Move to…", true], ["Export clips", true]]);
   L.op = false;
   press("Escape");
 
@@ -651,7 +651,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);
-  assert.strictEqual(menu.children[2].title, "Renames this recording only");
+  assert.strictEqual(menu.children[3].title, "Renames this recording only");
   press("Escape");                                                    // (r1 and r2 stay ticked)
   // F2 on a folder row renames the folder; off while an operation runs or in a second window.
   folderRow("f1").focus();
@@ -665,12 +665,12 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   press("F2");
   assert.ok(!dialogShown());
   rightClick(recRow("r4").cells[1]);
-  assert.deepStrictEqual(menuItems().slice(1, 3), [["Show in File Explorer", false], ["Rename…", true]]);
+  assert.deepStrictEqual(menuItems().slice(1, 4), [["Show in File Explorer", false], ["Copy file", false], ["Rename…", true]]);
   press("Escape");
   L.op = false;
   vm.runInContext(`S.caps.marks_read_only = true;`, context);
   rightClick(recRow("r4").cells[1]);
-  assert.deepStrictEqual(menuItems().slice(1, 3), [["Show in File Explorer", false], ["Rename…", true]]);
+  assert.deepStrictEqual(menuItems().slice(1, 4), [["Show in File Explorer", false], ["Copy file", false], ["Rename…", true]]);
   press("Escape");
   press("F2");
   assert.ok(!dialogShown());
@@ -678,12 +678,127 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   document.activeElement = null;
   context.setTimeout = realTimeout;
 
+  // Drag out: every drag of a row is a Windows file drag the backend starts (the browser's own drag
+  // is cancelled); the page sends one file id per recording (its WAV copy when it has one, else its
+  // own file: the backend shares a .dvf as a playable copy), never a path. The same drag dropped on a
+  // library folder in this window moves the recordings (all their files), as before; Copy file and
+  // Ctrl+C put the same files on the clipboard.
+  {
+    const listedBefore = api.list_library, picked = new Set(L.selected);
+    L.selected.clear();
+    api.list_library = async () => ({ ok: true, folder: "C:\\save", scan_id: 40, exists: true, truncated: false, indexing: false,
+                                      pending: 0, folders: libFolders,
+                                      files: [{ ...libFile("d1", "x.dvf", "root", "fpx"), type: "dvf" }, libFile("w1", "x.wav", "root", "fpx"),
+                                              { ...libFile("d2", "y.dvf", "root", "fpy"), type: "dvf" },
+                                              { ...libFile("m1", "z.mpeg", "root", "fpz"), type: "mpeg" }] });
+    await context.loadLibrary();
+    await settle();
+    const shares = [];
+    let release, answer = { ok: true, started: true, count: 1, effect: "copy" };
+    api.drag_out = (ids) => { shares.push(["drag", JSON.parse(JSON.stringify(ids))]);
+                              return new Promise((r) => { release = () => r(answer); }); };
+    api.copy_files = async (ids) => { shares.push(["copy", JSON.parse(JSON.stringify(ids))]); return { ok: true, count: ids.length }; };
+    const dragEvent = (props = {}) => ({ defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...props });
+    // One recording (a .dvf with its WAV): the WAV goes out; the browser's drag is cancelled.
+    let ev = dragEvent();
+    recRow("d1").ondragstart(ev);
+    assert.ok(ev.defaultPrevented, "the browser's own drag is cancelled");
+    assert.deepStrictEqual(shares.splice(0), [["drag", ["w1"]]]);
+    assert.ok(recRow("d1").draggable);
+    assert.deepStrictEqual(JSON.parse(vm.runInContext("JSON.stringify(S.drag)", context)), { ids: ["d1", "w1"] });
+    recRow("d2").ondragstart(dragEvent());                             // one drag at a time
+    assert.deepStrictEqual(shares, []);
+    // Dropped back on a library folder: the page moves the recording (the drag offers copy only).
+    const dt = { dropEffect: "none", types: ["Files"] };
+    ev = fire([$("library-rows")], "dragover", { target: folderRow("f1").cells[1], dataTransfer: dt });
+    assert.ok(ev.defaultPrevented && dt.dropEffect === "copy");
+    assert.ok(folderRow("f1").classList.contains("drop-target"));
+    ev = fire([$("library-rows")], "dragover", { target: recRow("d2").cells[1], dataTransfer: { dropEffect: "none", types: ["Files"] } });
+    assert.ok(!ev.defaultPrevented, "not a folder: no drop");
+    ops.length = 0;
+    ev = fire([$("library-rows"), document], "drop", { target: folderRow("f1").cells[1], dataTransfer: dt });
+    assert.ok(ev.defaultPrevented);
+    await settle();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(ops.splice(0))), [["move", ["d1", "w1"], "f1"]]);
+    assert.strictEqual(vm.runInContext("S.drag", context), null);
+    release();
+    await settle();
+    assert.ok(!vm.runInContext("S.sharing", context));
+    // Picked rows drag together, one file each: the .dvf without a WAV goes as itself (the backend
+    // makes its MP3, saying so), an .mpeg as itself.
+    await context.loadLibrary();
+    await settle();
+    for (const id of ["d1", "d2", "m1"]) context.pickGroup(recRow(id).group, true);
+    context.renderLibrary();
+    recRow("m1").ondragstart(dragEvent());
+    assert.deepStrictEqual(shares.splice(0), [["drag", ["w1", "d2", "m1"]]]);
+    window.onBackendEvent("share-preparing", { name: "y.dvf" });
+    assert.strictEqual($("status").textContent, "Preparing y.dvf to share…");
+    answer = { ok: true, started: false, count: 3, made: 1 };          // let go before it was ready
+    release();
+    await settle();
+    assert.strictEqual($("status").textContent, "Ready to share: drag them again.");
+    assert.strictEqual(vm.runInContext("S.drag", context), null);
+    // A failure is shown; nothing is left half-way.
+    answer = { ok: false, error: "x.dvf is no longer there. Refresh the list." };
+    recRow("d2").ondragstart(dragEvent());
+    release();
+    await settle();
+    assert.strictEqual($("banner-text").textContent, "x.dvf is no longer there. Refresh the list.");
+    assert.ok(!vm.runInContext("S.sharing || S.drag", context));
+    shares.length = 0;
+    // The All recordings view: dragged out too, but no folder takes it.
+    L.flat = true; context.renderLibrary();
+    L.selected.clear(); context.renderLibrary();
+    answer = { ok: true, started: true, count: 1, effect: "none" };
+    recRow("d2").ondragstart(dragEvent());
+    assert.deepStrictEqual(shares.splice(0), [["drag", ["d2"]]]);
+    assert.strictEqual(context.dropTarget({ target: recRow("d2").cells[1] }), null);
+    release();
+    await settle();
+    L.flat = false; context.renderLibrary();
+    // Not while a folder operation runs.
+    L.op = true;
+    ev = dragEvent();
+    recRow("d2").ondragstart(ev);
+    assert.ok(ev.defaultPrevented && !shares.length);
+    L.op = false;
+    // Copy file: the right-click menu, and Ctrl+C on a focused row.
+    rightClick(recRow("d1").cells[1]);
+    assert.deepStrictEqual(menuItems()[2], ["Copy file", false]);
+    assert.match(menu.children[2].title, /paste it with Ctrl\+V into Discord, WhatsApp/);
+    choose("Copy file");
+    await settle();
+    assert.deepStrictEqual(shares.splice(0), [["copy", ["w1"]]]);
+    assert.strictEqual($("status").textContent, "Copied 1 file. Paste it with Ctrl+V into a chat, an email or a folder.");
+    context.pickGroup(recRow("d2").group, true); context.pickGroup(recRow("m1").group, true);
+    context.renderLibrary();
+    recRow("m1").focus();
+    const k = fire([document], "keydown", { key: "c", ctrlKey: true, target: recRow("m1") });
+    assert.ok(k.defaultPrevented);
+    await settle();
+    assert.deepStrictEqual(shares.splice(0), [["copy", ["d2", "m1"]]]);
+    rightClick(recRow("m1").cells[1]);
+    assert.deepStrictEqual(menuItems()[2], ["Copy 2 files", false]);
+    press("Escape");
+    fire([document], "keydown", { key: "c", ctrlKey: true, target: document.body });   // not on a row: nothing
+    await settle();
+    assert.deepStrictEqual(shares, []);
+    document.activeElement = null;
+    L.selected.clear();
+    for (const id of picked) L.selected.add(id);
+    api.list_library = async () => ({ ...(await listedBefore()), scan_id: 41 });   // (never an older scan)
+    await context.loadLibrary();
+    api.list_library = listedBefore;
+    await settle();
+  }
+
   // All recordings (no folders): empty space offers nothing, but the browser menu stays off there.
   L.flat = true; context.renderLibrary();
   e = rightClick($("empty"));
   assert.ok(e.defaultPrevented && menu.hidden);
   rightClick(recRow("r1").cells[1]);
-  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Show in File Explorer", "Rename…", "Move 2 recordings to…", "Export clips"]);
+  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Show in File Explorer", "Copy 2 files", "Rename…", "Move 2 recordings to…", "Export clips"]);
   fire([window], "scroll", {});
   assert.ok(menu.hidden, "scrolling closes it");
   L.flat = false;
@@ -795,11 +910,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   vm.runInContext(`setSummary("fpX", { marks: { A: 1, B: 0, C: 2 }, reviewed: false, notes: "" }); renderLibrary();`, context);
   rightClick(recRow("r1").cells[1]);
-  assert.deepStrictEqual(menuItems()[4], ["Export clips", true]);                  // nothing marked in it
-  assert.strictEqual(menu.children[4].title, "No EVPs marked in this recording");
+  assert.deepStrictEqual(menuItems()[5], ["Export clips", true]);                  // nothing marked in it
+  assert.strictEqual(menu.children[5].title, "No EVPs marked in this recording");
   press("Escape");
   rightClick(recRow("r4").cells[1]);
-  assert.deepStrictEqual(menuItems()[4], ["Export clips", false]);
+  assert.deepStrictEqual(menuItems()[5], ["Export clips", false]);
   choose("Export clips");
   await settle();
   let [what, ids, job] = JSON.parse(JSON.stringify(clipCalls.pop()));
@@ -940,7 +1055,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(menu.children[0].textContent, "Play");
   assert.ok(menu.children[0].disabled);
   assert.strictEqual(menu.children[0].title, "LPEC ST (ICD-ST10) playback is not included in this build.");
-  assert.deepStrictEqual(menuItems()[4], ["Export clips", true]);                  // no marks: nothing to cut
+  assert.deepStrictEqual(menuItems()[5], ["Export clips", true]);                  // no marks: nothing to cut
   press("Escape");
 
   // A Clips folder OpenEVP made: listed with its own icon and "Clips" tag, its clips counted apart and
@@ -998,8 +1113,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.match(clipRow.cells[5].title, /2 marks of its own, not counted as EVPs/);
   assert.strictEqual(recRow("c2").cells[5].textContent, "Clip");
   rightClick(clipRow.cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", false]]);
-  assert.match(menu.children[4].title, /^Save each EVP marked in this clip as its own (MP3|WAV) clip \(in the same Clips folder\)$/);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Copy file", false], ["Rename…", false], ["Move to…", false], ["Export clips", false]]);
+  assert.match(menu.children[5].title, /^Save each EVP marked in this clip as its own (MP3|WAV) clip \(in the same Clips folder\)$/);
   choose("Show in File Explorer");
   await settle();
   assert.deepStrictEqual(explored.splice(0), [["file", "c1"]]);
@@ -1015,8 +1130,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok(!vm.runInContext("S.clips.running", context));
   assert.strictEqual($("banner-text").textContent, "✓ 2 clips saved.");
   rightClick(recRow("c2").cells[1]);
-  assert.deepStrictEqual(menuItems()[4], ["Export clips", true]);
-  assert.strictEqual(menu.children[4].title, "No EVPs marked in this clip");
+  assert.deepStrictEqual(menuItems()[5], ["Export clips", true]);
+  assert.strictEqual(menu.children[5].title, "No EVPs marked in this clip");
   press("Escape");
   ops.length = 0;
   clipRow.onclick();
