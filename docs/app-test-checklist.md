@@ -241,7 +241,8 @@ Deleting recordings and clips:
     deleted for good), the row and the library count update. Restore them from
     the Recycle Bin and refresh: the recording is back with its marks. Tick
     three recordings and press **Delete** on one of them: the dialog lists all
-    three. Delete a clip in a `Clips` folder the same way. Delete the recording
+    three. Type a search that hides one of them and press **Delete** again: only
+    the two in view are listed. Delete a clip in a `Clips` folder the same way. Delete the recording
     playing in the player: the player empties first. Open the `.wav` in another
     program that locks it (or keep it open in Audacity) and delete the
     recording: OpenEVP says the `.dvf` went and the `.wav` is still there, and

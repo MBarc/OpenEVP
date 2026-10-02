@@ -354,6 +354,28 @@ def bin_refuses(root, size, guid_of=None, settings_of=None):
     return capacity is not None and size > capacity * 1024 * 1024
 
 
+def drive_type(root):
+    """GetDriveTypeW of a drive root ("C:\\"): DRIVE_FIXED (3) for a local disk."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+    kernel32.GetDriveTypeW.restype = ctypes.c_uint
+    return kernel32.GetDriveTypeW(root)
+
+
+def where_it_is(path):
+    """The place path really names: its folder with every symlink and junction
+    resolved (the long-path prefix of a drive path dropped), then its own name, not
+    followed. None when it cannot be resolved."""
+    try:
+        path = os.path.abspath(path)
+        parent = os.path.realpath(os.path.dirname(path))
+    except (OSError, ValueError):
+        return None
+    if parent.startswith("\\\\?\\") and parent[5:6] == ":":
+        parent = parent[4:]
+    return os.path.join(parent, os.path.basename(path))
+
+
 def recycle(path, owner=None, before=None):
     """Move one folder (or file) to the Recycle Bin, or raise RecycleError in
     plain words. Never deletes permanently on purpose: a drive without a Recycle
@@ -370,15 +392,21 @@ def recycle(path, owner=None, before=None):
         return message.replace("the folder", "the file").replace("This folder", "This file") if is_file else message
     if path.startswith("\\\\"):
         raise RecycleError(said(NO_RECYCLE_BIN))     # network and \\?\ paths
-    if len(path) >= MAX_PATH:
+    # Where it really is: a folder above it may be a symlink or junction to another
+    # drive (a NAS, a USB stick), where the shell would delete for good. Every check
+    # below, and the delete itself, is on that place; another volume is refused.
+    # (The item itself is not followed: a link is recycled as the link.)
+    real = where_it_is(path)
+    if (real is None or real.startswith("\\\\")      # a share, or a volume with no drive letter
+            or os.path.normcase(os.path.splitdrive(real)[0]) != os.path.normcase(os.path.splitdrive(path)[0])):
+        raise RecycleError(said(NO_RECYCLE_BIN))
+    if len(path) >= MAX_PATH or len(real) >= MAX_PATH:
         raise RecycleError(f"The path of {name} is too long for the Recycle Bin. "
                            "Delete it in File Explorer if you really mean to.")
+    path = real
     root = os.path.splitdrive(path)[0] + "\\"
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     ole32 = ctypes.WinDLL("ole32")
-    kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
-    kernel32.GetDriveTypeW.restype = ctypes.c_uint
     shell32.SHQueryRecycleBinW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(SHQUERYRBINFO)]
     shell32.SHQueryRecycleBinW.restype = ctypes.c_long
     shell32.SHFileOperationW.argtypes = [ctypes.POINTER(SHFILEOPSTRUCTW)]
@@ -387,7 +415,7 @@ def recycle(path, owner=None, before=None):
     ole32.CoInitializeEx.restype = ctypes.c_long
     ole32.CoUninitialize.restype = None
 
-    if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
+    if drive_type(root) != DRIVE_FIXED:
         raise RecycleError(said(NO_RECYCLE_BIN))
     # FOF_WANTNUKEWARNING only asks before deleting for good (and a Yes would
     # delete): refuse up front whatever the Recycle Bin would not take. The

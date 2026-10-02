@@ -1695,11 +1695,13 @@ async function deleteRecordingsDialog(ids) {
   });
 }
 
-// The files a Delete… or the Delete key takes for a row: every ticked recording when the row is
-// ticked, else the row itself.
+// The files a Delete… or the Delete key takes for a row: when the row is ticked, every ticked
+// recording shown now -- never one the search, a filter or the folder shown hides (nothing is
+// deleted that is not in sight) -- else the row itself.
 function deleteIds(g) {
   const L = S.lib;
-  return groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
+  if (!groupPicked(g)) return groupPickIds(g);
+  return L.shown.filter(groupPicked).flatMap(groupPickIds).filter((x) => L.byId.has(x));
 }
 
 // ---- Move to… (the folder tree) and the move itself ----
@@ -1892,7 +1894,8 @@ function libraryMenuItems(target) {
   if (recRow && recRow.group) {
     const g = recRow.group;
     // A ticked row stands for every recording ticked; any other row for itself only.
-    const ids = deleteIds(g);
+    const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
+    const dels = deleteIds(g), nDel = recordingsIn(dels);
     const n = recordingsIn(ids), playable = !!libraryPlayable(g);
     return [
       { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
@@ -1913,9 +1916,9 @@ function libraryMenuItems(target) {
       // Delete… is for the ticked recordings when this row is ticked, else for this row (its copies too).
       { label: "Delete…", disabled: !libraryToolsReady(),
         title: S.caps.marks_read_only ? readOnlyTip() : L.op ? "Wait for the operation to finish"
-             : n > 1 ? `Moves ${plural(n, "selected recording")} to the Recycle Bin`
+             : nDel > 1 ? `Moves ${plural(nDel, "selected recording")} shown to the Recycle Bin`
              : "Moves it (and its copies here) to the Recycle Bin",
-        run: () => deleteRecordingsDialog(ids) },
+        run: () => deleteRecordingsDialog(dels) },
     ];
   }
   if (L.flat) return [];                       // no folders in the All recordings view

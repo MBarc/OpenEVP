@@ -982,6 +982,87 @@ class RecycleBinSettingsTests(unittest.TestCase):
         self.assertEqual(folders.RECYCLE_FLAGS & folders.FOF_WANTNUKEWARNING, folders.FOF_WANTNUKEWARNING)
 
 
+@unittest.skipUnless(WINDOWS, "Windows only")
+class RecycleWhereItReallyIsTests(unittest.TestCase):
+    """A library folder (or one above it) may be a symlink or junction to a NAS or a
+    USB stick, where the shell would delete for good: recycle() checks where the
+    item really is, and refuses another volume up front (the shell is never asked)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.folder = os.path.join(tmp.name, "Old Mill")
+        os.makedirs(self.folder)
+        self.file = os.path.join(self.folder, "x.wav")
+        with open(self.file, "wb") as f:
+            f.write(b"x" * 10)
+        self.real_realpath = os.path.realpath
+
+    def resolving(self, parent_to):
+        """os.path.realpath with the parent of self.file (or of self.folder) resolved to parent_to."""
+        def realpath(p, *args, **kwargs):
+            if os.path.normcase(os.path.abspath(p)) in (os.path.normcase(self.folder),
+                                                         os.path.normcase(os.path.dirname(self.folder))):
+                return parent_to
+            return self.real_realpath(p, *args, **kwargs)
+        return mock.patch.object(folders.os.path, "realpath", side_effect=realpath)
+
+    def refused(self, path, parent_to, expected):
+        with self.resolving(parent_to), \
+                mock.patch.object(folders, "drive_type", return_value=folders.DRIVE_FIXED) as drive_type, \
+                mock.patch.object(folders, "bin_refuses", return_value=False) as bin_refuses, \
+                mock.patch.object(folders.ctypes, "WinDLL", side_effect=AssertionError("the shell is never asked")):
+            with self.assertRaises(folders.RecycleError) as caught:
+                folders.recycle(path)
+        self.assertEqual(str(caught.exception), expected)
+        drive_type.assert_not_called()
+        bin_refuses.assert_not_called()
+        self.assertTrue(os.path.isfile(self.file))
+
+    def test_a_junction_to_another_drive_is_refused(self):
+        other = "E:\\" if os.path.splitdrive(self.folder)[0].upper() != "E:" else "F:\\"
+        self.refused(self.file, other + "NAS\\Old Mill", folders.NO_RECYCLE_BIN.replace("the folder", "the file"))
+
+    def test_a_link_to_a_network_share_is_refused(self):
+        self.refused(self.file, "\\\\nas\\share\\Old Mill", folders.NO_RECYCLE_BIN.replace("the folder", "the file"))
+
+    def test_a_volume_without_a_drive_letter_is_refused(self):
+        self.refused(self.file, "\\\\?\\Volume{01234567-89ab-cdef-0123-456789abcdef}\\Old Mill",
+                     folders.NO_RECYCLE_BIN.replace("the folder", "the file"))
+
+    def test_a_folder_delete_is_refused_the_same_way(self):
+        self.refused(self.folder, "\\\\nas\\share", folders.NO_RECYCLE_BIN)
+
+    def test_the_checks_are_on_the_real_place(self):
+        # Same drive, another folder: the drive type, the bin and the size are those of the real place.
+        drive = os.path.splitdrive(self.folder)[0]
+        elsewhere = drive + "\\Elsewhere\\Night 2"
+        for kind, refuses, expected in ((2, False, folders.NO_RECYCLE_BIN), (folders.DRIVE_FIXED, True, folders.NO_ROOM)):
+            with self.resolving("\\\\?\\" + elsewhere), \
+                    mock.patch.object(folders, "drive_type", return_value=kind) as drive_type, \
+                    mock.patch.object(folders, "bin_refuses", return_value=refuses), \
+                    mock.patch.object(folders, "tree_size", return_value=10) as tree_size:
+                with self.assertRaises(folders.RecycleError) as caught:
+                    folders.recycle(self.file)
+            self.assertEqual(str(caught.exception), expected.replace("the folder", "the file").replace("This folder", "This file"))
+            drive_type.assert_called_once_with(drive + "\\")
+            if refuses:
+                tree_size.assert_called_once_with(os.path.join(elsewhere, "x.wav"))
+        self.assertTrue(os.path.isfile(self.file))
+
+    def test_where_it_is_follows_a_real_junction_but_not_the_item(self):
+        import _winapi
+        target = os.path.join(os.path.dirname(self.folder), "Target")
+        os.makedirs(target)
+        link = os.path.join(os.path.dirname(self.folder), "Link")
+        _winapi.CreateJunction(target, link)
+        self.addCleanup(os.rmdir, link)                 # the junction only, never its target
+        self.assertEqual(os.path.normcase(folders.where_it_is(os.path.join(link, "x.wav"))),
+                         os.path.normcase(os.path.join(os.path.realpath(target), "x.wav")))
+        self.assertEqual(os.path.normcase(folders.where_it_is(link)),        # the link itself, not followed
+                         os.path.normcase(os.path.join(os.path.realpath(os.path.dirname(link)), "Link")))
+
+
 class RootAndWindowTests(FolderApiBase):
     def test_a_redirected_library_folder_is_refused(self):
         self.write("Old Mill/y.wav", wav_bytes(b"y"))

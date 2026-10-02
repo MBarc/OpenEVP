@@ -732,13 +732,44 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);
-  assert.strictEqual(menu.children[5].title, "Moves 2 selected recordings to the Recycle Bin");
+  assert.strictEqual(menu.children[5].title, "Moves 2 selected recordings shown to the Recycle Bin");
   press("Escape");
   recRow("r1").focus();
   press("Delete");
   await settle();
   assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1", "r2"]]);
   context.closeFolderDialog();
+  // Ticked rows the search hides are never deleted: only the ticked rows in sight.
+  L.search = "b.wav"; context.renderLibrary();
+  assert.ok(!recRow("r1") && recRow("r2") && L.selected.has("r1"), "r1 is ticked but hidden");
+  rightClick(recRow("r2").cells[1]);
+  assert.strictEqual(menu.children[5].title, "Moves it (and its copies here) to the Recycle Bin");
+  choose("Delete…");
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r2"]]);
+  context.closeFolderDialog();
+  recRow("r2").focus();
+  press("Delete");
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r2"]]);
+  context.closeFolderDialog();
+  // So are ticked recordings in another folder than the one shown.
+  L.search = ""; context.renderLibrary();
+  const inFolder = { ...libFile("r6", "d.wav", "f1", "fp6") };
+  api.list_library = async () => { const r = await listWithX(); return { ...r, files: [...r.files, inFolder] }; };
+  await context.loadLibrary();
+  await settle();
+  L.selected.add("r6");                                               // ticked earlier, in Old Mill
+  context.renderLibrary();
+  recRow("r1").focus();
+  press("Delete");
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1", "r2"]]);
+  context.closeFolderDialog();
+  L.selected.delete("r6");
+  api.list_library = listWithX;
+  await context.loadLibrary();
+  await settle();
   // A second window: off, and the key says why.
   vm.runInContext(`S.caps.marks_read_only = true;`, context);
   rightClick(recRow("r4").cells[1]);

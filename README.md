@@ -211,7 +211,8 @@ the file selected — the file the row names, so the `.dvf` when there's also a 
 each keeping its extension; a name that's already taken is refused, and marks stay with it.
 
 **Delete…** (or the **Delete** key on a selected row) moves a recording or clip to the Recycle
-Bin — all the ticked ones, if the row is ticked — with its copies in that folder (the `.dvf`
+Bin — all the ticked ones in view, if the row is ticked (never one the search, a filter or
+another folder hides) — with its copies in that folder (the `.dvf`
 and its `.wav` go together). It asks first, listing the files and how many EVP marks they carry.
 Marks are kept, so a recording restored from the Recycle Bin has them again. A file that's in
 use stays where it is and OpenEVP says which; if the player has the recording open, it lets go

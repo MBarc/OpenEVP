@@ -27,6 +27,18 @@ class MainImportTests(unittest.TestCase):
             self.skipTest("pywebview is not installed")
         return importlib.import_module("app.main")
 
+    def test_recycle_is_owned_by_the_window_and_passes_before(self):
+        main = self.main()
+        window = mock.Mock()
+        window.native.Handle.ToInt64.return_value = 4242
+        before = mock.Mock()
+        with mock.patch.object(main.folders, "recycle") as recycle:
+            main._recycler(window)("C:/lib/x.wav", before=before)   # a folder delete passes before=
+            main._recycler(window)("C:/lib/y.wav")
+        self.assertEqual(recycle.call_args_list,
+                         [mock.call("C:/lib/x.wav", owner=4242, before=before),
+                          mock.call("C:/lib/y.wav", owner=4242, before=None)])
+
     def test_store_lives_in_appdata_and_a_failure_turns_marks_off(self):
         main = self.main()
         with tempfile.TemporaryDirectory() as d, mock.patch.dict(os.environ, {"APPDATA": d}):
