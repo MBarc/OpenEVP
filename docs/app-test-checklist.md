@@ -240,7 +240,8 @@ Drag out and Copy file (by hand: no automated test drives the real mouse):
 37a. Drag an MP3 saved as `.mpeg` (a WhatsApp Web voice note) into **WhatsApp
     desktop** and send it: it arrives as `<name>.mp3`, plays, and WhatsApp does
     not crash. Same with Copy file + Ctrl+V. The `.mpeg` in the library keeps its
-    name. Do the same in Discord.
+    name and is unchanged; the `.mp3` in `%TEMP%\openevp-share\` is a separate
+    copy. Do the same in Discord.
 38. Drag a `.dvf` that has **no** `.wav` beside it into **WhatsApp desktop**: the
     status line says "Preparing <name>.dvf to share…" for a moment (keep holding),
     then WhatsApp takes `<name>.mp3`; it plays there. Drag the same row again: it

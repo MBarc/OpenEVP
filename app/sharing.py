@@ -6,9 +6,9 @@ inside the library folder as Show in File Explorer resolves it. What is shared i
 file other programs can play:
 
 - a WAV or .mp3, a clip included: the file itself;
-- an MP3 saved as .mpeg (WhatsApp Web's name), .mpga, .mp2 or .m2a: the same
-  file as <name>.mp3 in the share cache (a hard link, or a copy on another
-  volume), since some programs take .mpeg for video;
+- an MP3 saved as .mpeg (WhatsApp Web's name), .mpga, .mp2 or .m2a: a copy of
+  it as <name>.mp3 in the share cache, since some programs take .mpeg for video
+  (a copy, never a hard link: a program that writes to it can't change the original);
 - a recorder's own file (a .dvf): the WAV beside it (same name, .wav) if there is
   one, else an MP3 of the whole recording, made on demand with the clip MP3
   settings (openevp.mp3) into the share cache as <name>.mp3.
@@ -196,9 +196,10 @@ class ShareOps:
 
     def _as_mp3(self, path):
         """{ok, path}: an MP3 saved under another extension (.mpeg, .mpga, .mp2,
-        .m2a) as <name>.mp3 in the share cache: a hard link when the cache is on
-        the same volume, else a copy; reused while the file is unchanged (its
-        size and mtime are in the subfolder's name). Some programs take .mpeg for
+        .m2a) as <name>.mp3 in the share cache: always a copy, never a hard link
+        (a program that writes to what it was given must not change the
+        original); reused while the file is unchanged (its size and mtime are in
+        the subfolder's name). Some programs take .mpeg for
         video (WhatsApp desktop crashed sending one). Layer II audio is named .mp3
         too: players accept it, the video path is the problem. The original is
         never renamed or written."""
@@ -214,10 +215,7 @@ class ShareOps:
             os.makedirs(os.path.dirname(target), exist_ok=True)
             part = target + f".{os.getpid()}-{threading.get_ident()}.part"
             try:
-                try:
-                    os.link(path, part)
-                except OSError:                      # another volume, or links not supported there
-                    shutil.copyfile(path, part)
+                shutil.copyfile(path, part)
                 os.replace(part, target)
             except BaseException:
                 try:
