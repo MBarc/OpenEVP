@@ -253,6 +253,7 @@ NO_RECYCLE_BIN = "This drive has no Recycle Bin. Delete the folder in File Explo
 NO_ROOM = ("This folder can't go to the Recycle Bin (it is too big for it, or the Recycle Bin is set to "
            "delete files immediately). Delete it in File Explorer if you really mean to.")
 IN_USE = "{} was not (completely) moved to the Recycle Bin: a file is in use, or deleting was cancelled."
+FILE_IN_USE = "{} was not moved to the Recycle Bin: it is in use (open in another program?), or deleting was cancelled."
 BITBUCKET = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
 
 _BITS64 = ctypes.sizeof(ctypes.c_void_p) == 8
@@ -312,7 +313,14 @@ def bin_settings(guid):
 
 
 def tree_size(path):
-    """Bytes in path and everything in it (links not followed; unreadable parts skipped)."""
+    """Bytes in path and everything in it (links not followed; unreadable parts
+    skipped); a file's own size for a file."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode):
+            return 0 if _link_stat(st) else st.st_size
+    except OSError:
+        return 0
     total, stack = 0, [path]
     while stack:
         try:
@@ -356,8 +364,12 @@ def recycle(path, owner=None, before=None):
         raise RecycleError("The Recycle Bin is only available on Windows.")
     path = os.path.abspath(path)
     name = os.path.basename(path)
+    is_file = os.path.isfile(path)
+
+    def said(message):                               # the same words, for a file
+        return message.replace("the folder", "the file").replace("This folder", "This file") if is_file else message
     if path.startswith("\\\\"):
-        raise RecycleError(NO_RECYCLE_BIN)           # network and \\?\ paths
+        raise RecycleError(said(NO_RECYCLE_BIN))     # network and \\?\ paths
     if len(path) >= MAX_PATH:
         raise RecycleError(f"The path of {name} is too long for the Recycle Bin. "
                            "Delete it in File Explorer if you really mean to.")
@@ -376,12 +388,12 @@ def recycle(path, owner=None, before=None):
     ole32.CoUninitialize.restype = None
 
     if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
-        raise RecycleError(NO_RECYCLE_BIN)
+        raise RecycleError(said(NO_RECYCLE_BIN))
     # FOF_WANTNUKEWARNING only asks before deleting for good (and a Yes would
     # delete): refuse up front whatever the Recycle Bin would not take. The
     # warning stays as a backstop for a case this does not foresee.
     if bin_refuses(root, tree_size(path)):
-        raise RecycleError(NO_ROOM)
+        raise RecycleError(said(NO_ROOM))
     source = ctypes.create_unicode_buffer(path + "\0")   # double-NUL terminated; kept referenced
     op = SHFILEOPSTRUCTW(hwnd=owner or None, wFunc=FO_DELETE,
                          pFrom=ctypes.cast(source, ctypes.c_wchar_p), pTo=None, fFlags=RECYCLE_FLAGS)
@@ -389,7 +401,7 @@ def recycle(path, owner=None, before=None):
     try:
         info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
         if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
-            raise RecycleError(NO_RECYCLE_BIN)
+            raise RecycleError(said(NO_RECYCLE_BIN))
         if before is not None:
             before()
         code = shell32.SHFileOperationW(ctypes.byref(op))
@@ -399,6 +411,6 @@ def recycle(path, owner=None, before=None):
     del source
     if code == 0 and not op.fAnyOperationsAborted and not os.path.lexists(path):
         return
-    if code == 0:
-        raise RecycleError(IN_USE.format(name))
+    if code == 0 or (is_file and code in (5, 32, 33)):   # access denied, sharing or lock violation
+        raise RecycleError((FILE_IN_USE if is_file else IN_USE).format(name))
     raise RecycleError(f"{name} was not moved to the Recycle Bin (code 0x{code & 0xFFFFFFFF:x}).")

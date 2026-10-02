@@ -4,7 +4,8 @@
 // selections hand the backend back the exact folder ids and recording numbers, even with
 // ":" or "|" in them. The EVP Library's right-click menu runs the same code as the folder tools
 // (New folder, Rename, Delete, Move to…), with the same enabled state; a recording row adds
-// Rename… (and F2), which sends the ids of that recording's files in the folder shown. EVP clips: the
+// Rename… (and F2), which sends the ids of that recording's files in the folder shown, and Delete… (and the
+// Delete key), whose dialog lists what goes to the Recycle Bin. EVP clips: the
 // player's Export clips and each mark's Save clip, and the library's Export clips on a recording or a
 // folder (a background job with progress, Cancel and a summary with Open folder). Prints "ok" or throws.
 "use strict";
@@ -502,7 +503,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const realTimeout = context.setTimeout;
   context.setTimeout = (fn, ms) => { if (!ms) setImmediate(fn); return 0; };   // finishFolderOp runs
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true], ["Delete…", false]]);
   choose("Play");
   await settle();
   assert.deepStrictEqual(ops.pop(), ["play", "r3"]);
@@ -534,7 +535,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r2").cells[1]);                                  // ticked: both ticked recordings
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move 2 recordings to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move 2 recordings to…", false], ["Export clips", true], ["Delete…", false]]);
   choose("Move 2 recordings to…");
   assert.strictEqual($("folder-dialog-title").textContent, "Move 2 recordings to…");
   pick("f2").onclick();
@@ -544,10 +545,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
   context.renderLibrary();
   rightClick(recRow("r3").cells[1]);                                  // not ticked: just itself
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", true], ["Delete…", false]]);
   L.op = true;
   rightClick(recRow("r3").cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", true], ["Move to…", true], ["Export clips", true]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", true], ["Move to…", true], ["Export clips", true], ["Delete…", true]]);
   L.op = false;
   press("Escape");
 
@@ -675,6 +676,113 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   press("F2");
   assert.ok(!dialogShown());
   vm.runInContext(`S.caps.marks_read_only = false;`, context);
+
+  // ---- Delete… on a recording row, and the Delete key: the backend says what goes (a .dvf brings
+  // its .wav) and how many EVP marks they carry; the dialog lists it and sends back exactly those
+  // ids; the recording in the player is unloaded first; the library is listed again.
+  const deleteCalls = [];
+  const deleteInfo = { ok: true, ids: ["r4", "r5"], names: ["x.dvf", "x.wav"], recordings: 1, clips: 0, marks: 3,
+                       with_evps: 1, unchecked: 0, backups: 0 };
+  let deleteAnswer = { ok: true, deleted: ["x.dvf", "x.wav"], failed: [], split: [], backups: 0 };
+  api.delete_info = async (ids) => { deleteCalls.push(["info", [...ids]]); return deleteInfo; };
+  api.delete_files = async (ids) => { deleteCalls.push(["delete", [...ids]]); return deleteAnswer; };
+  const withX = api.list_library;                                     // r1..r5 (x.dvf and x.wav: one row)
+  let scan = 10;
+  const listWithX = async () => ({ ...(await withX()), scan_id: ++scan });
+  const listWithoutX = async () => ({ ...listed, scan_id: ++scan });   // r1..r3
+  L.selected.clear(); context.renderLibrary();
+  vm.runInContext(`S.playing = "lib|r4"; S.current = { rec: "h" };`, context);
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[5], ["Delete…", false]);
+  assert.strictEqual(menu.children[5].title, "Moves it (and its copies here) to the Recycle Bin");
+  choose("Delete…");
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r4", "r5"]]);
+  assert.ok(dialogShown() && $("folder-dialog-name").hidden);
+  assert.strictEqual($("folder-dialog-title").textContent, "Delete 1 recording?");
+  const dialogBody = $("folder-dialog-body").textContent;
+  for (const text of ["These 2 files will be deleted:", "x.dvf", "x.wav", "They carry 3 EVP marks.",
+                      "They go to the Recycle Bin. Restore them from there to get them and their marks back."]) {
+    assert.ok(dialogBody.includes(text), text);
+  }
+  assert.strictEqual($("folder-dialog-ok").textContent, "Move to Recycle Bin");
+  assert.strictEqual(document.activeElement, $("folder-dialog-cancel"), "Cancel has the focus, as in a folder delete");
+  api.list_library = listWithoutX;
+  await context.folderDialogOk();
+  assert.deepStrictEqual(deleteCalls.pop(), ["delete", ["r4", "r5"]]);
+  assert.ok(!dialogShown());
+  assert.strictEqual(vm.runInContext("S.playing", context), null, "the player let go of it first");
+  assert.strictEqual($("banner-text").textContent, "Moved 2 files to the Recycle Bin.");
+  await settle();
+  assert.ok(!L.byId.has("r4") && !recRow("r4"), "listed again without it");
+  assert.strictEqual($("library-count").textContent, "(3)");
+  // The Delete key on a focused row: the same dialog; Cancel deletes nothing.
+  api.list_library = listWithX;
+  await context.loadLibrary();
+  await settle();
+  recRow("r4").focus();
+  k = press("Delete");
+  assert.ok(k.defaultPrevented);
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r4", "r5"]]);
+  assert.strictEqual($("folder-dialog-title").textContent, "Delete 1 recording?");
+  context.closeFolderDialog();
+  assert.ok(!dialogShown() && !deleteCalls.length);
+  // A ticked row: every ticked recording (the menu and the key alike).
+  context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);
+  context.renderLibrary();
+  rightClick(recRow("r2").cells[1]);
+  assert.strictEqual(menu.children[5].title, "Moves 2 selected recordings to the Recycle Bin");
+  press("Escape");
+  recRow("r1").focus();
+  press("Delete");
+  await settle();
+  assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1", "r2"]]);
+  context.closeFolderDialog();
+  // A second window: off, and the key says why.
+  vm.runInContext(`S.caps.marks_read_only = true;`, context);
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[5], ["Delete…", true]);
+  assert.strictEqual(menu.children[5].title, vm.runInContext("readOnlyTip()", context));
+  press("Escape");
+  recRow("r4").focus();
+  press("Delete");
+  await settle();
+  assert.ok(!dialogShown() && !deleteCalls.length);
+  assert.strictEqual($("banner-text").textContent, vm.runInContext("readOnlyTip()", context));
+  vm.runInContext(`S.caps.marks_read_only = false;`, context);
+  // Off while another operation runs.
+  L.op = true;
+  rightClick(recRow("r4").cells[1]);
+  assert.deepStrictEqual(menuItems()[5], ["Delete…", true]);
+  press("Escape");
+  L.op = false;
+  // Half a recording: said plainly, with the file that stayed and why.
+  deleteAnswer = { ok: true, deleted: ["x.dvf"], split: [{ deleted: ["x.dvf"], kept: ["x.wav"] }], backups: 0,
+                   failed: [{ name: "x.wav", error: "x.wav was not moved to the Recycle Bin: it is in use (open in another program?), or deleting was cancelled." }] };
+  recRow("r4").focus();
+  press("Delete");
+  await settle();
+  deleteCalls.length = 0;
+  await context.folderDialogOk();
+  assert.ok(!dialogShown());
+  assert.strictEqual($("banner-text").textContent,
+                     "Moved 1 file to the Recycle Bin. Only part of a recording went: x.dvf is in the Recycle Bin, but x.wav is still here. " +
+                     "Not deleted: x.wav was not moved to the Recycle Bin: it is in use (open in another program?), or deleting was cancelled.");
+  await settle();
+  // Refused (an export runs): nothing went, the dialog stays open with the reason.
+  deleteAnswer = { ok: false, error: "Wait for the export or backup to finish.", advice: "", deleted: [] };
+  recRow("r4").focus();
+  press("Delete");
+  await settle();
+  await context.folderDialogOk();
+  assert.ok(dialogShown());
+  assert.strictEqual($("folder-dialog-error").textContent, "Wait for the export or backup to finish.");
+  context.closeFolderDialog();
+  await settle();
+  deleteCalls.length = 0;
+  context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);   // as before
+  context.renderLibrary();
   document.activeElement = null;
   context.setTimeout = realTimeout;
 
@@ -683,7 +791,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   e = rightClick($("empty"));
   assert.ok(e.defaultPrevented && menu.hidden);
   rightClick(recRow("r1").cells[1]);
-  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Show in File Explorer", "Rename…", "Move 2 recordings to…", "Export clips"]);
+  assert.deepStrictEqual(menuItems().map(([t]) => t), ["Play", "Show in File Explorer", "Rename…", "Move 2 recordings to…", "Export clips", "Delete…"]);
   fire([window], "scroll", {});
   assert.ok(menu.hidden, "scrolling closes it");
   L.flat = false;
@@ -998,7 +1106,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.match(clipRow.cells[5].title, /2 marks of its own, not counted as EVPs/);
   assert.strictEqual(recRow("c2").cells[5].textContent, "Clip");
   rightClick(clipRow.cells[1]);
-  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", false]]);
+  assert.deepStrictEqual(menuItems(), [["Play", false], ["Show in File Explorer", false], ["Rename…", false], ["Move to…", false], ["Export clips", false], ["Delete…", false]]);
   assert.match(menu.children[4].title, /^Save each EVP marked in this clip as its own (MP3|WAV) clip \(in the same Clips folder\)$/);
   choose("Show in File Explorer");
   await settle();

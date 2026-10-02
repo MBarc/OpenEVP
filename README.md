@@ -201,7 +201,7 @@ could be recycled is, the rest stays where it was, and OpenEVP says so.
 Right-click in the library for the same tools: on an empty part of the list,
 **New folder**; on a folder, **Open**, **Rename** or **Delete**; on a recording,
 **Play**, **Rename…**, **Move to…** (all the ticked recordings, if you right-click a
-ticked one) or **Export clips**. A folder's **Export clips** does every marked recording
+ticked one), **Export clips** or **Delete…**. A folder's **Export clips** does every marked recording
 in it and in its subfolders (see *EVP clips* below).
 **Show in File Explorer** (on a recording or clip) opens its folder in File Explorer with
 the file selected — the file the row names, so the `.dvf` when there's also a `.wav` copy;
@@ -209,6 +209,13 @@ the file selected — the file the row names, so the `.dvf` when there's also a 
 
 **Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that folder get the new name,
 each keeping its extension; a name that's already taken is refused, and marks stay with it.
+
+**Delete…** (or the **Delete** key on a selected row) moves a recording or clip to the Recycle
+Bin — all the ticked ones, if the row is ticked — with its copies in that folder (the `.dvf`
+and its `.wav` go together). It asks first, listing the files and how many EVP marks they carry.
+Marks are kept, so a recording restored from the Recycle Bin has them again. A file that's in
+use stays where it is and OpenEVP says which; if the player has the recording open, it lets go
+of it first.
 
 A second OpenEVP window can't create, rename, delete or move anything in the
 library, and can't export; do those in the first window.

@@ -199,6 +199,18 @@ class RecycleBinTests(unittest.TestCase):
         folders.recycle(target)
         self.assertFalse(os.path.lexists(target))
         self.assertGreater(items(), before)                # in the Recycle Bin, not deleted for good
+        # One file (a recording deleted in the EVP Library) the same way.
+        one = os.path.join(base, "OpenEVP recycle test.wav")
+        with open(one, "wb") as f:
+            f.write(b"x")
+        before = items()
+        with open(one, "rb"):                               # in use: refused, the file stays
+            with self.assertRaises(folders.RecycleError):
+                folders.recycle(one)
+        self.assertTrue(os.path.isfile(one))
+        folders.recycle(one)
+        self.assertFalse(os.path.lexists(one))
+        self.assertGreater(items(), before)
 
 
 class FolderApiBase(unittest.TestCase):

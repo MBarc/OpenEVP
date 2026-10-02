@@ -487,6 +487,19 @@ class AudioServer:
                 self._entries[new_key] = self._entries.pop(key)   # most recently used: kept longest
                 self._by_file[e["file"]] = new_key
 
+    def forget_files(self, paths):
+        """These files were deleted: stop serving them in place and drop their
+        decoded copies (never a pinned entry, which may be playing). Returns how
+        many entries went."""
+        keys = {os.path.normcase(os.path.abspath(p)) for p in paths}
+        with self._lock:
+            gone = [k for k, e in self._entries.items() if k not in self._pinned and (
+                (e.get("path") is not None and os.path.normcase(e["path"]) in keys)
+                or (len(k) > 1 and isinstance(k[1], str) and k[1] in keys))]
+            for k in gone:
+                self._drop(k)
+        return len(gone)
+
     def forget(self, device_id):
         with self._lock:
             for key in [k for k in self._entries if k[0] == device_id]:
