@@ -32,6 +32,15 @@ def _window_handle(window):
         return None
 
 
+def _recycler(get_window):
+    """folders.recycle for the Api: the app window owns any prompt Windows shows
+    (in front of it), and before= (let go of a held folder) is passed through.
+    get_window() is asked at each call: the Api is made before its window is."""
+    def recycle(path, before=None):
+        return folders.recycle(path, owner=_window_handle(get_window()), before=before)
+    return recycle
+
+
 def _icon():
     """The app icon: bundled in the app folder when frozen, in assets/ when run from source."""
     base = getattr(sys, "_MEIPASS", None) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
@@ -423,7 +432,7 @@ def _run_app(smoke=None):
                   pick_wav=pick_wav, updater=None if smoke else updater, quit_app=quit_for_update,
                   can_install=frozen and sys.platform == "win32",
                   before_install=lambda: _hand_over(running), store=store, store_problems=store_problems,
-                  recycle=lambda path: folders.recycle(path, owner=_window_handle(window)),
+                  recycle=_recycler(lambda: window),
                   drag_files=(lambda paths: native_share.drag_files(window.native, paths)) if native else None,
                   copy_files=(lambda paths: native_share.copy_files(window.native, paths)) if native else None)
         api.watch_store()                               # read-only: keep trying for the store's lock

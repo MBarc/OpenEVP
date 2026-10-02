@@ -868,7 +868,8 @@ function loadLibraryView() {
 }
 
 // Enter on a folder row opens it; Backspace goes up a level; Escape clears the recordings
-// picked; Ctrl+C on a recording row copies its file (not while typing or in a dialog).
+// picked; Ctrl+C on a recording row copies its file; Delete on a recording row deletes it (or
+// every ticked one, if it is ticked) after the dialog (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
   if (S.view !== "library" || e.altKey || e.metaKey) return;
@@ -891,6 +892,12 @@ function libraryKeys(e) {
   if (e.key === "F2") { renameKey(e); return; }
   const recRow = e.target.closest && e.target.closest("tr.lib-row");
   if (recRow && recRow === e.target && recRow.group) {
+    if (e.key === "Delete") {                  // as the right-click menu's Delete…
+      e.preventDefault();
+      if (S.caps.marks_read_only) banner(readOnlyTip());
+      else if (libraryToolsReady()) deleteRecordingsDialog(deleteIds(recRow.group));
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
       if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
@@ -1641,6 +1648,71 @@ function renameRecordingDialog(g) {
   });
 }
 
+// ---- Delete… recordings and clips: to the Recycle Bin, each with its copies in its folder ----
+// The backend says what goes (a .dvf brings its .wav), how many EVP marks they carry, and takes
+// back exactly those ids. The marks stay in the marks file: restored files get them back. The
+// recording in the player is unloaded first if it goes (and loaded again if it stays after all).
+const DELETE_NAMES_SHOWN = 12;
+
+async function deleteRecordingsDialog(ids) {
+  const L = S.lib;
+  ids = ids.filter((id) => L.byId.has(id));
+  if (!ids.length || !libraryToolsReady()) return;
+  const info = await libraryOp("Looking at the files…", () => api().delete_info(ids));
+  if (!info.ok) { showError(info); relistAfterFailure(); return; }
+  const what = [info.recordings ? plural(info.recordings, "recording") : "",
+                info.clips ? plural(info.clips, "EVP clip") : ""].filter(Boolean).join(" and ") || plural(info.ids.length, "file");
+  const names = document.createElement("ul");
+  for (const name of info.names.slice(0, DELETE_NAMES_SHOWN)) {
+    const li = document.createElement("li"); li.textContent = name; names.appendChild(li);
+  }
+  if (info.names.length > DELETE_NAMES_SHOWN) {
+    const li = document.createElement("li"); li.textContent = `and ${info.names.length - DELETE_NAMES_SHOWN} more`; names.appendChild(li);
+  }
+  const files = info.ids.length === 1 ? "This file" : `These ${info.ids.length} files`;
+  let marks = info.marks ? `They carry ${plural(info.marks, "EVP mark")}.` : "They carry no EVP marks.";
+  if (info.unchecked) marks += ` ${plural(info.unchecked, "file")} ${info.unchecked === 1 ? "is" : "are"} not checked for EVPs yet.`;
+  const body = [dialogText(`${files} will be deleted:`), names, dialogText(marks)];
+  if (info.backups) body.push(dialogText(`${plural(info.backups, "recorder backup")} will go with them; those recordings will offer Retry backup.`));
+  body.push(dialogText("They go to the Recycle Bin. Restore them from there to get them and their marks back."));
+  folderDialog({
+    title: `Delete ${what}?`, body, ok: "Move to Recycle Bin",
+    run: async () => {
+      const held = heldLibraryFile(), touched = !!held && info.ids.includes(held.id);
+      if (touched) unloadPlayer();
+      const r = await libraryOp("Moving to the Recycle Bin…", () => api().delete_files(info.ids));
+      const deleted = r.deleted || [];
+      if (!r.ok && !deleted.length) {                    // nothing went: the dialog says why
+        finishFolderOp(async () => { await loadLibrary(); if (touched) reloadHeld(held, held.id); });
+        return errorText(r);
+      }
+      const parts = [`Moved ${plural(deleted.length, "file")} to the Recycle Bin.`];
+      for (const s of r.split || []) {
+        parts.push(`Only part of a recording went: ${s.deleted.join(", ")} ${s.deleted.length === 1 ? "is" : "are"} in the Recycle Bin, ` +
+                   `but ${s.kept.join(", ")} ${s.kept.length === 1 ? "is" : "are"} still here.`);
+      }
+      const failed = r.failed || [];
+      if (failed.length) parts.push(`Not deleted: ${failed.map((x) => String(x.error).replace(/\.$/, "")).join(" · ")}.`);
+      if (r.backups) parts.push(`${plural(r.backups, "recorder backup")} went with them; those recordings offer Retry backup.`);
+      banner(parts.join(" "), failed.length ? "warn" : "ok");
+      finishFolderOp(async () => {
+        await loadLibrary();                             // counts and the ticks follow the listing
+        if (touched) reloadHeld(held, S.lib.byId.has(held.id) ? held.id : null);   // still there: back in the player
+      });
+      return null;
+    },
+  });
+}
+
+// The files a Delete… or the Delete key takes for a row: when the row is ticked, every ticked
+// recording shown now -- never one the search, a filter or the folder shown hides (nothing is
+// deleted that is not in sight) -- else the row itself.
+function deleteIds(g) {
+  const L = S.lib;
+  if (!groupPicked(g)) return groupPickIds(g);
+  return L.shown.filter(groupPicked).flatMap(groupPickIds).filter((x) => L.byId.has(x));
+}
+
 // ---- Move to… (the folder tree) and the move itself ----
 // ids: the files to move (default: the recordings ticked).
 function moveDialog(ids = [...S.lib.selected]) {
@@ -1895,6 +1967,7 @@ function libraryMenuItems(target) {
     const g = recRow.group;
     // A ticked row stands for every recording ticked; any other row for itself only.
     const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
+    const dels = deleteIds(g), nDel = recordingsIn(dels);
     const n = recordingsIn(ids), playable = !!libraryPlayable(g);
     return [
       { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
@@ -1917,6 +1990,12 @@ function libraryMenuItems(target) {
                         : g.clip ? `Save each EVP marked in this clip as its own ${clipLabel()} clip (in the same Clips folder)`
                         : `Save each EVP of this recording as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
+      // Delete… is for the ticked recordings when this row is ticked, else for this row (its copies too).
+      { label: "Delete…", disabled: !libraryToolsReady(),
+        title: S.caps.marks_read_only ? readOnlyTip() : L.op ? "Wait for the operation to finish"
+             : nDel > 1 ? `Moves ${plural(nDel, "selected recording")} shown to the Recycle Bin`
+             : "Moves it (and its copies here) to the Recycle Bin",
+        run: () => deleteRecordingsDialog(dels) },
     ];
   }
   if (L.flat) return [];                       // no folders in the All recordings view
