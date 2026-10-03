@@ -11,7 +11,7 @@ Automated (exits non-zero if any fails):
      --check-wav on the 10-minute test vector, the 1-minute LPEC SP vector and a
      synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/, openevp/ and sony_icd/
-     (but sony_icd.cli) is frozen into it, and both decoders' tables (LPEC LP, SP
+     (but the CLI-only ones) is frozen into it, and both decoders' tables (LPEC LP, SP
      and ST) and DLLs, the MP3 decoder's DLL (mp3_core.dll, minimp3), libusb, the icon and the driver
      files (with the manifest) are bundled, identical to the sources, and so is
      the MP3 encoder (lameenc's extension module); so is every
@@ -38,6 +38,7 @@ TESTS = os.path.join(REPO, "tests")
 DIST = os.path.join(REPO, "dist")
 CLI = os.path.join(DIST, "openevp-cli.exe")
 CLI_MODULE = "sony_icd.cli"                 # the command-line tool's code: never in the app
+CLI_ONLY = {CLI_MODULE, "sony_icd.export"}   # sony_icd modules only the CLI uses (the app saves via openevp.export)
 APP_DIR = os.path.join(DIST, "OpenEVP")
 APP_EXE = os.path.join(APP_DIR, "OpenEVP.exe")
 INTERNAL = os.path.join(APP_DIR, "_internal")
@@ -351,7 +352,7 @@ def check_app():
         modules = frozen_modules(APP_EXE)
     except Exception as e:
         return [f"could not read the frozen modules of {APP_EXE}: {e}"]
-    want = _source_modules("app") | _source_modules("openevp") | (_source_modules("sony_icd") - {CLI_MODULE})
+    want = _source_modules("app") | _source_modules("openevp") | (_source_modules("sony_icd") - CLI_ONLY)
     missing = sorted(want - modules)
     print(f"   {len(want - set(missing))}/{len(want)} modules of app/, openevp/ and sony_icd/ frozen in")
     if missing:
