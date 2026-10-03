@@ -212,13 +212,35 @@ class SplitterTests(unittest.TestCase):
         sink, sp = self.split([room(2, 1), sound(4), room(4, 2), sound(4), room(1, 3)])
         self.assertEqual(len(sink.pieces), 1)
 
-    def test_play_before_record_splits_once_a_real_gap_was_heard(self):
-        # The first recording's background was the floor at first; the gap after it is quieter
-        # (the cable's hiss), so from there on the recordings split as usual.
+    def test_play_before_record_joins_the_first_recording_to_the_next(self):
+        # The first recording's background was the floor at first, so it shows no background
+        # of its own: it stays joined to the next one. Once a real gap (the cable's hiss) has
+        # been heard, the recordings after it split as usual.
         sink, sp = self.split([self.recording(6, 1), self.line(5, 2), self.recording(6, 3), self.line(5, 4),
                                self.recording(5, 5)])
-        self.assertEqual(len(sink.pieces), 3)
+        self.assertEqual(len(sink.pieces), 2)
+        self.assertAlmostEqual(sink.pieces[1][0] / RATE, 6 + 5 + 6 + 5 - 0.5, delta=0.06)
         self.assertLess(sp.threshold(), -70)
+
+    def test_astras_second_case_changing_loudness_is_not_a_background(self):
+        # Room tone, loud sound, quieter sound, the room tone again, more sound: the quieter
+        # passage is heard once; it is not the piece's background, so there is no split.
+        room = lambda s, seed: noise(s, db=-50, seed=seed)
+        sink, sp = self.split([room(2, 1), tone(2, db=-15), tone(2, db=-30, hz=300), room(4, 2), tone(3, db=-15),
+                               room(1, 3)])
+        self.assertEqual(len(sink.pieces), 1)
+
+    def test_quiet_that_is_not_the_idle_level_does_not_split(self):
+        # The quiet after the recording is well under its background but not back at the
+        # cable's idle hiss: something is still playing. No split.
+        sink, sp = self.split([self.line(2, 1), self.recording(6, 2), noise(5, db=-68, seed=3), self.recording(6, 4)])
+        self.assertEqual(len(sink.pieces), 1)
+
+    def test_a_split_at_exactly_the_gap_still_has_its_pre_roll(self):
+        # The gap is exactly 3 s: the next piece still starts half a second before its sound.
+        sink, sp = self.split([self.line(2, 1), self.recording(5, 2), self.line(3, 3), self.recording(5, 4)])
+        self.assertEqual(len(sink.pieces), 2)
+        self.assertAlmostEqual(sink.pieces[1][0] / RATE, 2 + 5 + 3 - 0.5, delta=0.001)
 
     def test_a_click_is_not_a_file_of_its_own(self):
         click = tone(0.2, db=-10)
@@ -241,7 +263,8 @@ class SplitterTests(unittest.TestCase):
         self.assertIsNone(sp.threshold())
         sp.feed(pcm(noise(2, db=-85, channels=2)))
         self.assertAlmostEqual(sp.threshold(), -85 - 1 + silence.MARGIN_DB, delta=2.5)
-        sp.feed(pcm(noise(4, db=-50, channels=2) + np.vstack([np.zeros((3 * RATE, 2)), tone(1, db=-12, channels=2)])))
+        sp.feed(pcm(noise(4, db=-50, channels=2) + np.vstack([np.zeros((int(1.5 * RATE), 2)), tone(1, db=-12, channels=2),
+                                                               np.zeros((int(1.5 * RATE), 2))])))
         sp.feed(pcm(noise(2, db=-85, channels=2)))
         sp.feed(pcm(tone(2, db=-12, channels=2)))
         sp.feed(b"\1\0\2\0")                               # one frame short of a block: kept at Stop

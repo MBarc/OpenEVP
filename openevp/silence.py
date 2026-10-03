@@ -14,25 +14,31 @@ that, so it counts as part of the recording.
 
 The first piece starts with the first sample. When the input has been quiet
 for `gap` seconds and the piece may end there (below), a split is pending: the
-quiet keeps going into the piece, except the last PREROLL seconds, which are
-held back; when sound comes again the piece ends and the next one starts with
-those held-back seconds. Stop with a split pending: the held-back audio goes
-into the last piece.
+quiet keeps going into the piece; when sound comes again the piece ends and the
+next one starts with the last PREROLL seconds of the quiet. Stop: whatever is
+held back goes into the last piece.
 
-A piece may only end when there is evidence that the quiet is a gap between
-recordings and not a pause inside one:
-- its own background is distinct from its content: the 95th percentile of its
-  blocks (its loud parts) is at least MARGIN_DB over the 20th (its background),
-  so a piece of steady sound gives no evidence of a background at all;
-- that background is at least MARGIN_DB above the idle floor, so the quiet now
-  is clearly quieter than the recording ever is;
-- the levels are judged on at least EVIDENCE seconds of the piece, not counting
-  the quiet run being judged, and the piece has at least MIN_SIGNAL seconds of
-  loud blocks (a click as Play is pressed is not a recording of its own).
-Without that evidence the quiet becomes part of the piece and it is not split
-(this happens, for one, when Play was pressed before Record and a recording's
-background is the quietest thing heard so far; a later real gap, quieter than
-that background, lowers the floor and splitting starts working).
+A piece may only end when there is clear evidence that the quiet is a gap
+between recordings and not a pause inside one (when in doubt, it does not end;
+the whole input is kept as one file as well):
+- the piece has a background of its own: a level it holds steadily for whole
+  seconds (block levels within STEADY_DB), in at least two separate stretches
+  (it comes back), the quietest such level above the floor by the margin. A
+  quieter passage heard once, or loudness that just changes, is not one;
+- its content stands out from that background (the 95th percentile of its
+  blocks is at least MARGIN_DB over it), and the background is at least
+  MARGIN_DB above the idle floor;
+- the quiet run itself is at the idle floor seen before (within MATCH_DB): the
+  input went back to where it was when the recorder played nothing;
+- at least EVIDENCE seconds of the piece were judged, not counting the quiet run
+  being judged, nor quiet before its first sound; and it has at least MIN_SIGNAL
+  seconds of loud blocks (a click as Play is pressed joins the next piece).
+Without that evidence the quiet becomes part of the piece and it is not split.
+When Play was pressed before Record, the first recording's background was the
+floor at first, and it stays joined to the next recording.
+
+The last PREROLL seconds of every quiet run are held back before they are
+written, so the piece that starts at the next sound always begins with them.
 
 The splitter tells a sink what to do: start(stream_frame), write(pcm bytes),
 end(). stream_frame is where the piece starts, counted in frames since the first
@@ -51,6 +57,8 @@ MIN_SIGNAL = 1.0
 EVIDENCE = 3.0               # seconds of a piece (before the quiet run) needed to judge its levels
 FLOOR_PERCENTILE = 0.2
 CONTENT_PERCENTILE = 0.95
+STEADY_DB = 6.0              # a whole second whose block levels (10th to 90th percentile) stay within this is steady
+MATCH_DB = 4.0               # levels within this of each other are the same level
 DEFAULT_GAP = 3.0
 MAX_GAP = 60.0
 SILENT_DB = -120.0
@@ -101,11 +109,13 @@ class Splitter:
         self.started = False
         self.pending = False                     # a split waits for the next sound
         self._rest = np.zeros(0, dtype=np.int16)
-        self._held = collections.deque()         # (stream frame, bytes): the pre-roll held back while pending
+        self._held = collections.deque()         # (stream frame, bytes): the last quiet PREROLL, held back
         self._new_piece()
 
     def _new_piece(self):
         self._levels = _Levels()                 # the piece's block levels, the quiet run excluded
+        self._windows = []                       # the piece's whole seconds: (median dB, steady?), in order
+        self._second = []                        # block levels of the second being filled
         self._quiet_db = []                      # levels of the quiet run, not counted yet
         self._quiet_run = 0
         self._loud = 0
@@ -124,17 +134,51 @@ class Splitter:
             if self.idle is None or low < self.idle:
                 self.idle = low
 
+    # ---- what the piece has shown of itself ----------------------------------------
+    def _count(self, db):
+        """One block of the piece (in order): its levels, and its whole seconds."""
+        self._levels.add(db)
+        self._second.append(db)
+        if len(self._second) == self.window.maxlen:
+            v = sorted(self._second)
+            n = len(v)
+            spread = v[int(0.9 * (n - 1))] - v[int(0.1 * (n - 1))]
+            self._windows.append((v[n // 2], spread <= STEADY_DB))
+            self._second = []
+
+    def background(self):
+        """The piece's own background: the quietest level it holds steadily (a whole second
+        within STEADY_DB) in at least two separate stretches, above the floor by the margin;
+        None if it shows none. A quieter passage heard once is not a background."""
+        if self.idle is None:
+            return None
+        floor = max(self.idle, MIN_FLOOR_DB) + self.margin
+        steady = [(i, m) for i, (m, ok) in enumerate(self._windows) if ok and m >= floor]
+        for _, level in sorted(steady, key=lambda x: x[1]):
+            hits = [i for i, m in steady if abs(m - level) <= MATCH_DB]
+            stretches = sum(1 for k, i in enumerate(hits) if k == 0 or i != hits[k - 1] + 1)
+            if stretches >= 2:
+                return level
+        return None
+
     def _splittable(self):
+        """May the piece end in the quiet run now? Only on clear evidence (see the module's
+        docstring); when in doubt, no."""
         lv = self._levels
         if self.idle is None or self._loud < self.min_blocks or lv.count < self.evidence_blocks:
             return False
-        background, content = lv.percentile(FLOOR_PERCENTILE), lv.percentile(CONTENT_PERCENTILE)
-        return content - background >= self.margin and background >= max(self.idle, MIN_FLOOR_DB) + self.margin
+        background = self.background()
+        if background is None or lv.percentile(CONTENT_PERCENTILE) < background + self.margin:
+            return False
+        run = sorted(self._quiet_db)
+        if not run or abs(run[len(run) // 2] - max(self.idle, MIN_FLOOR_DB)) > MATCH_DB:
+            return False                         # the quiet is not the input's idle level seen before
+        return background >= max(self.idle, MIN_FLOOR_DB) + self.margin
 
     def _commit(self):
         """The quiet run is part of the piece after all: counted in its levels."""
         for d in self._quiet_db:
-            self._levels.add(d)
+            self._count(d)
         self._quiet_db = []
 
     # ---- feeding ----------------------------------------------------------------
@@ -159,33 +203,30 @@ class Splitter:
         self._learn(db)
         t = self.threshold()
         loud = t is not None and db > t
-        if self.pending:
-            if loud:                             # the next recording: the split happens here
-                held = list(self._held)
-                self._held.clear()
-                self.sink.end()
+        if loud:
+            held = list(self._held)
+            self._held.clear()
+            if self.pending:                     # the next recording: the split happens here,
+                self.sink.end()                  # PREROLL seconds before its first sound
                 self.sink.start(held[0][0] if held else at)
-                for _, p in held:
-                    self.sink.write(p)
-                self.sink.write(pcm)
                 self.pending = False
                 self._new_piece()
-                self._levels.add(db)
-                self._loud = 1
-                return
-            self._held.append((at, pcm))
-            while len(self._held) > self.pre_blocks:
-                self.sink.write(self._held.popleft()[1])
-            return
-        self.sink.write(pcm)
-        if loud:
+                self._quiet_run = 0
+            for _, p in held:
+                self.sink.write(p)
+            self.sink.write(pcm)
             self._commit()
-            self._levels.add(db)
+            self._count(db)
             self._loud += 1
             self._quiet_run = 0
             return
-        if not self._loud:                       # quiet before the piece's first sound: the gap before it,
-            return                               # not the piece's own background (and never a split)
+        # Quiet: the last PREROLL seconds of it are always held back (in order), so that if the
+        # next sound starts a new piece, that piece begins with them.
+        self._held.append((at, pcm))
+        while len(self._held) > self.pre_blocks:
+            self.sink.write(self._held.popleft()[1])
+        if self.pending or not self._loud:       # a split waits; or quiet before the piece's first
+            return                               # sound (the gap before it, never its background)
         self._quiet_db.append(db)
         self._quiet_run += 1
         if self._quiet_run >= self.gap_blocks:

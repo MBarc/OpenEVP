@@ -195,22 +195,30 @@ pieces, put back together, are the input sample for sample.
   background (room tone, the recorder's mic hiss, played back) is above it.
 - **Pieces:** the first starts with the first sample. After `gap` seconds
   (default 3, 0.5-60, or off) of blocks at or under the threshold, a split is
-  pending: the quiet keeps going into the piece, except the last 0.5 s, held
-  back; at the next loud block the piece ends and the next starts with the
-  held-back 0.5 s. Stop during a gap: the held-back audio goes into the last
-  piece, and so does the last partial block.
-- **Evidence before a split** (Astra's review: steady sound followed by a pause
-  at the room's level split in two): a piece may end only when
-  - its own background is distinct from its content: the 95th percentile of its
-    block levels is at least 8 dB over the 20th, so a piece of steady sound gives
-    no evidence of a background at all;
-  - that background (the 20th percentile) is at least 8 dB above the floor;
+  pending; at the next loud block the piece ends and the next starts. The last
+  0.5 s of every quiet run is always held back before it is written (a rolling
+  pre-roll), so the next piece begins 0.5 s before its sound even when the gap
+  is exactly `gap` seconds (Astra's re-review: it started at the sound). Stop:
+  whatever is held back goes into the last piece, and so does the last partial
+  block.
+- **Evidence before a split** (both reviews: changing loudness was taken for a
+  background, and split recordings in two). A piece may end only when:
+  - it has a background of its own: a level it holds **steadily** for whole
+    seconds (the 10th-90th percentile of a second's block levels within 6 dB),
+    in **at least two separate stretches** (the level comes back), the quietest
+    such level at least 8 dB above the floor. A quieter passage heard once, or
+    loudness that just changes, is not a background;
+  - its content stands out from that background (95th percentile of its blocks
+    at least 8 dB over it);
+  - the quiet run is back at the idle floor seen before (its median within
+    4 dB): the input returned to the level it had while the recorder played
+    nothing;
   - at least 3 s of the piece were judged, not counting the quiet run being
     judged, nor quiet before the piece's first sound (the gap before it);
   - it has at least 1 s of loud blocks (a click joins the next piece).
-  Otherwise the quiet becomes part of the piece. If Play was pressed before
-  Record, the first recording's background is the floor and it is not split
-  until a real gap, quieter than that background, lowers the floor.
+  Otherwise the quiet becomes part of the piece. When Play was pressed before
+  Record, the first recording's background was the floor at first, so it shows
+  none of its own and stays joined to the next recording.
 - **The whole input is kept too** (decision for the review's suggestion): an
   import split on silence also writes `Import ... (full).wav`, with the marks,
   so a split in the wrong place costs nothing. It is dropped when only one
