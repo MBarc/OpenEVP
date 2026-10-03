@@ -531,7 +531,7 @@ def _run_app(smoke=None):
 
         window.events.closing += on_closing
         # Live mode: the app's own page may use the microphone without a prompt (app/mic_permission.py).
-        mic_permission.install_when_loaded(
+        mic_permission.install_early(
             window, on_problem=(lambda e: smoke[0]["problems"].append(
                 f"the microphone permission handler could not be added: {type(e).__name__}: {e}")) if smoke else None)
         try:

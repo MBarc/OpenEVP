@@ -814,14 +814,48 @@ class SmokeLiveTests(Tmp):
 
 
 class MicPermissionTests(unittest.TestCase):
-    def test_only_the_apps_own_page_gets_the_microphone(self):
-        page = "http://127.0.0.1:38685/index.html"
-        self.assertEqual(mic_permission.decide("Microphone", "http://127.0.0.1:38685/", page), "allow")
+    PAGE = "http://127.0.0.1:38685/index.html"
+
+    def test_only_the_pinned_page_gets_the_microphone(self):
+        p = mic_permission.Policy(self.PAGE)
+        self.assertEqual(p.decide("Microphone", "http://127.0.0.1:38685/", self.PAGE), "allow")
         for other in ("http://127.0.0.1:9999/", "https://127.0.0.1:38685/", "http://evil.example:38685/",
                       "http://localhost:38685/", "file:///C:/x.html", "nonsense"):
-            self.assertEqual(mic_permission.decide("Microphone", other, page), "deny", other)
-        self.assertEqual(mic_permission.decide("Microphone", "http://192.168.1.5:80/", "http://192.168.1.5:80/"), "deny")
-        self.assertIsNone(mic_permission.decide("Camera", "http://127.0.0.1:38685/", page))
+            self.assertEqual(p.decide("Microphone", other, self.PAGE), "deny", other)
+        self.assertIsNone(p.decide("Camera", "http://127.0.0.1:38685/", self.PAGE))
+
+    def test_trust_does_not_follow_navigation(self):
+        # The window now shows another local server (or another page of the app's own
+        # server): it asks for itself, with the window's own address. Denied: the trust
+        # belongs to the page pinned at start.
+        p = mic_permission.Policy(self.PAGE)
+        self.assertEqual(p.decide("Microphone", "http://127.0.0.1:9999/", "http://127.0.0.1:9999/index.html"), "deny")
+        self.assertEqual(p.decide("Microphone", "http://127.0.0.1:38685/", "http://127.0.0.1:38685/other.html"), "deny")
+        self.assertFalse(p.may_navigate("http://127.0.0.1:9999/index.html"))
+        self.assertFalse(p.may_navigate("https://example.com/"))
+        self.assertTrue(p.may_navigate("http://127.0.0.1:38685/index.html"))
+
+    def test_frames_and_unpinnable_pages_are_denied(self):
+        p = mic_permission.Policy(self.PAGE)
+        self.assertEqual(p.decide("Microphone", "http://127.0.0.1:38685/", self.PAGE, from_frame=True), "deny")
+        for page in (None, "http://192.168.1.5:80/index.html", "https://127.0.0.1:1/x", "file:///C:/x.html"):
+            q = mic_permission.Policy(page)
+            self.assertIsNone(q.origin)
+            self.assertEqual(q.decide("Microphone", "http://127.0.0.1:38685/", self.PAGE), "deny", page)
+            self.assertFalse(q.may_navigate(self.PAGE))
+
+
+@unittest.skipUnless(os.environ.get("OPENEVP_TEST_WEBVIEW2") == "1" and sys.platform == "win32",
+                     "set OPENEVP_TEST_WEBVIEW2=1 to check the microphone handlers in a hidden WebView2 window "
+                     "(Chromium's fake audio input only)")
+class MicPermissionWebView2Tests(unittest.TestCase):
+    def test_in_a_real_webview2(self):
+        import subprocess
+        run = subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "webview2_mic_probe.py")],
+                             capture_output=True, text=True, timeout=120)
+        got = json.loads(run.stdout.strip().splitlines()[-1])
+        self.assertEqual(got, {"policy": True, "pinned": True, "top": "allowed", "frame": "NotAllowedError",
+                               "navigation": "cancelled", "same_origin_page": "NotAllowedError"})
 
 
 if __name__ == "__main__":
