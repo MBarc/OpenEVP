@@ -140,13 +140,17 @@ def numbered(name, n):
     return name if n == 1 else f"{stem} ({n}){ext}"
 
 
-def publish(part_path, folder, name, tries=1000):
+def publish(part_path, folder, name, tries=1000, before=None):
     """Rename a finished .part to name in folder, or to "<stem> (2)<ext>" and so on
-    when that is taken: never over an existing file. Returns the path used."""
+    when that is taken: never over an existing file. before(target), when given, is
+    called just before each rename is tried (a journal of where the file is going).
+    Returns the path used."""
     for n in range(1, tries + 1):
         target = os.path.join(folder, numbered(name, n))
         if os.path.lexists(target):
             continue
+        if before is not None:
+            before(target)
         try:
             if os.name == "nt":
                 os.rename(part_path, target)      # refuses to replace on Windows

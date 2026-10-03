@@ -468,6 +468,53 @@ class LiveApiTests(Tmp):
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
         self.assertEqual(b.live_recover()["recovered"], [])
 
+    def test_a_crash_between_the_rename_and_the_marks_still_stores_them(self):
+        a = self.api()
+        with mock.patch("app.live.datetime") as dt:
+            dt.datetime.now.return_value = __import__("datetime").datetime(2026, 5, 6, 7, 8, 9)
+            sid = self.start(a)["session"]
+        self.send(a, sid, tone(3.0), 0)
+        a.live_mark(sid, 2.5)
+        # The crash: right after the rename, before the marks reach the store.
+        with mock.patch.object(type(a), "_store_live_marks", side_effect=SystemExit("power cut")):
+            with self.assertRaises(SystemExit):
+                a._live_finish(a._live)
+        a._live = None
+        path = os.path.join(self.lib, "Live 2026-05-06 07-08-09.wav")
+        part = path + ".part"
+        self.assertTrue(os.path.isfile(path) and not os.path.exists(part))
+        self.assertTrue(os.path.isfile(part + ".json"))                  # the journal survived
+        fp = wavinfo.wav_fingerprint(path)
+        self.assertEqual(self.store.marks(fp), [])
+        b = self.api()
+        r = b.live_recover()
+        self.assertEqual([(f["name"], f["marks"]) for f in r["recovered"]], [("Live 2026-05-06 07-08-09.wav", 1)])
+        self.assertEqual(len(self.store.marks(fp)), 1)
+        self.assertFalse(os.path.exists(part + ".json"))
+        # Run again (say the crash came after some marks were stored): nothing is doubled.
+        meta = {"name": "Live 2026-05-06 07-08-09.wav", "rate": RATE, "channels": 1, "published": path, "fp": fp,
+                "frames": 3 * RATE, "marks": [{"start": 0.5, "end": 2.5, "cls": "C", "note": live.MARK_NOTE}]}
+        with open(part + ".json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        self.store.set_setting(live.PARTS_SETTING, [part])
+        b.live_recover()
+        self.assertEqual(len(self.store.marks(fp)), 1)
+
+    def test_a_journal_pointing_at_another_file_is_not_trusted(self):
+        a = self.api()
+        os.makedirs(self.lib)
+        path = os.path.join(self.lib, "Live x.wav")
+        with open(path, "wb") as f:
+            f.write(livewav.header(RATE, 1, 2 * RATE) + pcm(tone(1.0)))
+        part = path + ".part"
+        meta = {"name": "Live x.wav", "rate": RATE, "channels": 1, "published": path, "fp": "0" * 64,
+                "frames": RATE, "marks": [{"start": 0.0, "end": 0.5, "cls": "C", "note": "n"}]}
+        with open(part + ".json", "w", encoding="utf-8") as f:
+            json.dump(meta, f)
+        self.store.set_setting(live.PARTS_SETTING, [part])
+        self.assertEqual(a.live_recover()["recovered"], [])
+        self.assertEqual(self.store.marks(wavinfo.wav_fingerprint(path)), [])
+
     def test_recovery_never_touches_the_file_being_recorded(self):
         a = self.api()
         sid = self.start(a)["session"]

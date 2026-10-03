@@ -37,6 +37,7 @@ import os
 import secrets
 import shutil
 import threading
+import wave
 
 from openevp import livewav, silence, wavinfo
 
@@ -108,11 +109,27 @@ def _write_sidecar(path, data):
         pass
 
 
+def _journal(sidecar, meta, target, fp, frames):
+    """Before a finished .part is renamed: write down where it is going and what it
+    holds, so a crash between the rename and storing its marks can be finished
+    (live_recover finds the WAV by this and stores the marks then)."""
+    meta.update(published=target, fp=fp, frames=frames)
+    _write_sidecar(sidecar, meta)
+
+
 def _remove(path):
     try:
         os.remove(path)
     except FileNotFoundError:
         pass
+
+
+def _sidecar_marks(meta):
+    """The marks a sidecar holds that look like marks (anything else is ignored)."""
+    marks = meta.get("marks") if isinstance(meta.get("marks"), list) else []
+    return [m for m in marks if isinstance(m, dict) and all(
+        isinstance(m.get(k), (int, float)) and not isinstance(m.get(k), bool) for k in ("start", "end"))
+        and m.get("cls") in ("A", "B", "C") and isinstance(m.get("note"), str)]
 
 
 def _clamped(mark, duration):
@@ -529,7 +546,8 @@ class LiveOps:
             self._unregister_part(piece.part)
             return
         try:
-            path = livewav.publish(piece.part, piece.folder, piece.name)
+            path = livewav.publish(piece.part, piece.folder, piece.name,
+                                   before=lambda target: _journal(piece.sidecar, piece.meta, target, fp, frames))
         except OSError as e:
             s.problems.append(f"{piece.name} could not be given its name ({_plain(e)}); it will be "
                               "finished when OpenEVP starts again.")
@@ -543,12 +561,19 @@ class LiveOps:
                         "marks": stored})
 
     def _store_live_marks(self, fp, path, seconds, marks, s=None):
+        """Store marks made while recording against the finished file. A mark already
+        there (the same times, class and note: stored before a crash) is not added
+        again, so this can be run twice."""
         stored = 0
+        have = {(m["start"], m["end"], m["cls"], m["note"]) for m in self._store.marks(fp)}
         for m in marks:
             m = _clamped(m, seconds)
             if m is None:
                 if s is not None:
                     s.dropped_marks += 1
+                continue
+            if (m["start"], m["end"], m["cls"], m["note"]) in have:
+                stored += 1
                 continue
             try:
                 self._store.add_mark(fp, m["start"], m["end"], m["cls"], m["note"],
@@ -602,6 +627,32 @@ class LiveOps:
                 self._unregister_part(part)
         return out
 
+    def _recover_published(self, part, sidecar, meta):
+        """The .part is gone. If its sidecar journals a WAV it was renamed to (a crash
+        between the rename and storing the marks) and that WAV is still the same audio,
+        store the marks now; otherwise there is nothing left to do."""
+        target, fp, frames = meta.get("published"), meta.get("fp"), meta.get("frames")
+        if not (isinstance(target, str) and isinstance(fp, str) and isinstance(frames, int) and frames > 0
+                and os.path.dirname(os.path.normcase(target)) == os.path.dirname(os.path.normcase(part))
+                and os.path.isfile(target)):
+            _remove(sidecar)
+            return None
+        try:
+            same = wavinfo.wav_fingerprint(target) == fp
+        except ValueError:
+            same = False
+        if not same:                             # not the file it was (replaced since)
+            _remove(sidecar)
+            return None
+        with wave.open(target) as w:
+            rate = w.getframerate()
+        seconds = frames / rate
+        stored = self._store_live_marks(fp, target, seconds, _sidecar_marks(meta))
+        _remove(sidecar)
+        self._index_live(target, fp, seconds)
+        return {"name": os.path.basename(target), "folder": os.path.basename(os.path.dirname(target)),
+                "seconds": round(seconds, 1), "marks": stored, "id": _file_id(target)}
+
     def _recover_part(self, part):
         """Finish one leftover .part; None when there was nothing to keep."""
         sidecar = part + ".json"
@@ -614,8 +665,7 @@ class LiveOps:
         if not isinstance(meta, dict):
             meta = {}
         if not os.path.isfile(part):
-            _remove(sidecar)
-            return None
+            return self._recover_published(part, sidecar, meta)
         folder = os.path.dirname(part)
         name = meta.get("name")
         base = os.path.basename(part)[:-len(livewav.PART)]
@@ -646,12 +696,9 @@ class LiveOps:
             _remove(sidecar)
             return None
         fp = wavinfo.wav_fingerprint(part)
-        path = livewav.publish(part, folder, name)
+        path = livewav.publish(part, folder, name, before=lambda target: _journal(sidecar, meta, target, fp, frames))
         seconds = frames / rate
-        marks = [m for m in meta.get("marks", []) if isinstance(m, dict) and all(
-            isinstance(m.get(k), (int, float)) and not isinstance(m.get(k), bool) for k in ("start", "end"))
-            and m.get("cls") in ("A", "B", "C") and isinstance(m.get("note"), str)]
-        stored = self._store_live_marks(fp, path, seconds, marks)
+        stored = self._store_live_marks(fp, path, seconds, _sidecar_marks(meta))
         _remove(sidecar)
         self._index_live(path, fp, seconds)
         return {"name": os.path.basename(path), "folder": os.path.basename(folder), "seconds": round(seconds, 1),
