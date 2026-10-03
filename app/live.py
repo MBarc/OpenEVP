@@ -32,6 +32,7 @@ import base64
 import binascii
 import datetime
 import json
+import math
 import os
 import secrets
 import shutil
@@ -112,11 +113,12 @@ def _remove(path):
 def _clamped(mark, duration):
     """A mark (start, end in the file's seconds) fitted into a file of `duration`
     seconds, or None when too little of it is left."""
-    end = min(mark["end"], duration)
-    start = max(0.0, min(mark["start"], end - MIN_MARK_LENGTH))
-    if end - start < MIN_MARK_LENGTH or start < 0:
+    # Milliseconds, rounded down: a mark made at the very last sample must not round past the end.
+    end = math.floor(min(mark["end"], duration) * 1000) / 1000
+    start = math.floor(max(0.0, min(mark["start"], end - MIN_MARK_LENGTH)) * 1000) / 1000
+    if end - start < MIN_MARK_LENGTH - 1e-9:
         return None
-    return {**mark, "start": round(start, 3), "end": round(end, 3)}
+    return {**mark, "start": start, "end": end}
 
 
 class _Piece:

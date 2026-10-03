@@ -624,7 +624,8 @@ async function liveSmoke(seconds) {
   const mark = await liveMark();
   const r = await stopRecording({ open: false });
   const out = { ok: !!(r && r.ok), rate: LV.rate, channels: LV.channels, label: LV.label,
-                mark: !!(mark && mark.ok), files: (r && r.files) || [], error: r && r.error };
+                mark: !!(mark && mark.ok), marked: mark && mark.mark, files: (r && r.files) || [], error: r && r.error,
+                dropped_marks: r && r.dropped_marks, problems: r && r.problems };
   closeInput();
   S.view = "library";
   return out;

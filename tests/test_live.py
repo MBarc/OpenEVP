@@ -299,6 +299,19 @@ class LiveApiTests(Tmp):
         st = os.stat(path)                                # the library never reads it again to list it
         self.assertEqual(self.store.cached_fp(path, st.st_size, st.st_mtime_ns)["fp"], fp)
 
+    def test_a_mark_at_the_very_last_sample_is_kept(self):
+        # M just before Stop: the mark ends at the last sample received, a time with many
+        # decimals; rounding it to milliseconds must not put it past the end of the file.
+        a = self.api()
+        sid = self.start(a, rate=44100)["session"]
+        frames = 88063                                    # 1.99689... s
+        self.send(a, sid, tone(frames / 44100, rate=44100), 0)
+        self.assertTrue(a.live_mark(sid, frames / 44100)["ok"])
+        r = a.live_stop(sid)
+        self.assertEqual((r["files"][0]["marks"], r["dropped_marks"]), (1, 0))
+        m = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, r["files"][0]["name"])))[0]
+        self.assertLessEqual(m["end"], frames / 44100)
+
     def test_stop_opens_it_for_the_player_and_never_overwrites(self):
         a = self.api()
         fixed = __import__("datetime").datetime(2026, 1, 2, 3, 4, 5)
