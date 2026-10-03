@@ -4,13 +4,13 @@ every reply and folder table in full, so the formats can be decoded.
 
     python3 tools/probe.py <outdir>
 
-Read-only like the downloader: it only sends the commands st25/policy.py allows.
+Read-only like the downloader: it only sends the commands sony_icd/policy.py allows.
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25.protocol import CMD_FOLDER_INFO, FOLDER_TABLE_SIZE, Recorder  # noqa: E402
+from sony_icd.protocol import CMD_FOLDER_INFO, FOLDER_TABLE_SIZE, Recorder  # noqa: E402
 
 
 def probe(r, out):

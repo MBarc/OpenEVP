@@ -1,5 +1,5 @@
-"""Sony ICD-ST25 USB protocol (reverse-engineered from USB captures of
-Digital Voice Editor 2.31 and disassembly of icdcomm2.dll / IcdUsb2.dll).
+"""Sony ICD-ST USB protocol, ICD-ST25 and ICD-ST10 (reverse-engineered from USB
+captures of Digital Voice Editor 2.31 and disassembly of icdcomm2.dll / IcdUsb2.dll).
 
 Transport (vendor requests, recipient interface, wValue 0xABAB, wIndex 0):
   status  control IN  bRequest 0x01, 4 bytes  -> b0 b1 LEN(2, big-endian)
@@ -15,7 +15,7 @@ it unchanged; the final reply replaces its 0xFF byte with 0x00
 (091001ff -> 09100100, 11ff0002 -> 11000002).
 
 Safety: the only thing ever sent to the recorder is a command frame, and the
-USB layer itself (usb.Device, enforcing st25/policy.py) refuses any control OUT that
+USB layer itself (usb.Device, enforcing sony_icd/policy.py) refuses any control OUT that
 is not one of the exact frames Digital Voice Editor sends to list and download
 recordings - prefix, opcode, frame length and arguments are all checked there,
 so even direct calls to Recorder.dev cannot send anything else. _send() checks

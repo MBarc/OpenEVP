@@ -22,7 +22,7 @@ class LogoTests(unittest.TestCase):
             for name in ("logo.svg",):
                 with open(os.path.join(d, name)) as a, open(os.path.join(ASSETS, name)) as b:
                     self.assertEqual(a.read(), b.read(), f"{name} is stale: run tools/make_logo.py")
-        with Image.open(os.path.join(ASSETS, "st25.ico")) as ico:
+        with Image.open(os.path.join(ASSETS, "openevp.ico")) as ico:
             self.assertEqual(sorted(ico.info["sizes"]), [(s, s) for s in make_logo.ICO_SIZES])
 
     def test_favicon_is_the_logo(self):

@@ -208,8 +208,9 @@ to use File Explorer instead, when it can tell Windows wouldn't recycle it:
 - when the Recycle Bin is set to delete files straight away;
 - when the folder is bigger than the Recycle Bin, if Windows reports its size.
 
-If Windows still turns out not to be able to recycle something, OpenEVP asks
-before deleting anything for good. If a file in the folder is in use, whatever
+If Windows still turns out not to be able to recycle something, OpenEVP stops
+it: nothing is ever deleted for good, the folder stays where it was, and OpenEVP
+tells you. If a file in the folder is in use, whatever
 could be recycled is, the rest stays where it was, and OpenEVP tells you.
 
 ### Right-click menu
@@ -254,7 +255,9 @@ What arrives depends on the file:
 - An MP3 saved as `.mpeg` (how WhatsApp Web saves voice notes), `.mpga`,
   `.mp2` or `.m2a` is shared as a copy called `<name>.mp3`, because some apps
   think `.mpeg` means video.
-- A recorder's `.dvf` is shared as the `.wav` beside it if there is one.
+- A recorder's `.dvf` is shared as the `.wav` beside it if there is one and it
+  holds the same recording (a different recording that only has the same name
+  never goes in its place).
   Otherwise OpenEVP makes an MP3 of the whole recording first. You'll see
   "Preparing … to share" for a moment. Keep holding the mouse button. If you
   let go too early, just drag again and it starts straight away.

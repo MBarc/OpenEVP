@@ -2,6 +2,7 @@
 create / rename / folder_info / delete_folder / move_files (tasks 2 and 3)."""
 import ctypes
 import dataclasses
+import io
 import os
 import shutil
 import stat
@@ -21,7 +22,7 @@ from app.store import StoreUnavailable  # noqa: E402
 from app.audio_server import AudioServer  # noqa: E402
 from app.store import AppData  # noqa: E402
 from openevp import formats  # noqa: E402
-from st25 import audio as st25_audio  # noqa: E402  (the .dvf decoder behind openevp.formats.DVF)
+from sony_icd import audio as dvf_audio  # noqa: E402  (the .dvf decoder behind openevp.formats.DVF)
 from openevp import wavinfo  # noqa: E402
 
 WINDOWS = sys.platform == "win32"
@@ -155,10 +156,10 @@ class LinkTests(unittest.TestCase):
 class RecycleBinTests(unittest.TestCase):
     @unittest.skipUnless(ctypes.sizeof(ctypes.c_void_p) == 8, "64-bit layout")
     def test_struct_layout(self):
-        self.assertEqual(ctypes.sizeof(folders.SHFILEOPSTRUCTW), 56)
         self.assertEqual(ctypes.sizeof(folders.SHQUERYRBINFO), 24)
-        self.assertEqual(folders.SHFILEOPSTRUCTW.fFlags.offset, 32)
-        self.assertEqual(folders.RECYCLE_FLAGS, 0x40 | 0x10 | 0x400 | 0x4 | 0x4000 | 0x8000)
+        # Recycle (FOF_ALLOWUNDO + FOFX_RECYCLEONDELETE), no prompts, stop at the first
+        # failure -- and no FOF_WANTNUKEWARNING: a delete for good is vetoed, never asked.
+        self.assertEqual(folders.RECYCLE_FLAGS, 0x40 | 0x10 | 0x400 | 0x4 | 0x8000 | 0x80000 | 0x100000)
 
     @unittest.skipIf(WINDOWS, "off Windows only")
     def test_off_windows_nothing_is_deleted(self):
@@ -173,6 +174,34 @@ class RecycleBinTests(unittest.TestCase):
             folders.recycle("\\\\server\\share\\folder")
         with self.assertRaises(folders.RecycleError):
             folders.recycle("C:\\" + "x" * 300)
+
+    @unittest.skipUnless(WINDOWS and os.environ.get("OPENEVP_TEST_RECYCLE") == "1",
+                         "set OPENEVP_TEST_RECYCLE=1 to try a delete for good on a subst drive (only test files)")
+    def test_real_shell_delete_for_good_is_vetoed(self):
+        # A subst drive has no Recycle Bin: the shell would delete for good there. The
+        # checks in recycle() refuse it up front, so the shell layer is asked directly.
+        base = tempfile.mkdtemp(prefix="openevp-recycle-test-")
+        self.addCleanup(shutil.rmtree, base, True)
+        letter = next((c for c in "QRSTUVWXYZ" if not os.path.exists(c + ":\\")), None)
+        if letter is None:
+            self.skipTest("no free drive letter")
+        subprocess.run(["subst", letter + ":", base], check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["subst", letter + ":", "/d"], capture_output=True)
+        one = os.path.join(letter + ":\\", "a.wav")
+        with open(one, "wb") as f:
+            f.write(b"x")
+        folder = os.path.join(letter + ":\\", "Old Mill")
+        os.makedirs(os.path.join(folder, "sub"))
+        inner = os.path.join(folder, "sub", "b.wav")
+        with open(inner, "wb") as f:
+            f.write(b"x")
+        for target in (one, folder):
+            decide = folders.RecycleOnly(target)
+            hr, aborted = folders.shell_recycle(target, None, None, decide)
+            self.assertEqual(decide.vetoed, "nuke")
+            self.assertFalse(decide.succeeded(hr, aborted))
+        self.assertTrue(os.path.isfile(one))
+        self.assertTrue(os.path.isfile(inner))
 
     @unittest.skipUnless(WINDOWS and os.environ.get("OPENEVP_TEST_RECYCLE") == "1",
                          "set OPENEVP_TEST_RECYCLE=1 to put a test folder in the real Recycle Bin")
@@ -211,6 +240,136 @@ class RecycleBinTests(unittest.TestCase):
         folders.recycle(one)
         self.assertFalse(os.path.lexists(one))
         self.assertGreater(items(), before)
+
+
+@unittest.skipUnless(WINDOWS, "Windows only")
+class RecycleVetoTests(unittest.TestCase):
+    """The shell is faked: what recycle() does with what IFileOperation reports."""
+    RECYCLE, NUKE = 0x282, 0x202             # PreDeleteItem flags seen on Windows 11
+    DONT_PROCESS_CHILDREN = 0x00270008       # PostDeleteItem's hr for a recycle
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "a.wav")
+        with open(self.path, "wb") as f:
+            f.write(b"x")
+        for name, value in (("bin_refuses", False), ("_bin_exists", True), ("drive_type", folders.DRIVE_FIXED)):
+            patcher = mock.patch.object(folders, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def recycle(self, shell):
+        try:
+            folders.recycle(self.path, shell=shell)
+        except folders.RecycleError as e:
+            return str(e)
+        return None
+
+    def test_a_delete_for_good_is_vetoed_and_the_file_stays(self):
+        asked = []
+
+        def shell(path, owner, before, decide):     # the shell found no room: it would nuke
+            answer = decide.pre_delete(self.NUKE, path)
+            asked.append(answer)
+            if answer != folders.S_OK:
+                decide.post_delete(self.NUKE, path, answer, False)
+                return answer, False
+            os.remove(path)
+            return folders.S_OK, False
+        self.assertEqual(self.recycle(shell), folders.NO_ROOM.replace("This folder", "This file"))
+        self.assertEqual(asked, [folders.HR_CANCELLED])
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_a_part_deleted_on_its_own_is_vetoed(self):
+        def shell(path, owner, before, decide):
+            self.assertEqual(decide.pre_delete(self.RECYCLE, os.path.join(path, "child.wav")), folders.HR_CANCELLED)
+            self.assertEqual(decide.pre_delete(self.RECYCLE, path), folders.HR_CANCELLED)   # stays refused
+            return folders.HR_CANCELLED, True
+        self.assertIsNotNone(self.recycle(shell))
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_nothing_but_a_delete_is_allowed(self):
+        decide = folders.RecycleOnly(self.path)
+        self.assertEqual(decide.pre_other(), folders.HR_CANCELLED)
+        self.assertEqual(decide.pre_delete(self.RECYCLE, self.path), folders.HR_CANCELLED)
+
+    def test_success_is_what_post_delete_reports_never_a_missing_path(self):
+        def gone_without_word(path, owner, before, decide):
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            return folders.S_OK, False
+        self.assertIsNotNone(self.recycle(gone_without_word))
+
+        with open(self.path, "wb") as f:
+            f.write(b"x")
+
+        def deleted_not_recycled(path, owner, before, decide):     # S_OK but no item in the bin
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, folders.S_OK, False)
+            return folders.S_OK, False
+        self.assertIsNotNone(self.recycle(deleted_not_recycled))
+
+    def test_a_recycle_reported_by_post_delete_succeeds(self):
+        calls = []
+
+        def shell(path, owner, before, decide):
+            self.assertEqual(decide.pre_delete(self.RECYCLE, path), folders.S_OK)
+            before()
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, self.DONT_PROCESS_CHILDREN, True)
+            return folders.S_OK, False
+        folders.recycle(self.path, before=lambda: calls.append("before"), shell=shell)
+        self.assertEqual(calls, ["before"])
+
+    def test_in_use_says_so(self):
+        def shell(path, owner, before, decide):
+            decide.pre_delete(self.RECYCLE, path)
+            decide.post_delete(self.RECYCLE, path, folders.COPYENGINE_E_SHARING_VIOLATION_SRC, False)
+            return folders.COPYENGINE_E_SHARING_VIOLATION_SRC, False
+        self.assertEqual(self.recycle(shell), folders.FILE_IN_USE.format("a.wav"))
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_sinks_the_shell_let_go_of_are_dropped_at_the_next_recycle(self):
+        done, held = types.SimpleNamespace(refs=0), types.SimpleNamespace(refs=1)
+        saved = list(folders._LINGERING)
+        self.addCleanup(lambda: folders._LINGERING.__setitem__(slice(None), saved))
+        folders._LINGERING[:] = [done, held]
+
+        def shell(path, owner, before, decide):
+            self.assertEqual(folders._LINGERING, [held], "pruned before the shell is asked")
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, self.DONT_PROCESS_CHILDREN, True)
+            return folders.S_OK, False
+        folders.recycle(self.path, shell=shell)
+        held.refs = 0
+        folders._prune_lingering()
+        self.assertEqual(folders._LINGERING, [])
+
+    def test_the_com_sink_refuses_through_its_vtable(self):
+        decide = folders.RecycleOnly(self.path)
+        sink = folders.ProgressSink(decide)
+        vtbl = ctypes.cast(sink.pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+
+        def call(index, *types_and_args):
+            argtypes, args = types_and_args[0::2], types_and_args[1::2]
+            fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+            return fn(sink.pointer, *args) & 0xFFFFFFFF
+        out = ctypes.c_void_p()
+        iid = folders._guid(folders.IID_IFileOperationProgressSink)
+        self.assertEqual(call(0, ctypes.POINTER(folders._GUID), ctypes.byref(iid),
+                              ctypes.POINTER(ctypes.c_void_p), ctypes.byref(out)), folders.S_OK)
+        self.assertEqual(out.value, sink.pointer)
+        other = folders._guid(folders.IID_IShellItem)
+        self.assertEqual(call(0, ctypes.POINTER(folders._GUID), ctypes.byref(other),
+                              ctypes.POINTER(ctypes.c_void_p), ctypes.byref(out)), folders.E_NOINTERFACE)
+        self.assertEqual(call(11, ctypes.c_uint32, self.RECYCLE, ctypes.c_void_p, None),
+                         folders.HR_CANCELLED)                       # PreDeleteItem with no item
+        self.assertEqual(call(5, ctypes.c_uint32, 0, ctypes.c_void_p, None, ctypes.c_wchar_p, "x"),
+                         folders.HR_CANCELLED)                       # PreRenameItem
+        self.assertEqual(decide.vetoed, "other")
 
 
 class FolderApiBase(unittest.TestCase):
@@ -265,6 +424,134 @@ class FolderApiBase(unittest.TestCase):
 
     def names(self, *rel):
         return sorted(os.listdir(os.path.join(self.lib, *rel)))
+
+
+@unittest.skipUnless(WINDOWS, "junctions are Windows'")
+class FileIdJunctionTests(FolderApiBase):
+    """A folder listed in the library, swapped for a junction to the same audio
+    outside it: every entry point that takes a file id (or a recording loaded
+    from one) refuses it, and nothing is read from or written beside the outside
+    copy."""
+
+    def setUp(self):
+        super().setUp()
+        self.audio = wav_bytes(b"case", seconds=2.0)
+        self.path = self.write("Case/a.wav", self.audio)
+        self.outside = os.path.join(self.tmp, "outside")
+        os.makedirs(self.outside)
+        with open(os.path.join(self.outside, "a.wav"), "wb") as f:
+            f.write(self.audio)                          # the same audio: only containment can refuse it
+        self.api = self.new_api()
+        self.fid = self.file(self.index(self.api), "a.wav")
+
+    def swap(self):
+        import _winapi
+        os.rename(os.path.join(self.lib, "Case"), os.path.join(self.tmp, "Case moved"))
+        _winapi.CreateJunction(self.outside, os.path.join(self.lib, "Case"))
+        self.addCleanup(os.rmdir, os.path.join(self.lib, "Case"))     # the junction only
+
+    def assert_outside_untouched(self):
+        self.assertEqual(os.listdir(self.outside), ["a.wav"])
+
+    def test_play_marks_and_show_refuse_it(self):
+        self.swap()
+        self.assertEqual(self.api.play_library(self.fid)["error"], backend.LIB_CHANGED)
+        self.assertEqual(self.server.files, [])                          # never read
+        self.assertEqual(self.api.library_marks(self.fid)["error"], backend.LIB_CHANGED)
+        with mock.patch.object(backend, "show_in_folder", return_value=True) as show:
+            self.assertEqual(self.api.show_library_file(self.fid)["error"], backend.LIB_CHANGED)
+        show.assert_not_called()
+
+    def test_sharing_refuses_it(self):
+        dragged = []
+        self.api._drag_files = self.api._copy_files = dragged.append
+        self.swap()
+        self.assertEqual(self.api.drag_out([self.fid])["error"], backend.LIB_CHANGED)
+        self.assertEqual(self.api.copy_files([self.fid])["error"], backend.LIB_CHANGED)
+        self.assertEqual(dragged, [])
+
+    def test_library_clips_refuse_it(self):
+        self.store.add_mark(wavinfo.wav_fingerprint(io.BytesIO(self.audio)), 0.1, 0.3, "A", "", name="a.wav",
+                            duration=2.0)
+        self.swap()
+        self.assertEqual(self.api.export_clips_files([self.fid], 1)["error"], backend.LIB_CHANGED)
+        # A job whose file was swapped after it was admitted: skipped, nothing written.
+        r = self.api._start_clips(lambda: [(self.path, "wav")], None, 2)
+        self.assertTrue(r["ok"], r)
+        with self.events.cond:
+            self.assertTrue(self.events.cond.wait_for(
+                lambda: any(n == "clips-done" for n, _p in self.events.items), WAIT))
+        p = next(q for n, q in self.events.items if n == "clips-done")
+        self.assertEqual((p["saved"], p["skipped"]), (0, [f"a.wav ({backend.NOT_IN_LIBRARY})"]))
+        self.assert_outside_untouched()
+
+    def test_exports_of_a_loaded_recording_refuse_it(self):
+        loaded = self.api.play_library(self.fid)
+        self.assertTrue(loaded["ok"], loaded)
+        rec = loaded["rec"]
+        self.assertTrue(self.api.add_mark(rec, 0.1, 0.3, "A")["ok"])
+        self.swap()
+        changed = "a.wav has changed since it was loaded. Load it again."
+        self.assertEqual(self.api.export_marked(rec)["error"], changed)
+        self.assertEqual(self.api.export_clips(rec)["error"], changed)
+        self.assert_outside_untouched()
+        self.assertEqual(sorted(os.listdir(self.lib)), ["Case"], "nothing saved in Save-to either")
+
+    def test_a_loaded_recording_still_inside_exports(self):
+        loaded = self.api.play_library(self.fid)
+        self.assertTrue(self.api.add_mark(loaded["rec"], 0.1, 0.3, "A")["ok"])
+        r = self.api.export_marked(loaded["rec"])
+        self.assertTrue(r["ok"], r)
+
+
+class ShutdownWaitsForFolderOperationsTests(FolderApiBase):
+    """A rename, move or delete holds the library: shutdown() waits for it before
+    closing the store (and letting go of its lock), and none starts once closing."""
+
+    def test_shutdown_waits_for_a_blocked_recycle(self):
+        self.write("Old Mill/a.wav", wav_bytes(b"a"))
+        entered, release, order = threading.Event(), threading.Event(), []
+
+        def slow_recycle(path, before=None):
+            entered.set()
+            release.wait(WAIT)
+            self.fake_recycle(path, before)
+            order.append("recycled")
+        api = self.new_api(recycle=slow_recycle)
+        r = self.index(api)
+        closing = self.store.close
+
+        def close():
+            order.append("store closed")
+            closing()
+        result = {}
+        with mock.patch.object(self.store, "close", close):
+            deleting = threading.Thread(target=lambda: result.update(api.delete_folder(self.folder(r, "Old Mill"))))
+            deleting.start()
+            self.assertTrue(entered.wait(WAIT))
+            self.assertTrue(api.changing_files())
+            stopping = threading.Thread(target=api.shutdown)
+            stopping.start()
+            stopping.join(0.5)
+            self.assertTrue(stopping.is_alive(), "shutdown() waits for the delete")
+            self.assertEqual(order, [])
+            release.set()
+            deleting.join(WAIT)
+            stopping.join(WAIT)
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(order, ["recycled", "store closed"])
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(api.changing_files())
+
+    def test_no_folder_operation_starts_once_closing(self):
+        self.write("Old Mill/a.wav", wav_bytes(b"a"))
+        api = self.new_api()
+        r = self.index(api)
+        api.request_stop()
+        self.assertEqual(api.create_folder("root", "New")["error"], library_ops.CLOSING)
+        self.assertEqual(api.delete_folder(self.folder(r, "Old Mill"))["error"], library_ops.CLOSING)
+        self.assertEqual(self.recycled, [])
+        self.assertFalse(api.changing_files())
 
 
 class CreateRenameTests(FolderApiBase):
@@ -523,7 +810,7 @@ class DeleteTests(FolderApiBase):
             self.store.add_mark(fps[name], 0.1, 0.5, "A", "")
             self.store.set_backup(fps[name], "saved", "Saved")
 
-        def shell(path, before=None):         # what SHFileOperationW does with a file in use
+        def shell(path, before=None):         # what the shell does with a file in use
             self.recycled.append(path)
             os.remove(os.path.join(path, "gone.wav"))
             os.remove(os.path.join(path, "A", "photo.jpg"))
@@ -979,7 +1266,7 @@ class RecycleBinSettingsTests(unittest.TestCase):
         self.assertEqual(folders.IN_USE.format("Old Mill"),
                          "Old Mill was not (completely) moved to the Recycle Bin: a file is in use, "
                          "or deleting was cancelled.")
-        self.assertEqual(folders.RECYCLE_FLAGS & folders.FOF_WANTNUKEWARNING, folders.FOF_WANTNUKEWARNING)
+        self.assertEqual(folders.RECYCLE_FLAGS & 0x4000, 0)      # FOF_WANTNUKEWARNING: a Yes would delete for good
 
 
 @unittest.skipUnless(WINDOWS, "Windows only")
@@ -1400,7 +1687,7 @@ class BackupIdentityTests(FolderApiBase):
         self.assertEqual(self.store.backup_record("fpB")["paths"], [stale])       # untouched
         with self.store._lock:                                 # b.dvf: not indexed, and no decoder
             self.store._index["files"].clear()
-        with mock.patch.object(st25_audio, "available", return_value=False):
+        with mock.patch.object(dvf_audio, "available", return_value=False):
             res = api.delete_folder(self.folder(r, "Elsewhere"))
         self.assertTrue(res["ok"], res)
         self.assertEqual(self.store.backup("fpB"), {"status": "failed", "detail": library_ops.BACKUP_UNCHECKED})
@@ -1417,7 +1704,7 @@ class BackupIdentityTests(FolderApiBase):
         self.backup("fpKnown", "Save/y.wav")                      # its file is where it was recorded
         with self.store._lock:                                     # x.dvf not indexed, and no decoder now
             self.store._index["files"].pop(os.path.normcase(os.path.join(self.lib, "A", "x.dvf")), None)
-        with mock.patch.object(st25_audio, "available", return_value=False):
+        with mock.patch.object(dvf_audio, "available", return_value=False):
             res = api.delete_folder(self.folder(r, "A"))
         self.assertEqual(res, {"ok": True, "backups": 1})
         self.assertEqual(self.store.backup("fpLegacy"), {"status": "failed", "detail": library_ops.BACKUP_UNCHECKED})
@@ -1429,7 +1716,7 @@ class BackupIdentityTests(FolderApiBase):
         api = self.new_api()
         r = self.index(api)
         self.store.set_backup("fpLegacy", "saved", "Saved")
-        with mock.patch.object(st25_audio, "available", return_value=False), \
+        with mock.patch.object(dvf_audio, "available", return_value=False), \
                 mock.patch.object(self.store, "set_backups", side_effect=StoreUnavailable("disk full")):
             res = api.delete_folder(self.folder(r, "A"))
         self.assertIn("not deleted", res["error"])

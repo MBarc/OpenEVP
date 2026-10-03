@@ -21,9 +21,9 @@ from app.devices import NEEDS_DRIVER, NEEDS_REPLUG, READY, DeviceManager  # noqa
 from app.store import AppData  # noqa: E402
 from openevp import formats, recorders, wavinfo  # noqa: E402
 from openevp.recorders import base  # noqa: E402
-from openevp.recorders.sony_st25 import ST25Session  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 WAIT = 10
 ST25_ID = "1-4@7"
@@ -106,7 +106,7 @@ class AppTestBase(unittest.TestCase):
         r.dev = FakeRecorderDevice(ST25_FOLDERS)
         s = RecorderSession(r)
         s.connect()
-        return ST25Session(s)
+        return SonyIcdSession(s)
 
     def rows(self):
         r = self.api.devices()

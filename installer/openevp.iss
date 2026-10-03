@@ -3,7 +3,7 @@
 ; One setup file, one admin prompt, nothing else to install:
 ;   - the desktop app and the command-line downloader
 ;   - the recorder driver (WinUSB for every recorder model in the driver manifest,
-;     _internal\driver\models.json: today the ICD-ST25, USB 054C:0103), whether or
+;     _internal\driver\models.json: today USB 054C:0103, the ICD-ST25 and ICD-ST10), whether or
 ;     not the recorder is plugged in; Windows applies it when it is (any USB port)
 ;   - Microsoft's WebView2 runtime, only if this PC does not have it yet
 ;     (Windows 11 and updated Windows 10 already do; this step needs internet)
@@ -44,7 +44,7 @@ ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 OutputDir=..\dist
 OutputBaseFilename=OpenEVP-Setup-{#AppVersion}
-SetupIconFile=..\assets\st25.ico
+SetupIconFile=..\assets\openevp.ico
 WizardSmallImageFile=..\assets\wizard-small-55.bmp,..\assets\wizard-small-69.bmp,..\assets\wizard-small-83.bmp,..\assets\wizard-small-110.bmp
 WizardImageFile=..\assets\wizard-large-164.bmp,..\assets\wizard-large-205.bmp,..\assets\wizard-large-246.bmp,..\assets\wizard-large-328.bmp
 UninstallDisplayIcon={app}\OpenEVP.exe
@@ -53,8 +53,11 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
-; The app holds this mutex while it runs (app/main.py; the old name is 0.5.0's): setup and uninstall ask the user
-; to close it first, instead of leaving files in use behind for a restart.
+; The app holds this mutex while it runs (app/main.py): setup and uninstall ask the user to close it
+; first, instead of leaving files in use behind for a restart. ST25DownloaderRunning is the mutex the
+; 0.5.0 app ("ST25 Downloader") holds. Keep it while [InstallDelete] below still removes 0.5.0's folder:
+; 0.5.0 has no updater, so its users upgrade by running this setup directly, and if the 0.5.0 app were
+; still open its folder could not be deleted.
 AppMutex=OpenEVPRunning,Global\OpenEVPRunning,ST25DownloaderRunning,Global\ST25DownloaderRunning
 
 [Messages]
@@ -71,10 +74,12 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{autopf}\ST25 Downloader"
 Type: files; Name: "{autoprograms}\ST25 Downloader.lnk"
 Type: files; Name: "{autodesktop}\ST25 Downloader.lnk"
+; 0.9.9 and earlier installed the command-line tool as openevp-st25.exe; it is openevp-cli.exe now.
+Type: files; Name: "{app}\command-line\openevp-st25.exe"
 
 [Files]
 Source: "..\dist\OpenEVP\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\dist\openevp-st25.exe"; DestDir: "{app}\command-line"; Flags: ignoreversion
+Source: "..\dist\openevp-cli.exe"; DestDir: "{app}\command-line"; Flags: ignoreversion
 Source: "..\vendor\webview2\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]

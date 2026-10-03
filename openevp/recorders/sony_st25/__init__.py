@@ -1,14 +1,15 @@
-"""Sony ICD-ST25: the recorder interface over the st25 package.
+"""Sony ICD-ST25: the recorder interface over the sony_icd package.
 
 An adapter only: the USB transport, its read-only command policy
-(st25/usb.py, st25/policy.py), the protocol, the folder tables and the .dvf
-container are st25's, unchanged. The session wraps st25.session.RecorderSession
+(sony_icd/usb.py, sony_icd/policy.py), the protocol, the folder tables and the .dvf
+container are sony_icd's, unchanged. The session wraps sony_icd.session.RecorderSession
 privately and never offers a transfer method of its own.
 
 What the app sees:
-- discovery: every ST25 libusb can open (connection id "<port>@<address>", a
-  new one on every replug) plus a NEEDS_DRIVER placeholder ("setup:<Windows
-  instance id>") for each ST25 instance Windows lists without the WinUSB
+- discovery: every recorder on USB id 054C:0103 (an ICD-ST25 or ICD-ST10)
+  libusb can open (connection id "<port>@<address>", a new one on every
+  replug) plus a NEEDS_DRIVER placeholder ("setup:<Windows
+  instance id>") for each such instance Windows lists without the WinUSB
   driver (openevp.pnp.needs_setup: read per instance; counted only if
   Windows cannot say); location = "port <USB port>" ("port 1-4", shown by the
   app as "(port 1-4)" as it always has), "" for a placeholder.
@@ -25,30 +26,30 @@ What the app sees:
   (MODEL_IDS: an ICD-ST10 answers to the same USB id and protocol). Any other
   string is treated as an ST25, as it always was, with a log note.
 
-Errors (st25 -> shared vocabulary, so state_for() gives the app states it has
+Errors (sony_icd -> shared vocabulary, so state_for() gives the app states it has
 always used):
 
-    st25 exception                      raised as        state / session
-    st25.usb.DriverMissing              DriverMissing    needs_driver / kept
-    st25.protocol.RecorderError (incl.  RecorderError    needs_replug / closed
-      RecorderStuck), st25.usb.UsbError,
-      st25.folder.TableError
-    a "setup:" placeholder opened       DriverMissing    needs_driver / kept
-    a call on a closed session          NotReady         needs_replug / closed
-    ValueError (unknown folder/number)  ValueError       unchanged / kept
+    sony_icd exception                      raised as        state / session
+    sony_icd.usb.DriverMissing              DriverMissing    needs_driver / kept
+    sony_icd.protocol.RecorderError (incl.  RecorderError    needs_replug / closed
+      RecorderStuck), sony_icd.usb.UsbError,
+      sony_icd.folder.TableError
+    a "setup:" placeholder opened           DriverMissing    needs_driver / kept
+    a call on a closed session              NotReady         needs_replug / closed
+    ValueError (unknown folder/number)      ValueError       unchanged / kept
 
-Messages are the st25 exception's text unchanged; advice is left to the app.
+Messages are the sony_icd exception's text unchanged; advice is left to the app.
 """
 import logging
 
 from openevp import formats, pnp as _pnp
 from openevp.recorders import base
-from st25 import dvf as _dvf
-from st25.folder import TableError
-from st25.protocol import PID, VID, RecorderError as _St25Error
-from st25.session import LETTERS, RecorderSession
-from st25.usb import DriverMissing as _St25DriverMissing
-from st25.usb import UsbError, list_devices
+from sony_icd import dvf as _dvf
+from sony_icd.folder import TableError
+from sony_icd.protocol import PID, VID, RecorderError as _IcdRecorderError
+from sony_icd.session import LETTERS, RecorderSession
+from sony_icd.usb import DriverMissing as _IcdDriverMissing
+from sony_icd.usb import UsbError, list_devices
 
 SETUP_PREFIX = _pnp.SETUP_PREFIX
 # The identify strings of the recorders this module reads, and the model each is shown as.
@@ -58,10 +59,10 @@ SETUP_MESSAGE = "This recorder's driver is not set up on this PC yet."   # shown
 
 
 def _translated(e):
-    """The shared-vocabulary exception for an st25 one, or None to let it through."""
-    if isinstance(e, _St25DriverMissing):
+    """The shared-vocabulary exception for a sony_icd one, or None to let it through."""
+    if isinstance(e, _IcdDriverMissing):
         return base.DriverMissing(str(e))
-    if isinstance(e, (_St25Error, UsbError, TableError)):
+    if isinstance(e, (_IcdRecorderError, UsbError, TableError)):
         return base.RecorderError(str(e))
     return None
 
@@ -87,9 +88,9 @@ def _recording(m):
             "play_problem": play}
 
 
-class ST25Session(base.Session):
+class SonyIcdSession(base.Session):
     def __init__(self, session):
-        self._session = session         # st25 RecorderSession; private, never handed out
+        self._session = session         # sony_icd RecorderSession; private, never handed out
         self._closed = False
         identity = getattr(session, "model", "")
         if identity not in MODEL_IDS:
@@ -167,5 +168,5 @@ def open_session(model, device):
         raise ValueError(f"{device.connection_id!r} is not a {model.name}")
     if device.connection_id.startswith(SETUP_PREFIX) or device.locator is None:
         raise base.DriverMissing(SETUP_MESSAGE)
-    return ST25Session(_call(RecorderSession.open, device.locator))
+    return SonyIcdSession(_call(RecorderSession.open, device.locator))
 

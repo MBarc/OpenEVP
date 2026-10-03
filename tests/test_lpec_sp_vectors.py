@@ -12,7 +12,7 @@ for the .pcm. No recorded audio.
 - the 1-minute vector's SHA-256 (C core; pure Python only with
   OPENEVP_SLOW_TESTS=1);
 - dvf_to_wav: a 16000 Hz mono WAV of exactly that PCM, the frame count
-  st25.dvf.sp_frames() gives, and never LP decoding of SP data (or the other
+  sony_icd.dvf.sp_frames() gives, and never LP decoding of SP data (or the other
   way round).
 
 Needs the git-ignored table data (openevp/decoders/sony_lpec/data/
@@ -36,7 +36,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import release_gate  # noqa: E402
 import make_test_dvf  # noqa: E402
 from openevp.decoders.sony_lpec import TablesMissing, _core, config, tables  # noqa: E402
-from st25 import dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
 
 VECTORS_DIR = Path(__file__).resolve().parent / "vectors" / "lpec_sp"
 FRAME = 1024

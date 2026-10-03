@@ -5,7 +5,7 @@ blocks) compares OpenEVP's WAV with Sony's own decode of it,
 <DIR>/A_00n_sony_lcstde_44k_stereo.wav (lcstde.ax), byte for byte, where
 <DIR> is the folder OPENEVP_ST10_RECORDINGS names:
 
-- the raw data saved as a .dvf (st25.dvf.build, as a download does) and
+- the raw data saved as a .dvf (sony_icd.dvf.build, as a download does) and
   converted through the app's format (openevp.formats: .dvf, codec 0x24)
   gives Sony's WAV file exactly, header included, on the C core and in pure
   Python;
@@ -28,7 +28,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import release_gate  # noqa: E402
 from openevp import formats, wavinfo  # noqa: E402
 from openevp.decoders.sony_lpec_st import _core, decoder  # noqa: E402
-from st25 import dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
 from test_lpec_st_vectors import HAVE_TABLES, NO_TABLES  # noqa: E402
 
 _ROOT = os.environ.get("OPENEVP_ST10_RECORDINGS", "")

@@ -7,11 +7,11 @@ decode of it next to it, <DIR>/<X>_sony_lpec_sp_16k_mono.wav (LPEC SP) or
 <DIR>/<X>_sony_lpec_lp_8k.wav (LPEC LP), both made by Sony's LPEC.dll
 (InitCodec(rate, bitrate, 0), DVE's loop):
 
-- the raw data saved as a .dvf (st25.dvf.build, as a download does) and
+- the raw data saved as a .dvf (sony_icd.dvf.build, as a download does) and
   converted through the app's format (openevp.formats: .dvf, codec 0x2A or
   0x2C) gives Sony's WAV file exactly, header included, on the C core and in
   pure Python;
-- its length is st25.dvf.sp_seconds() for SP.
+- its length is sony_icd.dvf.sp_seconds() for SP.
 
 Skipped unless OPENEVP_ST10_SP_RECORDINGS names such a folder. Nothing from
 the recordings is copied, written or committed.
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import release_gate  # noqa: E402
 from openevp import formats  # noqa: E402
 from openevp.decoders.sony_lpec import _core, decoder  # noqa: E402
-from st25 import dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
 from test_lpec_sp_vectors import HAVE_TABLES, NO_TABLES  # noqa: E402
 
 _ROOT = os.environ.get("OPENEVP_ST10_SP_RECORDINGS", "")

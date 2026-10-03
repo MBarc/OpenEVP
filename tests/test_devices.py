@@ -12,9 +12,9 @@ from openevp.recorders import base  # noqa: E402
 from openevp.recorders.base import DriverMissing, RecorderError  # noqa: E402
 from openevp.recorders import sony_st25  # noqa: E402
 from openevp.recorders.sony_st25 import SETUP_MESSAGE  # noqa: E402
-from st25.folder import TableError  # noqa: E402
-from st25.protocol import RecorderError as St25RecorderError, RecorderStuck  # noqa: E402
-from st25.usb import DriverMissing as St25DriverMissing, UsbError  # noqa: E402
+from sony_icd.folder import TableError  # noqa: E402
+from sony_icd.protocol import RecorderError as IcdRecorderError, RecorderStuck  # noqa: E402
+from sony_icd.usb import DriverMissing as IcdDriverMissing, UsbError  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 
@@ -41,7 +41,7 @@ class FakeSession:
 
 
 def boom(session):
-    raise RecorderError("data stopped after 0 of 10 bytes")       # e.g. st25's RecorderStuck, translated
+    raise RecorderError("data stopped after 0 of 10 bytes")       # e.g. sony_icd's RecorderStuck, translated
 
 
 class DeviceManagerTests(unittest.TestCase):
@@ -150,9 +150,9 @@ class DeviceManagerTests(unittest.TestCase):
         self.assertEqual(states, {"1-4@7": NEEDS_REPLUG, "2-1@3": READY})
 
 
-class RawSt25Session:
-    """Stands in for st25.session.RecorderSession: messages() raises the next
-    scripted st25 exception, if any."""
+class RawIcdSession:
+    """Stands in for sony_icd.session.RecorderSession: messages() raises the next
+    scripted sony_icd exception, if any."""
 
     def __init__(self, script, device_id):
         self.script, self.device_id, self.closed = script, device_id, False
@@ -175,23 +175,24 @@ def v072_devices():
                                 check=True, text=True, encoding="utf-8").stdout
     except (OSError, subprocess.CalledProcessError):
         return None
+    source = source.replace("from st25.", "from sony_icd.")      # v0.7.2's st25 package is sony_icd now
     module = types.ModuleType("v072_devices")
     exec(compile(source, "v0.7.2:app/devices.py", "exec"), module.__dict__)
     return module
 
 
-# The ST25's connection errors, each raised on two requests in a row and then not.
-ST25_FAILURES = [St25RecorderError("the recorder answered 0x05"), RecorderStuck("data stopped after 0 of 10 bytes"),
+# The sony_icd connection errors, each raised on two requests in a row and then not.
+ICD_FAILURES = [IcdRecorderError("the recorder answered 0x05"), RecorderStuck("data stopped after 0 of 10 bytes"),
                  UsbError("LIBUSB_ERROR_IO"), TableError("folder table too short")]
 
 
-def st25_trace(make_manager, request, failure):
-    """What the user sees for one ST25 connection when two requests fail with
+def connection_trace(make_manager, request, failure):
+    """What the user sees for one recorder connection when two requests fail with
     failure and a third works: [(step, what)] with list states, errors and opens."""
     script, opened = [failure, failure], []
 
     def raw_open(device_id):
-        s = RawSt25Session(script, device_id)
+        s = RawIcdSession(script, device_id)
         opened.append(s)
         return s
     manager = make_manager(raw_open)
@@ -203,7 +204,7 @@ def st25_trace(make_manager, request, failure):
         for _ in range(3):
             try:
                 trace.append(("ok", request(manager)))
-            except Exception as e:          # the type differs (st25's vs the shared one); the text must not
+            except Exception as e:          # the type differs (sony_icd's vs the shared one); the text must not
                 trace.append(("error", str(e), [s.closed for s in opened]))
             trace.append(("list", listed(), len(opened)))
     finally:
@@ -212,8 +213,8 @@ def st25_trace(make_manager, request, failure):
 
 
 def new_manager(raw_open):
-    """Today's manager with the real ST25 adapter (SonyST25.open, ST25Session)
-    over RawSt25Session."""
+    """Today's manager with the real ST25 adapter (SonyST25.open, SonyIcdSession)
+    over RawIcdSession."""
     patcher = mock.patch.object(sony_st25.RecorderSession, "open", side_effect=raw_open)
 
     def open_device(model, device):
@@ -227,7 +228,7 @@ def old_manager(module):
 
 
 class St25KeepsV072BehaviourTests(unittest.TestCase):
-    """R10: after an ST25 RecorderError/UsbError/TableError the session is
+    """R10: after a sony_icd RecorderError/UsbError/TableError the session is
     closed and the recorder listed as needing a replug, but the next request
     opens a new session (and success lists it READY again), exactly as v0.7.2.
     Only base.NotReady latches (test_app_recorders)."""
@@ -241,9 +242,9 @@ class St25KeepsV072BehaviourTests(unittest.TestCase):
                 ("ok", 0), ("list", [("1-4@7", READY, "")], 3)]
 
     def test_the_st25_adapter_retries_as_v072_did(self):
-        for failure in ST25_FAILURES:
+        for failure in ICD_FAILURES:
             with self.subTest(failure=type(failure).__name__):
-                trace = st25_trace(new_manager, lambda m: len(m.with_session("1-4@7", lambda s: s.recordings("A"))),
+                trace = connection_trace(new_manager, lambda m: len(m.with_session("1-4@7", lambda s: s.recordings("A"))),
                                    failure)
                 self.assertEqual(trace, self.expected(failure))
 
@@ -251,14 +252,14 @@ class St25KeepsV072BehaviourTests(unittest.TestCase):
         module = v072_devices()
         if module is None:
             self.skipTest("no git history with the v0.7.2 tag (e.g. a source export)")
-        for failure in ST25_FAILURES + [St25DriverMissing("not bound to WinUSB")]:
+        for failure in ICD_FAILURES + [IcdDriverMissing("not bound to WinUSB")]:
             with self.subTest(failure=type(failure).__name__):
-                old = st25_trace(old_manager(module), lambda m: len(m.with_session("1-4@7", lambda s: s.messages("A"))),
+                old = connection_trace(old_manager(module), lambda m: len(m.with_session("1-4@7", lambda s: s.messages("A"))),
                                  failure)
-                new = st25_trace(new_manager, lambda m: len(m.with_session("1-4@7", lambda s: s.recordings("A"))),
+                new = connection_trace(new_manager, lambda m: len(m.with_session("1-4@7", lambda s: s.recordings("A"))),
                                  failure)
                 self.assertEqual(new, old)
-                if not isinstance(failure, St25DriverMissing):
+                if not isinstance(failure, IcdDriverMissing):
                     self.assertEqual(old, self.expected(failure))
 
 

@@ -5,9 +5,9 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import policy  # noqa: E402
-from st25.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE  # noqa: E402
-from st25.protocol import CMD_FOLDER_INFO, _completion_opcode  # noqa: E402
+from sony_icd import policy  # noqa: E402
+from sony_icd.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE  # noqa: E402
+from sony_icd.protocol import CMD_FOLDER_INFO, _completion_opcode  # noqa: E402
 
 DATE = bytes.fromhex("07ed051713360403")   # 2029-05-23 19:54:04, Wednesday
 
@@ -197,12 +197,12 @@ class FakeRecorderDevice:
 def st25_manager(ids, open_session, **kwargs):
     """An app.devices.DeviceManager over emulated ICD-ST25s: ids() gives the
     connection ids attached now ("<port>@<address>", or "setup:<instance>" for
-    one whose driver is not set up), open_session(id) an st25 RecorderSession
+    one whose driver is not set up), open_session(id) a sony_icd RecorderSession
     for one; the app uses it through the ST25 model's adapter, as it uses a
     real one (discovered and opened like openevp.recorders.sony_st25 does)."""
     from app.devices import DeviceManager
     from openevp.recorders import base
-    from openevp.recorders.sony_st25 import SETUP_MESSAGE, SETUP_PREFIX, ST25Session, SonyST25
+    from openevp.recorders.sony_st25 import SETUP_MESSAGE, SETUP_PREFIX, SonyIcdSession, SonyST25
 
     def discover():
         found = []
@@ -214,7 +214,7 @@ def st25_manager(ids, open_session, **kwargs):
                 found.append(base.DiscoveredDevice(i, SonyST25.model_id, "port " + i.split("@")[0], locator=i,
                                                    where="on USB port " + i.split("@")[0]))
         return found, []
-    return DeviceManager(discover, lambda model, device: ST25Session(open_session(device.locator)), **kwargs)
+    return DeviceManager(discover, lambda model, device: SonyIcdSession(open_session(device.locator)), **kwargs)
 
 
 def made_wav(make=None, write=None):

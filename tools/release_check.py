@@ -7,12 +7,12 @@ Automated (exits non-zero if any fails):
      decoder's golden tests must run, not skip (tables + C core present and
      intact), and no ResourceWarning may appear; reports how many decoder
      tests ran;
-  2. the built command-line tool (dist\\openevp-st25.exe): --version, and
+  2. the built command-line tool (dist\\openevp-cli.exe): --version, and
      --check-wav on the 10-minute test vector, the 1-minute LPEC SP vector and a
      synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
-  3. the built app (dist\\OpenEVP\\): every module of app/ and openevp/ is frozen
-     into it, and both decoders' tables (LPEC LP, SP and ST) and DLLs, the MP3 decoder's
-     DLL (mp3_core.dll, minimp3), libusb, the icon and the driver
+  3. the built app (dist\\OpenEVP\\): every module of app/, openevp/ and sony_icd/
+     (but the CLI-only ones) is frozen into it, and both decoders' tables (LPEC LP, SP
+     and ST) and DLLs, the MP3 decoder's DLL (mp3_core.dll, minimp3), libusb, the icon and the driver
      files (with the manifest) are bundled, identical to the sources, and so is
      the MP3 encoder (lameenc's extension module); so is every
      file of the UI (app/ui/ in the source tree: index.html, app.js, style.css,
@@ -36,7 +36,9 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(REPO, "tests")
 DIST = os.path.join(REPO, "dist")
-CLI = os.path.join(DIST, "openevp-st25.exe")
+CLI = os.path.join(DIST, "openevp-cli.exe")
+CLI_MODULE = "sony_icd.cli"                 # the command-line tool's code: never in the app
+CLI_ONLY = {CLI_MODULE, "sony_icd.export"}   # sony_icd modules only the CLI uses (the app saves via openevp.export)
 APP_DIR = os.path.join(DIST, "OpenEVP")
 APP_EXE = os.path.join(APP_DIR, "OpenEVP.exe")
 INTERNAL = os.path.join(APP_DIR, "_internal")
@@ -76,7 +78,7 @@ Real Sony ICD-ST25 (and ICD-ST10), in the built app (dist\\OpenEVP\\OpenEVP.exe)
   [ ] Export .dvf and WAV: files and names as before; running it again skips them.
   [ ] Mark a recording: the backup is saved (.dvf + WAV with the marks); unplug/replug keeps the marks.
   [ ] Library: the exported files are listed with their marks; play one, export marked.
-Command-line tool (dist\\openevp-st25.exe): --list, then a download with --wav.
+Command-line tool (dist\\openevp-cli.exe): --list, then a download with --wav.
 
 Driver (a test PC or VM):
   [ ] Fresh install of the new setup: the WinUSB driver installs; the recorder is found.
@@ -235,7 +237,7 @@ def st10_test_file():
     sys.path.insert(0, REPO)
     sys.path.insert(0, TESTS)
     from fixtures import make_st_raw, st_audio_frames
-    from st25 import dvf
+    from sony_icd import dvf
     return dvf.build(make_st_raw(st_audio_frames()), b"\xff" * 8, "", mode=dvf.MODE_ST)
 
 
@@ -282,7 +284,7 @@ BUNDLED = (   # (file in _internal, its source)
     ("openevp/decoders/sony_lpec_st/lpec_st_core.dll", "openevp/decoders/sony_lpec_st/lpec_st_core.dll"),
     ("openevp/decoders/mp3/mp3_core.dll", "openevp/decoders/mp3/mp3_core.dll"),
     ("libusb-1.0.dll", "vendor/libusb-1.0.30/libusb-1.0.dll"),
-    ("assets/st25.ico", "assets/st25.ico"),
+    ("assets/openevp.ico", "assets/openevp.ico"),
     ("driver/install-winusb.ps1", "app/driver/install-winusb.ps1"),
     ("driver/uninstall-winusb.ps1", "app/driver/uninstall-winusb.ps1"),
     ("driver/manifest.ps1", "app/driver/manifest.ps1"),
@@ -350,13 +352,13 @@ def check_app():
         modules = frozen_modules(APP_EXE)
     except Exception as e:
         return [f"could not read the frozen modules of {APP_EXE}: {e}"]
-    want = _source_modules("app") | _source_modules("openevp")
+    want = _source_modules("app") | _source_modules("openevp") | (_source_modules("sony_icd") - CLI_ONLY)
     missing = sorted(want - modules)
-    print(f"   {len(want - set(missing))}/{len(want)} modules of app/ and openevp/ frozen in")
+    print(f"   {len(want - set(missing))}/{len(want)} modules of app/, openevp/ and sony_icd/ frozen in")
     if missing:
         problems.append("modules not frozen into the app: " + ", ".join(missing))
-    if "st25.cli" in modules:
-        problems.append("the app bundles st25.cli (the app must never import the CLI)")
+    if CLI_MODULE in modules:
+        problems.append(f"the app bundles {CLI_MODULE} (the app must never import the CLI)")
     for bundled, source in BUNDLED:
         path = os.path.join(INTERNAL, *bundled.split("/"))
         src = os.path.join(REPO, *source.split("/"))

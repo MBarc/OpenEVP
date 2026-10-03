@@ -12,9 +12,19 @@ decode a whole file just to draw it.
 prepare_file() does the same for a WAV file the user picked (for example from a
 recorder that writes WAV itself): it is served from where it is, never copied or
 deleted, and only files registered this way can be reached. The file's size and
-modification time are recorded when it is fingerprinted; if either differs when
-the player asks for audio, the request is refused (409), so the player never gets
-different audio under a handle whose marks belong to the fingerprinted audio.
+modification time are recorded when it is fingerprinted, and which file it is
+(its volume serial number and file id, kept across renames and moves); if any of
+them differs when the player asks for audio, the request is refused (409), so
+the player never gets different audio under a handle whose marks belong to the
+fingerprinted audio -- nor another file put at that path, or reached through a
+folder swapped for a junction since it was loaded, even with the same size and
+time. (The file is reopened by path for each request rather than held open for
+as long as it is loaded: an open file, even one shared for deleting, stops
+Windows renaming, moving or recycling the folder it is in, and the library does
+those with a recording loaded.) A file whose file system gives no usable
+identity (FAT/exFAT USB sticks, some network shares) is not served in place at
+all: a private copy of it goes into the cache at load time, like a decode, and
+that copy is served (within the same budget and eviction rules).
 The file is not copied to snapshot it: WAVs can be gigabytes. Files are opened
 so that they can still be moved, renamed or recycled while they are being read
 (Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
@@ -33,6 +43,7 @@ import hashlib
 import os
 import re
 import secrets
+import shutil
 import sys
 import threading
 import wave
@@ -148,13 +159,29 @@ def _stat_of(st):
     return st.st_size, st.st_mtime_ns
 
 
+def _ident_of(st):
+    """(volume serial number, file id) of an open file: which file it is, the
+    same across renames and moves on its volume. None where the file system
+    gives no usable one (no file id or no volume serial number)."""
+    return (st.st_dev, st.st_ino) if st.st_ino and st.st_dev else None
+
+
+def _not_as_loaded(e, st):
+    """Is the open file (os.fstat st) not the one a served-in-place entry was
+    loaded from: another version of it, or another file altogether?"""
+    if "stat" in e and _stat_of(st) != e["stat"]:
+        return True
+    return e.get("ident") is not None and _ident_of(st) != e["ident"]
+
+
 # The decoded-WAV cache's budget on disk. The longest ICD-ST10 recording (its
 # 32 MB of flash, about 92 minutes of 44.1 kHz stereo) decodes to about 930 MB,
 # so this holds two of those, or many hours of ICD-ST25 audio (8 kHz mono). The
 # entry just prepared is always kept, so the cache can exceed the budget by at
 # most that one file; older entries are evicted first.
 CACHE_BYTES = 2 << 30
-CACHE_PREFIX = "st25-audio-"           # the app's cache folder in the temp folder: <prefix><random>
+CACHE_PREFIX = "openevp-audio-"        # the app's cache folder in the temp folder: <prefix><random>
+OLD_CACHE_PREFIXES = ("st25-audio-",)  # 0.9.9 and earlier: their leftovers are cleaned up too
 
 
 IN_USE = ".in-use"                     # held open by the app that owns a cache folder
@@ -169,8 +196,9 @@ def hold_cache(folder):
 
 
 def clean_stale_caches(parent, keep=None):
-    """Delete cache folders (CACHE_PREFIX*) that earlier runs left in ``parent``
-    (the temp folder) after a crash or a power cut: they can hold gigabytes of
+    """Delete cache folders (CACHE_PREFIX*, or an OLD_CACHE_PREFIXES one) that
+    earlier runs left in ``parent`` (the temp folder) after a crash or a power
+    cut: they can hold gigabytes of
     decoded audio. Two OpenEVP windows can run at once, so a folder whose
     IN_USE file cannot be deleted (another running app holds it open) is kept,
     and so is one without it that is younger than STALE_AFTER (an app just
@@ -184,7 +212,7 @@ def clean_stale_caches(parent, keep=None):
         return removed
     for name in names:
         path = os.path.join(parent, name)
-        if not name.startswith(CACHE_PREFIX) or (keep and os.path.normcase(path) == os.path.normcase(keep)):
+        if not name.startswith((CACHE_PREFIX,) + OLD_CACHE_PREFIXES) or (keep and os.path.normcase(path) == os.path.normcase(keep)):
             continue
         if not os.path.isdir(path) or os.path.islink(path):
             continue
@@ -346,8 +374,11 @@ class AudioServer:
         WAV, or that changed while it was being read."""
         path = os.path.abspath(path)
         with _open_shared(path) as f:
-            stat = _stat_of(os.fstat(f.fileno()))
-            key = ("file", os.path.normcase(path), *stat)
+            st = os.fstat(f.fileno())
+            stat, ident = _stat_of(st), _ident_of(st)
+            if ident is None:
+                return self._prepare_copy(path, f, stat)
+            key = ("file", os.path.normcase(path), *stat, ident)
             with self._lock:
                 e = self._entries.get(key)
                 if e is not None:
@@ -355,16 +386,36 @@ class AudioServer:
                     return {**self._info(e), "stat": e["stat"]}
             peaks, duration, rate, fp = _analyze(f)
             channels = _channels(f)
-            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
+            now = os.stat(path)
+            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(now) != stat or (
+                    ident is not None and _ident_of(now) != ident):
                 raise ValueError("the file changed while it was being read; try again")
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "channels": channels, "fp": fp, "path": path, "stat": stat}
+                                  "channels": channels, "fp": fp, "path": path, "stat": stat, "ident": ident}
             self._by_file[file_id] = key
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
+
+    def _prepare_copy(self, path, f, stat):
+        """prepare_file() for a file with no usable identity (f: it, open; stat:
+        its (size, mtime_ns)): a private copy of it in the cache, made from the
+        open file and served like a decode, so nothing put at its path later can
+        be served in its place. ValueError when it changed while being copied.
+        Every load makes a copy of its own (a fresh key): with no identity, the
+        same path, size and time say nothing about the audio, so an earlier copy
+        is never reused. Earlier copies are not dropped here (two loads of one
+        path at once would each drop the other's): they go by the cache's usual
+        eviction, oldest first and never a pinned one, or with forget_files()."""
+        def write(out):
+            f.seek(0)
+            shutil.copyfileobj(f, out, 1 << 20)
+            if _stat_of(os.fstat(f.fileno())) != stat:
+                raise ValueError("the file changed while it was being read; try again")
+        key = ("copy", os.path.normcase(path), *stat, secrets.token_hex(8))
+        return {**self.prepare(key, write=write, expected=stat[0]), "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
@@ -424,7 +475,7 @@ class AudioServer:
         (ValueError), as the player's requests are."""
         path, e = self._file_of(url)
         f = _open_shared(path)
-        if "stat" in e and _stat_of(os.fstat(f.fileno())) != e["stat"]:
+        if _not_as_loaded(e, os.fstat(f.fileno())):
             f.close()
             raise ValueError("the file changed on disk: load it again")
         return f
@@ -560,7 +611,7 @@ class AudioServer:
             return
         with f:
             st = os.fstat(f.fileno())
-            if "stat" in entry and _stat_of(st) != entry["stat"]:
+            if _not_as_loaded(entry, st):
                 # Not the audio that was fingerprinted (and marked): the page must load it again.
                 h.send_error(409, "The file changed on disk")
                 return

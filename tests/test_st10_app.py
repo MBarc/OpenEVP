@@ -22,10 +22,10 @@ from test_st10_model import FRAMES, ST_MISSING, st10_folders, st_estimate, witho
 from app import backend  # noqa: E402
 from fixtures import FakeRecorderDevice  # noqa: E402
 from openevp import formats, wavinfo  # noqa: E402
-from openevp.recorders.sony_st25 import ST25Session  # noqa: E402
-from st25 import dvf  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 ID = "1-4@7"
 UNDATED = b"\xff" * 8
@@ -63,7 +63,7 @@ class St10Base(AppTestBase):
         r.dev = FakeRecorderDevice(folders, voice=voice, identify=self.identify)
         s = RecorderSession(r)
         s.connect()
-        return ST25Session(s)
+        return SonyIcdSession(s)
 
 
 @release_gate.require(HAVE_ST, NO_ST_TABLES)

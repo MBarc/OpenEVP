@@ -5,8 +5,9 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, make_raw  # noqa: E402
-from st25 import dvf  # noqa: E402
-from st25.export import publish, save_dvf, save_wav  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from openevp.export import publish, save_wav  # noqa: E402
+from sony_icd.export import save_dvf  # noqa: E402
 
 
 class ExportTests(unittest.TestCase):

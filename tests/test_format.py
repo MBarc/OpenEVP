@@ -13,10 +13,11 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import dvf  # noqa: E402
-from st25.export import publish, target_path  # noqa: E402
-from st25.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE, TableError, parse  # noqa: E402
-from st25.protocol import (BLOCK_RAW, CMD_FOLDER_INFO, CMD_READ_BLOCK,  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from openevp.export import publish  # noqa: E402
+from sony_icd.export import target_path  # noqa: E402
+from sony_icd.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE, TableError, parse  # noqa: E402
+from sony_icd.protocol import (BLOCK_RAW, CMD_FOLDER_INFO, CMD_READ_BLOCK,  # noqa: E402
                            _args_ok, _completion_opcode)
 from fixtures import DATE, FakeRecorderDevice, make_raw, make_table  # noqa: E402
 
@@ -188,7 +189,7 @@ class AllowListTests(unittest.TestCase):
         self.assertFalse(_args_ok([0xDEADBEEF, 0, 0]))
 
     def test_get_voice_takes_folders_1_to_5_only(self):
-        from st25 import policy
+        from sony_icd import policy
         args = [5 << 16, 1, 3, 3 * BLOCK_RAW]
         for folder in range(1, 6):
             op = 0x11FF0000 | folder
@@ -211,7 +212,7 @@ class AllowListTests(unittest.TestCase):
 
     def test_folder_a_get_voice_frame_is_byte_identical(self):
         # Pinned: the exact frame Digital Voice Editor (and OpenEVP <= 0.8.2) sends for folder A.
-        from st25.protocol import Recorder
+        from sony_icd.protocol import Recorder
         sent = []
         r = Recorder.__new__(Recorder)
         r.dev = FakeRecorderDevice({1: [(0, 100, 0x1000, 2958, DATE, "X"), (1, 900, 0x3000, 4000, DATE, "X")]})
@@ -223,7 +224,7 @@ class AllowListTests(unittest.TestCase):
 
     def test_bad_size_rejected_before_allocation(self):
         from unittest import mock
-        from st25.protocol import Recorder, RecorderError
+        from sony_icd.protocol import Recorder, RecorderError
         r = Recorder.__new__(Recorder)          # no USB device needed
         r.dev = mock.Mock()
         with mock.patch("builtins.bytearray", side_effect=AssertionError("allocated")):
@@ -240,7 +241,7 @@ class AllowListTests(unittest.TestCase):
     def _guarded_device(self):
         import ctypes
         from unittest import mock
-        from st25.usb import Device
+        from sony_icd.usb import Device
         d = Device.__new__(Device)               # no real USB device; policy is fixed in usb.py
         d._lib = mock.Mock()
         d._lib.libusb_control_transfer.side_effect = lambda h, rt, rq, v, i, buf, n, t: n
@@ -252,8 +253,8 @@ class AllowListTests(unittest.TestCase):
         return d
 
     def test_usb_layer_blocks_everything_but_dve_frames(self):
-        from st25 import protocol
-        from st25.usb import UsbError
+        from sony_icd import protocol
+        from sony_icd.usb import UsbError
         d = self._guarded_device()
         good = protocol.FRAME_PREFIX + struct.pack(">III", protocol.CMD_DEVICE_INFO, 0, 0)
         bad_frames = [
@@ -347,7 +348,7 @@ class PublishTests(unittest.TestCase):
 
 class RawTests(unittest.TestCase):
     def test_raw_reuses_identical_and_never_overwrites(self):
-        from st25.export import save_raw
+        from openevp.export import save_raw
         with tempfile.TemporaryDirectory() as d:
             p1 = save_raw(b"one", d, "a")
             self.assertEqual(p1, os.path.join(d, "a.raw"))
@@ -359,7 +360,7 @@ class RawTests(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(d)), ["a (2).raw", "a.raw"])
 
     def test_raw_gap_and_many_names(self):
-        from st25.export import save_raw
+        from openevp.export import save_raw
         with tempfile.TemporaryDirectory() as d:
             publish(b"other", os.path.join(d, "a.raw"))
             publish(b"mine", os.path.join(d, "a (3).raw"))           # "(2)" deleted
@@ -377,7 +378,7 @@ class ErrorReportTests(unittest.TestCase):
         import contextlib
         import io
         from unittest import mock
-        from st25 import cli
+        from sony_icd import cli
 
         def fake_run(args, pr):
             pr.saved, pr.skipped, pr.out_root = 3, 2, "OUT"
@@ -391,7 +392,7 @@ class ErrorReportTests(unittest.TestCase):
         return buf.getvalue()
 
     def test_fatal_error_reports_progress_and_recording(self):
-        from st25.protocol import RecorderStuck
+        from sony_icd.protocol import RecorderStuck
         out = self._main_output(RecorderStuck("data stopped"))
         self.assertIn("ERROR at recording A-006: data stopped", out)
         self.assertIn("Unplug its USB cable", out)
@@ -410,7 +411,7 @@ class ErrorReportTests(unittest.TestCase):
 class DesktopTests(unittest.TestCase):
     def test_fallback_is_announced_and_real(self):
         from unittest import mock
-        from st25 import cli
+        from sony_icd import cli
         with tempfile.TemporaryDirectory() as home, \
                 mock.patch.object(cli.sys, "platform", "linux"), \
                 mock.patch.object(cli.os.path, "expanduser", lambda p: home):
@@ -430,7 +431,7 @@ class BulkStallTests(unittest.TestCase):
 
     def _run(self, reads):
         from unittest import mock
-        from st25 import protocol
+        from sony_icd import protocol
         dev = FakeRecorderDevice()
         script = list(reads)
         clock = [0.0]
@@ -481,7 +482,7 @@ class ToolTests(unittest.TestCase):
     def test_probe_runs_against_current_api(self):
         import contextlib
         import io
-        from st25.protocol import Recorder
+        from sony_icd.protocol import Recorder
         sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
         import probe
         r = Recorder.__new__(Recorder)

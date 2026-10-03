@@ -1,4 +1,4 @@
-"""The fixed USB traffic policy for the ICD-ST25, enforced inside usb.Device.
+"""The fixed USB traffic policy for the Sony ICD-ST recorders, enforced inside usb.Device.
 
 It lives in its own module (not supplied by callers) so that no code path -
 including direct use of usb.Device - can send the recorder anything except the

@@ -9,7 +9,7 @@ This package is importable without the extracted table data: only calling
 into the decoder needs it. `dvf_to_wav` raises `TablesMissing` (from
 `openevp.decoders.sony_lpec.tables.load()`) when the recording's data file
 (`openevp/decoders/sony_lpec/data/lpec_tables.json` for LP,
-`lpec_sp_tables.json` for SP) is absent. `st25/audio.py` calls `check()`
+`lpec_sp_tables.json` for SP) is absent. `sony_icd/audio.py` calls `check()`
 (with the codec) to detect that up front, so `capabilities()["wav_status"]`
 (and anything gated on `audio.available()`) reports "could not be loaded"
 immediately instead of only on the first export or playback attempt.
@@ -28,10 +28,10 @@ __all__ = ["Cancelled", "LP", "SP", "TablesInvalid", "TablesMissing", "dvf_to_wa
 def check(codec=None) -> None:
     """Raise TablesMissing if the extracted table data is not present.
 
-    ``codec`` is the .dvf codec byte whose configuration is meant (st25.dvf:
+    ``codec`` is the .dvf codec byte whose configuration is meant (sony_icd.dvf:
     CODEC_LP, the default, or CODEC_SP). Does not decode anything; it only
     loads and validates the table data, the same way the first call to
-    dvf_to_wav would. Called by st25/audio.py so unavailability surfaces
+    dvf_to_wav would. Called by sony_icd/audio.py so unavailability surfaces
     right away.
     """
     _tables.load(config=CONFIGS.get(codec, LP))

@@ -9,7 +9,7 @@ tools/build_lpec_core.py) that gives the same output about 15x faster.
 This package is importable without the extracted table data: only calling
 into the decoder needs it. ``dvf_to_wav`` raises ``TablesMissing`` (from
 ``tables.load()``) when ``openevp/decoders/sony_lpec_st/data/lpec_st_tables.json``
-is absent. st25/audio.py calls ``check()`` to detect that up front, so an
+is absent. sony_icd/audio.py calls ``check()`` to detect that up front, so an
 ICD-ST10 recording is reported as "can't be played" with the reason instead
 of failing on the first playback.
 

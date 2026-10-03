@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import audio  # noqa: E402
+from sony_icd import audio  # noqa: E402
 
 
 class AudioTests(unittest.TestCase):
@@ -107,8 +107,8 @@ class AudioTests(unittest.TestCase):
 
 
 def st10_header():
-    """The first bytes of an ICD-ST10 .dvf: enough for st25.dvf.codec() (0x24)."""
-    from st25 import dvf
+    """The first bytes of an ICD-ST10 .dvf: enough for sony_icd.dvf.codec() (0x24)."""
+    from sony_icd import dvf
     h = bytearray(dvf._TEMPLATES[dvf.MODE_ST])
     return bytes(h)
 

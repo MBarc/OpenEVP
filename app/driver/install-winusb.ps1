@@ -1,5 +1,5 @@
-# Bind the recorders that need it (the Sony ICD-ST25, USB 054C:0103, today) to Windows'
-# built-in WinUSB driver.
+# Bind the recorders that need it (today USB 054C:0103: the Sony ICD-ST25, and the
+# ICD-ST10, which shares its USB id) to Windows' built-in WinUSB driver.
 #
 # Which recorders: models.json next to this script, the driver manifest written at build
 # time from the recorder registry (tools/make_driver_manifest.py): the models, their USB
@@ -51,7 +51,7 @@ $log = Join-Path $logDir "setup.log"
 function Log($msg) {
     try { Add-Content -Path $log -Value ("{0:HH:mm:ss} {1}" -f (Get-Date), $msg) } catch { }
 }
-Set-Content -Path $log -Value "ST25 WinUSB setup"
+Set-Content -Path $log -Value "OpenEVP WinUSB setup"
 
 # 0 = installed; 259 = added, no matching device present yet; 3010 = restart needed
 $okCodes = 0, 259, 3010
@@ -92,7 +92,7 @@ try {
     }
 
     if (-not $installed) {
-        $pkg = Join-Path $env:SystemRoot ("Temp\st25-driver-" + [guid]::NewGuid().ToString("N"))
+        $pkg = Join-Path $env:SystemRoot ("Temp\openevp-driver-" + [guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory $pkg | Out-Null
         & $icacls $pkg /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "could not restrict access to $pkg" }

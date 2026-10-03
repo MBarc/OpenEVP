@@ -6,7 +6,7 @@ any other way. The registry is static: there is no plugin loading.
 
 The full contract is the docstring of [`base.py`](base.py). This page is the
 checklist. The Sony ICD-ST25 ([`sony_st25/`](sony_st25/__init__.py), over the
-`st25` package) is the worked example, and `tests/fakes/fake_models.py` has two
+`sony_icd` package) is the worked example, and `tests/fakes/fake_models.py` has two
 small fake models that are not the ST25.
 
 ## 1. The model
@@ -83,7 +83,7 @@ Nothing on a recorder may ever be changed or deleted. Each model enforces its
 own deny-by-default allowlist of the exact commands it needs to list and
 download recordings, and it enforces it inside its transport. The caller does
 not supply the policy, and there is no unchecked transfer method. The ST25's
-is `st25/policy.py`, checked on every transfer by `st25/usb.py`'s `Device`.
+is `sony_icd/policy.py`, checked on every transfer by `sony_icd/usb.py`'s `Device`.
 The framework never sends raw commands.
 
 Expected in review:
@@ -102,7 +102,7 @@ format supplies:
 
 - `ext`: lowercase, e.g. `".dvf"`;
 - `same(existing, new)`: whether an existing file already holds this
-  recording (the ST25 compares the audio without its block counters). Saving
+  recording (a .dvf compares the audio without its block counters). Saving
   never overwrites: a different file gets a numbered name;
 - `seconds(path)`: its length, or `None`;
 - `decoder` (optional): `available()`, `reason()`, `warning()`,

@@ -44,7 +44,7 @@ def _recycler(get_window):
 def _icon():
     """The app icon: bundled in the app folder when frozen, in assets/ when run from source."""
     base = getattr(sys, "_MEIPASS", None) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    path = os.path.join(base, "assets", "st25.ico")
+    path = os.path.join(base, "assets", "openevp.ico")
     return path if os.path.isfile(path) else None
 
 
@@ -125,10 +125,14 @@ def _open_store():
         return None, [f"EVP marks are off: OpenEVP could not open its data ({type(e).__name__}: {e})."]
 
 
-def _close_question(exporting, backing_up, saving_marked=False, clips_running=False):
+def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False):
     """(title, text) for the close prompt while work is still running, or None."""
     backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
               "a backup that did not finish is shown as failed and can be retried later.")
+    if changing_files:
+        text = ("Files in the library are still being renamed, moved or deleted. "
+                "OpenEVP closes once that is finished. Close?")
+        return "Library files in use", f"{backup} {text}" if backing_up else text
     if clips_running:
         text = "Clips are still being exported. Stop after the current recording and close?"
         return "Export in progress", f"{backup} {text}" if backing_up else text
@@ -294,7 +298,7 @@ def _smoke_decoders(report):
     """Record whether each Sony decoder loads (tables, fast C core); a problem when
     one is unavailable or would run in slow mode. The LPEC ST decoder also decodes
     a few frames, so its C core is initialised from the bundled tables."""
-    from st25 import audio
+    from sony_icd import audio
     decoders = report["decoders"] = {}
     for name, codec, what in SMOKE_DECODERS:
         ok, status = audio.available(codec), audio.status(codec)
@@ -451,7 +455,7 @@ def _run_app(smoke=None):
                     api.request_stop()
                 return proceed
             question = _close_question(api.exporting(), api.backing_up(), api.saving_marked(),
-                                       api.clips_running())
+                                       api.clips_running(), api.changing_files())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
                 if proceed:

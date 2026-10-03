@@ -14,10 +14,10 @@ from recorder_contract import RecorderContract  # noqa: E402
 from app.devices import READY, DeviceManager  # noqa: E402
 from openevp import formats, recorders  # noqa: E402
 from openevp.recorders import base  # noqa: E402
-from openevp.recorders.sony_st25 import ST25Session, SonyST25  # noqa: E402
-from st25 import dvf  # noqa: E402
-from st25.protocol import PID, VID, Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from openevp.recorders.sony_st25 import SonyIcdSession, SonyST25  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from sony_icd.protocol import PID, VID, Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 PORT_ID = "1-4@7"
 UNDATED = b"\xff" * 8
@@ -33,7 +33,7 @@ def without_st_decoder():
 
 
 def st_estimate(frames):
-    """The listed length: every whole frame but the first (st25.dvf.seconds)."""
+    """The listed length: every whole frame but the first (sony_icd.dvf.seconds)."""
     return round((len(frames) // ST_FRAME - 1) * 2048 / 44100, 1)
 
 
@@ -58,7 +58,7 @@ def st10_session():
     r.dev = st10_device()
     s = RecorderSession(r)
     s.connect()
-    return ST25Session(s)
+    return SonyIcdSession(s)
 
 
 class ST10Contract(RecorderContract, unittest.TestCase):
@@ -76,7 +76,7 @@ class ST10Contract(RecorderContract, unittest.TestCase):
         def device(vid, pid, device_id):
             assert (vid, pid, device_id) == (VID, PID, PORT_ID)
             return st10_device()
-        patcher = mock.patch("st25.protocol.Device", device)
+        patcher = mock.patch("sony_icd.protocol.Device", device)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -122,7 +122,7 @@ class ModelTests(unittest.TestCase):
                 r.dev = FakeRecorderDevice({1: [(0, 100, 0x1000, 2958, DATE, "Casey")]}, identify=identify)
                 s = RecorderSession(r)
                 s.connect()
-                session = ST25Session(s)
+                session = SonyIcdSession(s)
                 self.assertEqual(session.model_id, "sony-icd-st25")
                 self.assertEqual(session.download("A", 1).error, "")
 
@@ -131,7 +131,7 @@ class ModelTests(unittest.TestCase):
         r.dev = FakeRecorderDevice({1: [(0, 1, 0x1000, 3000, DATE, "X", 0x33)]}, identify="ICD-ST10")
         s = RecorderSession(r)
         s.connect()
-        [row] = ST25Session(s).recordings("A")
+        [row] = SonyIcdSession(s).recordings("A")
         self.assertIsNone(row["seconds"])
         self.assertIn("0x33", row["problem"])
 

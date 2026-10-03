@@ -75,10 +75,10 @@ compared yet.
 
 ## Read-only by design
 
-Nothing on a recorder is changed or deleted. For the ICD-ST25 the program can
-only send the exact read commands DVE itself sends to list and download
-recordings. Opcode, frame length and arguments are all checked in
-`st25/policy.py`.
+Nothing on a recorder is changed or deleted. For the Sony recorders (ICD-ST25,
+ICD-ST10) the program can only send the exact read commands DVE itself sends
+to list and download recordings. Opcode, frame length and arguments are all checked in
+`sony_icd/policy.py`.
 
 ## Driver setup
 
@@ -101,11 +101,13 @@ package and that certificate, which puts the PC back as it was.
 
 ## Command-line tool
 
-The ICD-ST25 command-line tool is installed with the app, as
-`command-line\openevp-st25.exe` in the install folder:
+The command-line tool for the Sony recorders (ICD-ST25, ICD-ST10) is installed
+with the app, as `command-line\openevp-cli.exe` in the install folder. Up to
+version 0.9.9 it was called `openevp-st25.exe`; scripts that call it need the
+new name:
 
 ```
-openevp-st25.exe [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav] [--open]
+openevp-cli.exe [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav] [--open]
 ```
 
 - `--wav` also writes a `.wav` beside each `.dvf` (and fills in a missing
@@ -114,12 +116,12 @@ openevp-st25.exe [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav] [--open
 - `--raw` also keeps the undecoded transfer data, even for recordings it
   cannot convert.
 
-`openevp-st25.exe --check-wav FILE.dvf` decodes one `.dvf` file to check that
+`openevp-cli.exe --check-wav FILE.dvf` decodes one `.dvf` file to check that
 WAV conversion works in this build, without touching the recorder or saving
 anything.
 
 On Linux the command-line tool runs as-is with the system libusb:
-`python3 st25-download.py OUTPUT` (it needs permission to open the USB
+`python3 openevp-cli.py OUTPUT` (it needs permission to open the USB
 device).
 
 ## Enhance: player and export
@@ -177,8 +179,8 @@ Needs x64 Python 3.12 and [Inno Setup 6](https://jrsoftware.org/isinfo.php)
 powershell -ExecutionPolicy Bypass -File build_windows.ps1
 ```
 
-It runs the tests, then builds `dist\openevp-st25.exe` (ICD-ST25 command
-line), `dist\OpenEVP\` (desktop app) and `dist\OpenEVP-Setup-<version>.exe`
+It runs the tests, then builds `dist\openevp-cli.exe` (the command-line
+tool), `dist\OpenEVP\` (desktop app) and `dist\OpenEVP-Setup-<version>.exe`
 (the installer). The tests run in the release gate
 (`OPENEVP_RELEASE_GATE=1`): a decoder test that can't run because the tables or
 the C core are missing or damaged fails the build instead of being skipped.

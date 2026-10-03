@@ -14,7 +14,7 @@ it never names a recording by fingerprint: every loaded recording gets an
 opaque "rec" handle, and the marks calls take that handle (the fingerprint
 itself does reach the page, only to group copies of one recording). For a
 recording on a recorder the handle also holds its provenance: the exact native
-bytes that were decoded for playback (a .dvf for the ST25), their file name,
+bytes that were decoded for playback (a .dvf for a Sony ICD recorder), their file name,
 their format and where they came from (recorder, folder, number), so the
 backup made when the recording is first marked saves exactly the audio that
 was marked. Backups run
@@ -99,6 +99,8 @@ DISK = "Check free disk space and that the folder can be written to."
 NO_MARKS = "Marks are not available here."
 RELOAD = "Load the recording again."
 NO_AUDIO = "This recording has no audio to mark."
+GONE = "That file is no longer there. Refresh the list."
+NOT_IN_LIBRARY = "it is no longer inside the library folder"
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
@@ -527,6 +529,7 @@ class Api(ShareOps, LibraryOps):
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
         self._fs_busy = False                 # a folder operation holds _busy (not an export)
+        self._fs_done = None                  # set when that operation is over (shutdown() waits for it)
         self._library_root = None             # _root_identity() of the library folder at the last listing
         if store is not None:
             saved = store.get_setting("save_folder")
@@ -941,7 +944,7 @@ class Api(ShareOps, LibraryOps):
         return dl.data, dl.filename, wav
 
     def _backup(self, fp, rec, entry):
-        """Save the recording's native file (a .dvf for the ST25) into
+        """Save the recording's native file (a .dvf for a Sony ICD recorder) into
         <Save to>/<folder safe name>/, then (with the decoder) a WAV copy with the
         marks. "saved" once the native file is there; a failed WAV copy is
         reported in the detail, not as a failed backup."""
@@ -1027,7 +1030,7 @@ class Api(ShareOps, LibraryOps):
 
     def export_marked(self, rec, speed=1, keep_pitch=True, heard=None):
         """Save a WAV with the current marks of the loaded recording into the Save-to
-        folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
+        folder: <folder safe name>/ (A..E on a Sony ICD recorder) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
         any other file goes into the Save-to folder itself. Never replaces a file: identical bytes
         count as already saved, anything else gets a numbered name.
@@ -1282,7 +1285,10 @@ class Api(ShareOps, LibraryOps):
                 return _fail(busy_update if self._updating else busy)
             done = self._marked_done = threading.Event()
         try:
-            return work(entry)
+            with folders.Pins() as pins:          # a library file's folders stay put until it is saved
+                if self._source_moved(entry["source"], pins):
+                    return _fail(f"{entry['name']} has changed since it was loaded. Load it again.")
+                return work(entry)
         finally:
             with self._workers_lock:
                 self._marked_done = None
@@ -1671,9 +1677,10 @@ class Api(ShareOps, LibraryOps):
             return _fail("Nothing valid is selected.")
         paths = []
         for fid in file_ids:
-            path = self._library_file(fid)
-            if path is None:
-                return _fail(LIB_CHANGED)
+            got = self._library_file_path(fid, missing=False)   # a file gone since is skipped by the job
+            if isinstance(got, dict):
+                return got
+            path = got[1]
             if path not in paths:
                 paths.append(path)
         # A clip's clips go beside it, in its own Clips folder (see _clips_outdir).
@@ -1764,6 +1771,7 @@ class Api(ShareOps, LibraryOps):
         saved = already = recordings = 0
         skipped, notes, outdirs, done_keys = [], [], [], set()
         outcome = []
+        library_id = _root_identity(library)     # every file must still be inside this very folder
 
         def stopped():
             return self._stop.is_set() or cancel.is_set()
@@ -1785,31 +1793,36 @@ class Api(ShareOps, LibraryOps):
                     finish("clips-done", cancelled=True, closing=self._stop.is_set())
                     return
                 name = os.path.basename(path)
-                try:
-                    got = self._file_clips_audio(path, problems, stopped)
-                except formats.Cancelled:
-                    finish("clips-done", cancelled=True, closing=self._stop.is_set())
-                    return
-                if isinstance(got, str):
-                    skipped.append(f"{name} ({got})")
-                elif got is not None:
-                    wav, fp, marks = got
-                    outdir = self._clips_outdir(path, os.path.join(self._marked_folder(path, dest, library), CLIPS),
-                                                library)
-                    key = (fp, os.path.normcase(os.path.abspath(outdir)))
-                    if key not in done_keys:
-                        done_keys.add(key)
+                with folders.Pins() as pins:      # its folders stay put while it is read and its clips saved
+                    if not self._still_in_library(library, library_id, path, pins):
+                        got = NOT_IN_LIBRARY
+                    else:
                         try:
-                            s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0], fmt)
-                        except OSError as e:
-                            finish("clips-failed", error=f"Could not save the clips of {name}: {_plain(e)}",
-                                   advice=DISK)
+                            got = self._file_clips_audio(path, problems, stopped)
+                        except formats.Cancelled:
+                            finish("clips-done", cancelled=True, closing=self._stop.is_set())
                             return
-                        saved, already, recordings = saved + s, already + a, recordings + 1
-                        notes.extend(n)
-                        if (s or a) and outdir not in outdirs:
-                            outdirs.append(outdir)
-                    del wav, got
+                    if isinstance(got, str):
+                        skipped.append(f"{name} ({got})")
+                    elif got is not None:
+                        wav, fp, marks = got
+                        outdir = self._clips_outdir(path, os.path.join(self._marked_folder(path, dest, library),
+                                                                       CLIPS), library)
+                        key = (fp, os.path.normcase(os.path.abspath(outdir)))
+                        if key not in done_keys:
+                            done_keys.add(key)
+                            try:
+                                s, a, _names, n = self._save_clips(wav, marks, outdir, os.path.splitext(name)[0],
+                                                                   fmt)
+                            except OSError as e:
+                                finish("clips-failed", error=f"Could not save the clips of {name}: {_plain(e)}",
+                                       advice=DISK)
+                                return
+                            saved, already, recordings = saved + s, already + a, recordings + 1
+                            notes.extend(n)
+                            if (s or a) and outdir not in outdirs:
+                                outdirs.append(outdir)
+                        del wav, got
                 self._emit("clips-progress", {"job": job, "done": i, "total": len(items), "name": name})
             finish("clips-done", cancelled=False, closing=False)
         except Exception as e:                   # never leave the page waiting
@@ -1821,6 +1834,22 @@ class Api(ShareOps, LibraryOps):
             self._busy.release()                 # before the page hears it is over: it may start another
             for event, payload in outcome[:1]:
                 self._emit(event, payload)
+
+    def _still_in_library(self, library, library_id, path, pins):
+        """Is path (from a clips job) still inside the library folder as the job
+        found it: the folder resolving to the same place and not swapped for a
+        link (library_id: _root_identity when the job started), and no folder on
+        the way swapped for a junction? The folders down to it are held in pins
+        first. A file that is gone passes (reading it says so)."""
+        if not folders.under(path, library):
+            return False
+        try:
+            pins.chain(library, os.path.dirname(os.path.abspath(path)))
+        except (OSError, ValueError):
+            pass
+        if not os.path.lexists(path):
+            return True
+        return _root_identity(library) == library_id and folders.inside(library, path)
 
     def _file_clips_audio(self, path, problems, stopped):
         """(wav, fp, marks) of a library file with marks; None when it has none; or
@@ -1925,15 +1954,18 @@ class Api(ShareOps, LibraryOps):
         return None
 
     # ---- files on disk (library files and WAVs opened from the file dialog) -------
-    def _play_file(self, path, root=None):
+    def _play_file(self, path, root=None, library=False):
         """The player's result for a .wav (served in place, its embedded markers
         imported once unless it is a clip: see _is_clip, with root the library
         folder) or another recording file, e.g. a .dvf (decoded through the
-        audio server by its format's decoder), on disk."""
+        audio server by its format's decoder), on disk. library: loaded from
+        the library folder root (exports check it is still inside it)."""
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
         name = os.path.basename(path)
         source = {"kind": "file", "path": path}
+        if library:
+            source.update(library=root, library_id=_root_identity(root))
         try:
             fmt = formats.by_ext(os.path.splitext(name)[1])
             if fmt is None or fmt is formats.WAV:
@@ -2316,15 +2348,23 @@ class Api(ShareOps, LibraryOps):
 
     def play_library(self, file_id):
         """Prepare a library file (by id from list_library) for the player. A clip
-        plays like any WAV; its markers are never imported (it is an EVP already)."""
-        return self._play_file(self._library_file(file_id), root=self._library_path())
+        plays like any WAV; its markers are never imported (it is an EVP already).
+        The file must still be inside the library folder (_library_file_path),
+        and the folders down to it are held while it is read."""
+        with folders.Pins() as pins:
+            got = self._library_file_path(file_id, pins, missing=GONE)
+            if isinstance(got, dict):
+                return got
+            root, path = got
+            return self._play_file(path, root=root, library=True)
 
     def library_marks(self, file_id):
         """The marks of a library file's recording, by its cached fingerprint
         ([] while the file is not fingerprinted yet)."""
-        path = self._library_file(file_id)
-        if not path:
-            return _fail("That file is no longer there. Refresh the list.")
+        got = self._library_file_path(file_id, missing=GONE)
+        if isinstance(got, dict):
+            return got
+        path = got[1]
         if self._store is None:
             return {"ok": True, "marks": []}
         try:
@@ -2432,19 +2472,10 @@ class Api(ShareOps, LibraryOps):
         Each copy of a recording (.dvf, .wav) has an id of its own; the page sends
         the one its row shows. Only a file inside the library folder, as the
         latest listing saw it, is shown."""
-        path = self._library_file(file_id)
-        with self._lib_lock:
-            root = self._library_folders.get("root")
-        if path is None or root is None:
-            return _fail(LIB_CHANGED)
-        if os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(self._library_path())):
-            return _fail(LIB_CHANGED)
-        if self._root_moved(root):
-            return _fail(ROOT_CHANGED)
-        if not os.path.isfile(path):
-            return _fail(f"{os.path.basename(path)} is no longer there. Refresh the list.")
-        if not folders.inside(root, path):
-            return _fail(LIB_CHANGED)
+        got = self._library_file_path(file_id)
+        if isinstance(got, dict):
+            return got
+        path = got[1]
         if not show_in_folder(path):
             return _fail("File Explorer could not be opened.")
         return {"ok": True}
@@ -2564,20 +2595,25 @@ class Api(ShareOps, LibraryOps):
         a backup finishes the file it is writing, and queued backups are recorded as
         not made; the library indexer stops before its next file; a WAV being
         saved with its marks stops its decode or finishes writing), then close the
-        store, which writes the fingerprint cache."""
+        store, which writes the fingerprint cache. A rename, move or delete in
+        the library is finished first: the store's lock is not let go (another
+        window could then start changing the library) while one runs."""
         self._stop.set()
         with self._backup_lock:                 # no backup worker can start after this
             pass
         with self._lib_lock:                    # nor a library indexer
             pass
-        with self._workers_lock:                # nor an export or export_marked()
+        with self._workers_lock:                # nor an export, export_marked() or folder operation
             workers = list(self._workers)
             marked = self._marked_done
+            fs = self._fs_done
         for t in workers:
             if t.is_alive():
                 t.join()
         if marked is not None:
             marked.wait()
+        if fs is not None:
+            fs.wait()
         if self._store is not None:
             self._store.close()
 

@@ -21,7 +21,7 @@ $log = Join-Path $logDir "uninstall.log"
 function Log($msg) {
     try { Add-Content -Path $log -Value ("{0:HH:mm:ss} {1}" -f (Get-Date), $msg) } catch { }
 }
-Set-Content -Path $log -Value "ST25 WinUSB removal"
+Set-Content -Path $log -Value "OpenEVP WinUSB removal"
 
 $failed = $false
 $restart = $false

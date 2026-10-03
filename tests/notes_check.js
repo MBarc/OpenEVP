@@ -32,8 +32,8 @@ assert.strictEqual(html("- **Browse folders** like File Explorer\n- *All recordi
   "<ul><li><strong>Browse folders</strong> like File Explorer</li><li><em>All recordings</em> switch</li></ul><p>Done.</p>");
 assert.strictEqual(html("## What's new\n1. one\n2. two"),
   "<h4>What's new</h4><ol><li>one</li><li>two</li></ol>");
-assert.strictEqual(html("Run `openevp-st25.exe --wav` and see [the README](https://example.com/x)."),
-  "<p>Run <code>openevp-st25.exe --wav</code> and see <span>the README</span>.</p>");
+assert.strictEqual(html("Run `openevp-cli.exe --wav` and see [the README](https://example.com/x)."),
+  "<p>Run <code>openevp-cli.exe --wav</code> and see <span>the README</span>.</p>");
 assert.strictEqual(html("line one\nline two"), "<p>line one line two</p>");
 assert.strictEqual(html("Windows\r\n\r\n* item"), "<p>Windows</p><ul><li>item</li></ul>");
 assert.strictEqual(html("- item\n  continues here"), "<ul><li>item continues here</li></ul>");

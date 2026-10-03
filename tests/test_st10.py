@@ -1,4 +1,4 @@
-"""The Sony ICD-ST10 in the st25 package: its folder tables (message-list mode
+"""The Sony ICD-ST10 in the sony_icd package: its folder tables (message-list mode
 byte 0x6c), its LPEC ST .dvf files and downloads, and the .dvf format
 decoding them (openevp.formats: codec 0x24 -> the LPEC ST decoder).
 
@@ -22,10 +22,10 @@ from fixtures import (DATE, ST_FRAME, FakeRecorderDevice, make_raw, make_st_fram
 from openevp import formats, wavinfo  # noqa: E402
 from openevp.decoders import sony_lpec_st  # noqa: E402
 from openevp.decoders.sony_lpec import decoder as lp_decoder  # noqa: E402
-from st25 import dvf  # noqa: E402
-from st25.folder import parse  # noqa: E402
-from st25.protocol import Recorder, RecorderError  # noqa: E402
-from st25.session import RecorderSession, build_dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from sony_icd.folder import parse  # noqa: E402
+from sony_icd.protocol import Recorder, RecorderError  # noqa: E402
+from sony_icd.session import RecorderSession, build_dvf  # noqa: E402
 
 UNDATED = b"\xff" * 8
 # Counters like the real A-001: starting at 2, a counter-0 frame at each restart.

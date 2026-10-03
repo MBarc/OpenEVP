@@ -23,7 +23,7 @@ Two errors are sticky beyond that table:
   so that connection is latched in NEEDS_REPLUG: no new session is opened on
   it (every request raises NotReady again) until it disappears from
   discovery; the replug is a new connection id with a fresh entry. Any other
-  RecorderError (the ST25's RecorderError/UsbError/TableError) only closes the
+  RecorderError (sony_icd's RecorderError/UsbError/TableError) only closes the
   session, and the next request opens a new one, exactly as in v0.7.2.
 - a connection discovery rejects (base.RejectedConnection: e.g. two models
   claim its id) is closed and forgotten like an unplugged one, even when its

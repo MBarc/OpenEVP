@@ -5,7 +5,7 @@ the x87 fcos emulation) bit for bit like the pure-Python modules; Python
 still parses the bitstream (openevp.decoders.sony_lpec.bitstream) and hands the parsed
 frames over in one packed int32 array. Built by tools/build_lpec_core.py;
 when the DLL is missing or fails to load, ``available()`` is False and
-openevp.decoders.sony_lpec.decoder uses pure Python (~60x slower; st25.audio.status() says
+openevp.decoders.sony_lpec.decoder uses pure Python (~60x slower; sony_icd.audio.status() says
 so in a frozen build, where the DLL should always be present).
 """
 

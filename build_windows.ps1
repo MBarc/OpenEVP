@@ -1,4 +1,4 @@
-# Build the OpenEVP app (dist\OpenEVP\), the ST25 command-line tool (dist\openevp-st25.exe)
+# Build the OpenEVP app (dist\OpenEVP\), the command-line tool (dist\openevp-cli.exe)
 # and the installer (dist\OpenEVP-Setup-<version>.exe).
 #   powershell -ExecutionPolicy Bypass -File build_windows.ps1
 # A build without the LPEC (LP, SP) and LPEC ST table data (no WAV conversion) must be asked for:
@@ -50,7 +50,7 @@ foreach ($core in $lpecCore, $lpecStCore, $mp3Core) {
 }
 
 # The decoders (openevp.decoders.sony_lpec and openevp.decoders.sony_lpec_st) are
-# imported dynamically (st25/audio.py), so PyInstaller cannot see them: the
+# imported dynamically (sony_icd/audio.py), so PyInstaller cannot see them: the
 # openevp package is collected explicitly, with the decoders' DLLs, for both
 # builds below, or the frozen app/CLI silently lose WAV support. The extracted
 # table data ($lpecDir\data\lpec_tables.json and $lpecDir\data\lpec_sp_tables.json
@@ -102,20 +102,20 @@ try {
 } finally {
     Remove-Item Env:\OPENEVP_RELEASE_GATE -ErrorAction SilentlyContinue
 }
-python -m PyInstaller --noconfirm --clean --onefile --console --name openevp-st25 `
-    --icon assets\st25.ico --add-binary "$dll;." @decoder st25-download.py
+python -m PyInstaller --noconfirm --clean --onefile --console --name openevp-cli `
+    --icon assets\openevp.ico --add-binary "$dll;." @decoder openevp-cli.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
-if ((Get-PeMachine "dist\openevp-st25.exe") -ne $AMD64) { throw "the built .exe is not x64" }
-Get-FileHash dist\openevp-st25.exe -Algorithm SHA256
+if ((Get-PeMachine "dist\openevp-cli.exe") -ne $AMD64) { throw "the built .exe is not x64" }
+Get-FileHash dist\openevp-cli.exe -Algorithm SHA256
 
 # Desktop app: one-folder build (starts faster and trips antivirus less than one-file).
 # lameenc (MP3 clips, openevp.mp3; LGPL; installed before the tests above) is an
 # extension module: named as a hidden import so a build never silently loses MP3
 # export, with its metadata (its version for --smoke, and its license file).
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OpenEVP" `
-    --icon assets\st25.ico --add-binary "$dll;." --add-data "app/ui;app/ui" `
-    --add-data "assets/st25.ico;assets" --add-data "app/driver;driver" --add-data "LICENSES;LICENSES" `
-    --hidden-import lameenc --copy-metadata lameenc @decoder st25-app.py
+    --icon assets\openevp.ico --add-binary "$dll;." --add-data "app/ui;app/ui" `
+    --add-data "assets/openevp.ico;assets" --add-data "app/driver;driver" --add-data "LICENSES;LICENSES" `
+    --hidden-import lameenc --copy-metadata lameenc @decoder openevp-app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller (app) failed" }
 if ((Get-PeMachine "dist\OpenEVP\OpenEVP.exe") -ne $AMD64) { throw "the built app is not x64" }
 foreach ($f in "install-winusb.ps1", "uninstall-winusb.ps1", "manifest.ps1", "models.json") {

@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
-from st25 import dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
 import make_test_dvf as m  # noqa: E402
 
 

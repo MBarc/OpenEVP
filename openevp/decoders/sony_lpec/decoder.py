@@ -25,7 +25,7 @@ import struct
 from array import array
 from typing import Callable, Iterator, List, Optional, Tuple
 
-from st25 import dvf as dvf_module
+from sony_icd import dvf as dvf_module
 from . import _core, bitstream, params, synthesis
 from . import tables as tables_module
 
@@ -324,7 +324,7 @@ def _decode(payload: bytes, t, use_core: Optional[bool],
     return out
 
 
-# The .dvf codec byte -> configuration (st25.dvf: LPEC LP 0x2c, LPEC SP 0x2a).
+# The .dvf codec byte -> configuration (sony_icd.dvf: LPEC LP 0x2c, LPEC SP 0x2a).
 CONFIGS = {dvf_module.CODEC_LP: LP, dvf_module.CODEC_SP: SP}
 
 
@@ -339,10 +339,10 @@ def dvf_to_wav(dvf_bytes: bytes, tables=None,
     """Decode a Sony ICD-ST25 "LP" or ICD-ST10 "LP"/"SP" .dvf recording to a
     WAV file.
 
-    Validates the file first (st25.dvf.validate) and picks the configuration
+    Validates the file first (sony_icd.dvf.validate) and picks the configuration
     by its codec byte: LPEC LP (0x2c, 8000 Hz, 6000 bit/s) or LPEC SP (0x2a,
     16000 Hz, 16000 bit/s). Another codec (an ICD-ST10's LPEC ST) or a damaged
-    file raises st25.dvf.FormatError with a clear reason instead of decoding
+    file raises sony_icd.dvf.FormatError with a clear reason instead of decoding
     garbage. The result is the canonical 44-byte header (RIFF, a 16-byte
     'fmt ' chunk: PCM, mono, the configuration's rate, 16-bit, then 'data')
     followed by the PCM, nothing else -- exactly what Digital Voice Editor

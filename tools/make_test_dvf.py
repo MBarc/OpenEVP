@@ -20,7 +20,7 @@ import struct
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import dvf  # noqa: E402
+from sony_icd import dvf  # noqa: E402
 
 PAYLOAD = dvf.BLOCK - dvf.BLOCK_HEADER                    # 1014
 SPARE = bytes.fromhex("ff030c3cffffffff02c1441c2cffffff")  # as seen on the wire

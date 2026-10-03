@@ -9,6 +9,8 @@ import urllib.request
 import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from unittest import mock  # noqa: E402
+from app import audio_server  # noqa: E402
 from app.audio_server import AudioServer  # noqa: E402
 from openevp import wavinfo  # noqa: E402
 sys.path.insert(0, os.path.dirname(__file__))
@@ -208,11 +210,12 @@ class AudioServerTests(unittest.TestCase):
             starting = folder(audio_server.CACHE_PREFIX + "starting", age=0)
             other = folder("something-else")
             mine = folder(audio_server.CACHE_PREFIX + "mine")
+            old_name = folder("st25-audio-crashed")                  # 0.9.9 and earlier's name
             try:
                 removed = audio_server.clean_stale_caches(parent, keep=mine)
                 if sys.platform == "win32":                          # an open file can't be deleted there
                     self.assertTrue(os.path.isdir(running))
-                self.assertEqual(sorted(removed), sorted([crashed, marked] +
+                self.assertEqual(sorted(removed), sorted([crashed, marked, old_name] +
                                                          ([] if sys.platform == "win32" else [running])))
                 for path in (starting, other, mine):
                     self.assertTrue(os.path.isdir(path))
@@ -348,7 +351,7 @@ class RealDecoderFingerprintTests(unittest.TestCase):
     VECTOR = os.path.join(os.path.dirname(__file__), "vectors", "single-frame.dvf")
 
     def test_fp_matches_real_decoded_audio_and_survives_markers(self):
-        from st25 import audio
+        from sony_icd import audio
         if not audio.available():
             release_gate.skip_or_fail(f"WAV conversion is not available: {audio.status()}")
         from app import audio_server
@@ -412,6 +415,156 @@ class PickedFileTests(unittest.TestCase):
             again = s.prepare_file(p)
             self.assertNotEqual(again["url"], info["url"])
             self.assertEqual(urllib.request.urlopen(again["url"], timeout=5).status, 200)
+
+
+class SameFileTests(unittest.TestCase):
+    """A file served in place is served only while the path still names the very
+    file that was loaded: another file there with the same size and time (put in
+    its place, or reached through a folder swapped for a junction) is refused."""
+
+    def setUp(self):
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        self.cache = cache.name
+        mine = tempfile.TemporaryDirectory()
+        self.addCleanup(mine.cleanup)
+        self.mine = mine.name
+        self.s = AudioServer(lambda key: WAV, cache.name)
+        self.s.start()
+        self.addCleanup(self.s.stop)
+        self.folder = os.path.join(self.mine, "Case")
+        os.makedirs(self.folder)
+        self.path = os.path.join(self.folder, "a.wav")
+        pcm_wav(self.path, 2, 1, 4800)
+        self.info = self.s.prepare_file(self.path)
+
+    def same_size_and_time(self, path, like):
+        """Another recording at path with the size and modification time of like."""
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "r+b") as f:                     # other samples, same length
+            f.seek(-4, os.SEEK_END)
+            f.write(b"\x11\x22\x33\x44")
+        st = os.stat(like)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    def refused(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.info["url"], timeout=5)
+        self.assertEqual(cm.exception.code, 409)
+        cm.exception.close()
+        with self.assertRaises(ValueError):
+            self.s.open_audio(self.info["url"])
+
+    def test_another_file_at_the_path_with_the_same_size_and_time_is_refused(self):
+        other = os.path.join(self.mine, "other.wav")
+        self.same_size_and_time(other, self.path)
+        os.replace(other, self.path)
+        st = os.stat(self.path)
+        self.assertEqual((st.st_size, st.st_mtime_ns), tuple(self.info["stat"]))
+        self.refused()
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions are Windows'")
+    def test_a_folder_swapped_for_a_junction_is_refused(self):
+        import _winapi
+        outside = os.path.join(self.mine, "outside")
+        os.makedirs(outside)
+        self.same_size_and_time(os.path.join(outside, "a.wav"), self.path)
+        os.rename(self.folder, os.path.join(self.mine, "Case moved"))
+        _winapi.CreateJunction(outside, self.folder)
+        self.addCleanup(os.rmdir, self.folder)
+        self.refused()
+
+    def test_a_normal_file_is_served_in_place(self):
+        self.assertEqual(os.listdir(self.cache), [], "nothing copied")
+        st = os.stat(self.path)
+        self.assertIsNotNone(audio_server._ident_of(st))
+
+    def test_a_file_without_identity_is_served_from_a_private_copy(self):
+        """FAT/exFAT and some shares give no file id: such a file is copied into the
+        cache when loaded, and the copy is what plays -- a file put at its path later,
+        even with the same size and time, changes nothing."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "rb") as f:
+            original = f.read()
+        with mock.patch.object(audio_server, "_ident_of", return_value=None):
+            info = self.s.prepare_file(path)
+        st = os.stat(path)
+        self.assertEqual(info["stat"], (st.st_size, st.st_mtime_ns))
+        self.assertEqual(len(os.listdir(self.cache)), 1, "a copy in the cache")
+        other = os.path.join(self.mine, "other.wav")
+        self.same_size_and_time(other, path)
+        os.replace(other, path)
+        with urllib.request.urlopen(info["url"], timeout=5) as r:
+            self.assertEqual(r.read(), original)
+        with self.s.open_audio(info["url"]) as f:
+            self.assertEqual(f.read(), original)
+
+    def test_loading_a_replaced_file_without_identity_again_plays_the_new_audio(self):
+        """Same path, size and time but other audio, loaded again on purpose: a new
+        copy of what is there now, never the earlier copy; the earlier one goes."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with mock.patch.object(audio_server, "_ident_of", return_value=None):
+            first = self.s.prepare_file(path)
+            other = os.path.join(self.mine, "other.wav")
+            self.same_size_and_time(other, path)
+            with open(other, "rb") as f:
+                replaced = f.read()
+            os.replace(other, path)
+            again = self.s.prepare_file(path)
+        self.assertNotEqual(again["url"], first["url"])
+        self.assertNotEqual(again["fp"], first["fp"])
+        with urllib.request.urlopen(again["url"], timeout=5) as r:
+            self.assertEqual(r.read(), replaced)
+        with self.s.open_audio(first["url"]) as f:            # the earlier copy: left to eviction
+            self.assertNotEqual(f.read(), replaced)
+
+    def test_overlapping_loads_of_one_file_without_identity_both_stay_playable(self):
+        """Load A is still copying when load B of the same path starts and finishes;
+        then A finishes. Neither drops the other's copy: both URLs play."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "rb") as f:
+            original = f.read()
+        real_copy = audio_server.shutil.copyfileobj
+        a_copying, b_done = threading.Event(), threading.Event()
+        first = []
+
+        def copy(src, dst, length=0):
+            if not first:
+                first.append(True)
+                a_copying.set()
+                self.assertTrue(b_done.wait(10))             # B runs start to finish meanwhile
+            return real_copy(src, dst, length)
+        results = {}
+        with mock.patch.object(audio_server, "_ident_of", return_value=None),                 mock.patch.object(audio_server.shutil, "copyfileobj", copy):
+            a = threading.Thread(target=lambda: results.update(a=self.s.prepare_file(path)))
+            a.start()
+            self.assertTrue(a_copying.wait(10))
+            results["b"] = self.s.prepare_file(path)
+            b_done.set()
+            a.join(10)
+        self.assertNotEqual(results["a"]["url"], results["b"]["url"])
+        for name in ("b", "a"):                              # B started last; A finished last
+            with urllib.request.urlopen(results[name]["url"], timeout=5) as r:
+                self.assertEqual(r.read(), original, name)
+        self.assertEqual(len(os.listdir(self.cache)), 2)
+
+    def test_without_usable_identity_means_no_file_id_or_no_volume_serial(self):
+        import types
+        self.assertIsNone(audio_server._ident_of(types.SimpleNamespace(st_dev=7, st_ino=0)))
+        self.assertIsNone(audio_server._ident_of(types.SimpleNamespace(st_dev=0, st_ino=5)))
+        self.assertEqual(audio_server._ident_of(types.SimpleNamespace(st_dev=7, st_ino=5)), (7, 5))
+
+    def test_the_same_file_moved_and_retargeted_still_plays(self):
+        moved = os.path.join(self.mine, "Case 2")
+        os.rename(self.folder, moved)                    # nothing holds the file open between requests
+        self.s.retarget_prefix(self.folder, moved)
+        with urllib.request.urlopen(self.info["url"], timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        with self.s.open_audio(self.info["url"]) as f:
+            self.assertTrue(f.read(4) == b"RIFF")
 
 
 if __name__ == "__main__":

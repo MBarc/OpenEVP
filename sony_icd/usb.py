@@ -163,7 +163,7 @@ class Device:
     """One opened USB device with interface 0 claimed.
 
     Every transfer is checked against the fixed recorder policy in
-    st25.policy (not supplied by callers): control OUT only for whitelisted
+    sony_icd.policy (not supplied by callers): control OUT only for whitelisted
     command frames, control IN only for the status/reply reads, bulk only from
     IN endpoint 0x81. Direction is enforced in USB terms too (bit 7 of the
     request type / endpoint address), so an "IN" method can never write.

@@ -10,9 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice, made_wav, st25_manager  # noqa: E402
 from app import backend  # noqa: E402
 from app.devices import NEEDS_REPLUG, DeviceManager  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
-from st25.usb import UsbError  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
+from sony_icd.usb import UsbError  # noqa: E402
 
 FOLDERS = {1: [(0, 100, 0x1000, 2958, DATE, "Casey"), (1, 900, 0x3000, 4000, DATE, "Casey")]}
 ID = "1-4@7"

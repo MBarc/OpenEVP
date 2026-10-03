@@ -4,7 +4,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from st25 import usb  # noqa: E402
+from sony_icd import usb  # noqa: E402
 
 
 class FakeLib:

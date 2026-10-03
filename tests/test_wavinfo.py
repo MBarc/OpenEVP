@@ -257,7 +257,7 @@ class GoldenFingerprintTests(unittest.TestCase):
         self.assertEqual(wavinfo.wav_fingerprint(io.BytesIO(out.getvalue())), self.GOLDEN)
 
     def test_fingerprint_of_the_decoded_vector(self):
-        from st25 import audio
+        from sony_icd import audio
         if not audio.available():
             release_gate.skip_or_fail(f"WAV conversion is not available: {audio.status()}")
         with open(os.path.join(self.VECTORS, "sweep-50-4000.dvf"), "rb") as f:

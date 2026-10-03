@@ -10,6 +10,7 @@ import ctypes
 import os
 import stat
 import sys
+import threading
 
 MAX_NAME = 120              # characters in one folder name
 MAX_PATH_CHARS = 240        # a resulting full path must stay below this (Windows MAX_PATH is 260)
@@ -235,46 +236,67 @@ class Pins:
 
 
 # ---- the Recycle Bin (Windows) ------------------------------------------------------
+#
+# The delete goes through the shell's IFileOperation, with a progress sink that
+# holds a veto. Before the shell deletes an item it calls PreDeleteItem, whose
+# flags carry TSF_DELETE_RECYCLE_IF_POSSIBLE when it is going to recycle it; a
+# delete without that flag is a delete for good (no Recycle Bin, a Recycle Bin
+# set to delete immediately, an item too big for it), and the sink refuses it,
+# which cancels the whole operation before anything is deleted. Success is only
+# what PostDeleteItem reports for the item: deleted with S_OK *and* a newly
+# created item, the one in the Recycle Bin. It is never inferred from the path
+# having gone.
 
-FO_DELETE = 3
 FOF_SILENT = 0x0004
 FOF_NOCONFIRMATION = 0x0010
 FOF_ALLOWUNDO = 0x0040
 FOF_NOERRORUI = 0x0400
-FOF_WANTNUKEWARNING = 0x4000
 FOF_NORECURSEREPARSE = 0x8000
-RECYCLE_FLAGS = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT
-                 | FOF_WANTNUKEWARNING | FOF_NORECURSEREPARSE)
+FOFX_RECYCLEONDELETE = 0x00080000           # Windows 8 and later recycle only with this
+FOFX_EARLYFAILURE = 0x00100000              # the first failure stops the operation
+RECYCLE_FLAGS = (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT | FOF_NORECURSEREPARSE
+                 | FOFX_RECYCLEONDELETE | FOFX_EARLYFAILURE)
+TSF_DELETE_RECYCLE_IF_POSSIBLE = 0x80       # PreDeleteItem: this delete is a recycle
 DRIVE_FIXED = 3
 COINIT_APARTMENTTHREADED = 0x2
+CLSCTX_ALL = 0x17
+SIGDN_FILESYSPATH = 0x80058000
 MAX_PATH = 260
+
+S_OK = 0
+E_NOINTERFACE = 0x80004002
+RPC_E_CHANGED_MODE = 0x80010106
+HR_CANCELLED = 0x800704C7                   # HRESULT_FROM_WIN32(ERROR_CANCELLED): the sink's veto
+COPYENGINE_E_USER_CANCELLED = 0x80270000
+COPYENGINE_E_CANCELLED = 0x80270001
+COPYENGINE_E_ACCESS_DENIED_SRC = 0x80270021
+COPYENGINE_E_SHARING_VIOLATION_SRC = 0x80270027
+COPYENGINE_E_RECYCLE_UNKNOWN_ERROR = 0x80270035
+COPYENGINE_E_RECYCLE_FORCE_NUKE = 0x80270036
+COPYENGINE_E_RECYCLE_SIZE_TOO_BIG = 0x80270037
+COPYENGINE_E_RECYCLE_PATH_TOO_LONG = 0x80270038
+COPYENGINE_E_RECYCLE_BIN_NOT_FOUND = 0x8027003A
+
+CLSID_FileOperation = "3ad05575-8857-4850-9277-11b85bdb8e09"
+IID_IFileOperation = "947aab5f-0a5c-4c13-b4d6-4bf7836fc9f8"
+IID_IFileOperationProgressSink = "04b0f1a7-9490-44bc-96e1-4296a31252e2"
+IID_IShellItem = "43826d1e-e718-42ee-bc55-a1e261c37bfe"
+IID_IUnknown = "00000000-0000-0000-c000-000000000046"
 
 NO_RECYCLE_BIN = "This drive has no Recycle Bin. Delete the folder in File Explorer if you really mean to."
 NO_ROOM = ("This folder can't go to the Recycle Bin (it is too big for it, or the Recycle Bin is set to "
            "delete files immediately). Delete it in File Explorer if you really mean to.")
 IN_USE = "{} was not (completely) moved to the Recycle Bin: a file is in use, or deleting was cancelled."
 FILE_IN_USE = "{} was not moved to the Recycle Bin: it is in use (open in another program?), or deleting was cancelled."
+TOO_LONG = "The path of {} is too long for the Recycle Bin. Delete it in File Explorer if you really mean to."
 BITBUCKET = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
 
 _BITS64 = ctypes.sizeof(ctypes.c_void_p) == 8
 
 
-class SHFILEOPSTRUCTW(ctypes.Structure):
-    if not _BITS64:
-        _pack_ = 1                          # shellapi.h packs its structs to 1 on 32-bit only
-    _fields_ = [("hwnd", ctypes.c_void_p),
-                ("wFunc", ctypes.c_uint),
-                ("pFrom", ctypes.c_wchar_p),
-                ("pTo", ctypes.c_wchar_p),
-                ("fFlags", ctypes.c_ushort),
-                ("fAnyOperationsAborted", ctypes.c_int),
-                ("hNameMappings", ctypes.c_void_p),
-                ("lpszProgressTitle", ctypes.c_wchar_p)]
-
-
 class SHQUERYRBINFO(ctypes.Structure):
     if not _BITS64:
-        _pack_ = 1
+        _pack_ = 1                          # shellapi.h packs its structs to 1 on 32-bit only
     _fields_ = [("cbSize", ctypes.c_uint32),
                 ("i64Size", ctypes.c_int64),
                 ("i64NumItems", ctypes.c_int64)]
@@ -344,8 +366,11 @@ def tree_size(path):
 def bin_refuses(root, size, guid_of=None, settings_of=None):
     """Would the Recycle Bin of the drive at root delete something of `size` bytes
     for good: is it set to delete files immediately, or is size beyond its
-    capacity? Missing settings mean Windows' defaults: not immediate, and an
-    unknown capacity is never a reason to refuse."""
+    capacity? This is only the early, plain refusal for what the registry shows.
+    Missing settings mean Windows' defaults (not immediate, and a capacity Windows
+    works out itself and does not publish), so an unknown capacity is no reason
+    to refuse here: what the shell would still delete for good is vetoed while it
+    runs (see recycle)."""
     guid = (guid_of or volume_guid)(root)
     settings = (settings_of or bin_settings)(guid) if guid else {}
     if settings.get("NukeOnDelete"):
@@ -376,12 +401,292 @@ def where_it_is(path):
     return os.path.join(parent, os.path.basename(path))
 
 
-def recycle(path, owner=None, before=None):
+class RecycleOnly:
+    """The progress sink's decisions for one recycle, without any COM (so a fake
+    shell can test them): every delete that is not a recycle of exactly `target`
+    is refused, and nothing else (rename, move, copy, new item) is allowed."""
+
+    def __init__(self, target):
+        self._target = self._key(target)
+        self.vetoed = None                  # "nuke" or "other" once something was refused
+        self.recycled = False               # PostDeleteItem: target deleted with S_OK into the Recycle Bin
+        self.failure = None                 # the HRESULT PostDeleteItem gave otherwise
+        self.stray = False                  # PostDeleteItem for some other item
+
+    @staticmethod
+    def _key(path):
+        return os.path.normcase(os.path.abspath(path)) if path else None
+
+    def pre_delete(self, flags, item):
+        """PreDeleteItem: S_OK lets the shell go on; anything else cancels it."""
+        if self.vetoed:
+            return HR_CANCELLED
+        if self._key(item) != self._target:
+            self.vetoed = "other"           # a part of it on its own: only a delete for good does that
+            return HR_CANCELLED
+        if not flags & TSF_DELETE_RECYCLE_IF_POSSIBLE:
+            self.vetoed = "nuke"
+            return HR_CANCELLED
+        return S_OK
+
+    def pre_other(self):
+        """PreRenameItem, PreMoveItem, PreCopyItem, PreNewItem: never."""
+        self.vetoed = self.vetoed or "other"
+        return HR_CANCELLED
+
+    def post_delete(self, flags, item, hr, created):
+        """PostDeleteItem: created says whether the shell made a new item (the
+        one in the Recycle Bin); a successful delete without one was for good.
+        Seen on Windows 11: a recycle comes with flags 0x282 (TSF_DELETE_RECYCLE_IF_POSSIBLE
+        set) and hr 0x270008; a drive with no Recycle Bin (subst) with flags 0x202."""
+        if self._key(item) != self._target:
+            self.stray = True
+            return
+        if not hr & 0x80000000 and created:    # a success code (a recycle gives COPYENGINE_S_DONT_PROCESS_CHILDREN)
+            self.recycled = True
+        else:
+            self.failure = (hr & 0xFFFFFFFF) or HR_CANCELLED
+
+    def succeeded(self, hr, aborted):
+        return (self.recycled and not self.vetoed and not self.stray and self.failure is None
+                and hr & 0xFFFFFFFF == S_OK and not aborted)
+
+
+def _signed(hr):
+    return hr - (1 << 32) if hr & 0x80000000 else hr
+
+
+class _GUID(ctypes.Structure):
+    _fields_ = [("Data1", ctypes.c_uint32), ("Data2", ctypes.c_uint16), ("Data3", ctypes.c_uint16),
+                ("Data4", ctypes.c_ubyte * 8)]
+
+
+def _guid(text):
+    import uuid
+    return _GUID.from_buffer_copy(uuid.UUID(text).bytes_le)
+
+
+def _method(ptr, index, *argtypes):
+    """Method `index` of the COM object at ptr, as a callable without `this`."""
+    vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+    fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+    return lambda *args: fn(ptr, *args)
+
+
+def _release(ptr):
+    if ptr:
+        vtbl = ctypes.cast(ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+        ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtbl[2])(ptr)
+
+
+def item_path(item):
+    """The file-system path of an IShellItem (a pointer), or None."""
+    if not item:
+        return None
+    out = ctypes.c_void_p()
+    hr = _method(item, 5, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p))(SIGDN_FILESYSPATH, ctypes.byref(out))
+    if hr < 0 or not out.value:
+        return None
+    try:
+        return ctypes.wstring_at(out.value)
+    finally:
+        ole32 = ctypes.WinDLL("ole32")
+        ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+        ole32.CoTaskMemFree(out.value)
+
+
+_LINGERING = []                             # sinks the shell still held a reference to after teardown
+_LINGERING_LOCK = threading.Lock()
+
+
+def _prune_lingering():
+    """Let go of the kept sinks the shell has released since (their reference
+    count back at 0): no call can reach them any more. Done before each recycle,
+    when no operation of this process is using an earlier sink."""
+    with _LINGERING_LOCK:
+        _LINGERING[:] = [sink for sink in _LINGERING if sink.refs > 0]
+
+
+class ProgressSink:
+    """An IFileOperationProgressSink made with ctypes that hands every call to a
+    RecycleOnly. An exception in a Pre callback refuses."""
+
+    def __init__(self, decide):
+        P, H, U, V, D, W = (ctypes.WINFUNCTYPE, ctypes.c_long, ctypes.c_ulong, ctypes.c_void_p,
+                            ctypes.c_uint32, ctypes.c_wchar_p)
+        self.refs = 0
+        known = {bytes(_guid(IID_IUnknown)), bytes(_guid(IID_IFileOperationProgressSink))}
+
+        def qi(this, riid, ppv):
+            try:
+                if riid and bytes(riid.contents) in known:
+                    ppv[0] = self.pointer
+                    self.refs += 1
+                    return S_OK
+                ppv[0] = None
+            except Exception:
+                pass
+            return _signed(E_NOINTERFACE)
+
+        def add_ref(this):
+            self.refs += 1
+            return self.refs
+
+        def release(this):
+            self.refs = max(0, self.refs - 1)
+            return self.refs
+
+        def ok(*args):
+            return S_OK
+
+        def refuse(*args):
+            try:
+                return _signed(decide.pre_other())
+            except Exception:
+                return _signed(HR_CANCELLED)
+
+        def pre_delete(this, flags, item):
+            try:
+                return _signed(decide.pre_delete(flags, item_path(item)))
+            except Exception:
+                return _signed(HR_CANCELLED)
+
+        def post_delete(this, flags, item, hr, created):
+            try:
+                decide.post_delete(flags, item_path(item), hr, bool(created))
+            except Exception:
+                decide.stray = True
+            return S_OK
+
+        self._funcs = [
+            P(H, V, ctypes.POINTER(_GUID), ctypes.POINTER(V))(qi),
+            P(U, V)(add_ref),
+            P(U, V)(release),
+            P(H, V)(ok),                                # StartOperations
+            P(H, V, H)(ok),                             # FinishOperations
+            P(H, V, D, V, W)(refuse),                   # PreRenameItem
+            P(H, V, D, V, W, H, V)(ok),                 # PostRenameItem
+            P(H, V, D, V, V, W)(refuse),                # PreMoveItem
+            P(H, V, D, V, V, W, H, V)(ok),              # PostMoveItem
+            P(H, V, D, V, V, W)(refuse),                # PreCopyItem
+            P(H, V, D, V, V, W, H, V)(ok),              # PostCopyItem
+            P(H, V, D, V)(pre_delete),                  # PreDeleteItem
+            P(H, V, D, V, H, V)(post_delete),           # PostDeleteItem
+            P(H, V, D, V, W)(refuse),                   # PreNewItem
+            P(H, V, D, V, W, W, D, H, V)(ok),           # PostNewItem
+            P(H, V, ctypes.c_uint, ctypes.c_uint)(ok),  # UpdateProgress
+            P(H, V)(ok), P(H, V)(ok), P(H, V)(ok),      # ResetTimer, PauseTimer, ResumeTimer
+        ]
+        self._vtbl = (ctypes.c_void_p * len(self._funcs))(*[ctypes.cast(f, ctypes.c_void_p) for f in self._funcs])
+        self._obj = (ctypes.c_void_p * 1)(ctypes.addressof(self._vtbl))
+        self.pointer = ctypes.addressof(self._obj)
+
+
+def shell_recycle(path, owner, before, decide):
+    """Ask IFileOperation to recycle path, with a ProgressSink over decide (a
+    RecycleOnly). Returns (HRESULT, any operations aborted): the HRESULT of the
+    first step that failed, else PerformOperations'. Nothing is asked of the
+    shell unless the sink is in place."""
+    ole32 = ctypes.WinDLL("ole32")
+    shell32 = ctypes.WinDLL("shell32")
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    ole32.CoUninitialize.restype = None
+    ole32.CoCreateInstance.argtypes = [ctypes.POINTER(_GUID), ctypes.c_void_p, ctypes.c_uint32,
+                                       ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p)]
+    ole32.CoCreateInstance.restype = ctypes.c_long
+    shell32.SHCreateItemFromParsingName.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.POINTER(_GUID),
+                                                    ctypes.POINTER(ctypes.c_void_p)]
+    shell32.SHCreateItemFromParsingName.restype = ctypes.c_long
+    init = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    if init & 0xFFFFFFFF == RPC_E_CHANGED_MODE:
+        # This thread is in the multithreaded apartment, and IFileOperation only
+        # works in a single-threaded one: run it on a thread of its own.
+        import threading
+        out = {}
+
+        def run():
+            try:
+                out["result"] = shell_recycle(path, owner, before, decide)
+            except BaseException as e:          # handed back to the caller below
+                out["error"] = e
+        worker = threading.Thread(target=run, name="openevp-recycle", daemon=True)
+        worker.start()
+        worker.join()
+        if "error" in out:
+            raise out["error"]
+        return out["result"]
+    op, item, cookie = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_uint32()
+    sink, advised = None, False
+    try:
+        if init < 0:
+            return init & 0xFFFFFFFF, False
+        hr = ole32.CoCreateInstance(ctypes.byref(_guid(CLSID_FileOperation)), None, CLSCTX_ALL,
+                                    ctypes.byref(_guid(IID_IFileOperation)), ctypes.byref(op))
+        if hr < 0:
+            return hr & 0xFFFFFFFF, False
+        hr = shell32.SHCreateItemFromParsingName(path, None, ctypes.byref(_guid(IID_IShellItem)),
+                                                 ctypes.byref(item))
+        if hr < 0:
+            return hr & 0xFFFFFFFF, False
+        sink = ProgressSink(decide)
+        hr = _method(op, 3, ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))(sink.pointer, ctypes.byref(cookie))
+        if hr < 0:                                                    # Advise
+            return hr & 0xFFFFFFFF, False
+        advised = True
+        hr = _method(op, 5, ctypes.c_uint32)(RECYCLE_FLAGS)           # SetOperationFlags
+        if hr < 0:
+            return hr & 0xFFFFFFFF, False
+        if owner:
+            _method(op, 9, ctypes.c_void_p)(owner)                    # SetOwnerWindow
+        hr = _method(op, 18, ctypes.c_void_p, ctypes.c_void_p)(item, None)   # DeleteItem
+        if hr < 0:
+            return hr & 0xFFFFFFFF, False
+        if before is not None:
+            before()
+        hr = _method(op, 21)()                                        # PerformOperations
+        aborted = ctypes.c_int(0)
+        _method(op, 22, ctypes.POINTER(ctypes.c_int))(ctypes.byref(aborted))   # GetAnyOperationsAborted
+        return hr & 0xFFFFFFFF, bool(aborted.value)
+    finally:
+        if advised:
+            _method(op, 4, ctypes.c_uint32)(cookie.value)             # Unadvise
+        _release(item.value)
+        _release(op.value)
+        if sink is not None and sink.refs > 0:
+            with _LINGERING_LOCK:
+                _LINGERING.append(sink)                  # the shell still holds it: keep its code alive
+        if init >= 0:                                    # S_OK or S_FALSE
+            ole32.CoUninitialize()
+
+
+def _bin_exists(root):
+    """Does SHQueryRecycleBinW know a Recycle Bin for the drive at root?"""
+    shell32 = ctypes.WinDLL("shell32")
+    ole32 = ctypes.WinDLL("ole32")
+    shell32.SHQueryRecycleBinW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(SHQUERYRBINFO)]
+    shell32.SHQueryRecycleBinW.restype = ctypes.c_long
+    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    ole32.CoUninitialize.restype = None
+    init = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+    try:
+        info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
+        return shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) == 0
+    finally:
+        if init >= 0:
+            ole32.CoUninitialize()
+
+
+def recycle(path, owner=None, before=None, shell=None):
     """Move one folder (or file) to the Recycle Bin, or raise RecycleError in
-    plain words. Never deletes permanently on purpose: a drive without a Recycle
-    Bin, a Recycle Bin set to delete immediately and a folder too big for it are
-    refused before anything happens. owner: the app window's handle, or None.
-    before: called right before the shell is asked (to let go of the folder)."""
+    plain words. Never deletes permanently: a drive without a Recycle Bin, a
+    Recycle Bin set to delete immediately and a folder too big for it are refused
+    up front where the settings show it, and whatever the shell would still
+    delete for good is vetoed while it runs (the item stays where it is).
+    owner: the app window's handle, or None. before: called right before the
+    shell is asked (to let go of the folder). shell: shell_recycle, or a fake
+    with its signature in tests."""
     if sys.platform != "win32":
         raise RecycleError("The Recycle Bin is only available on Windows.")
     path = os.path.abspath(path)
@@ -401,44 +706,33 @@ def recycle(path, owner=None, before=None):
             or os.path.normcase(os.path.splitdrive(real)[0]) != os.path.normcase(os.path.splitdrive(path)[0])):
         raise RecycleError(said(NO_RECYCLE_BIN))
     if len(path) >= MAX_PATH or len(real) >= MAX_PATH:
-        raise RecycleError(f"The path of {name} is too long for the Recycle Bin. "
-                           "Delete it in File Explorer if you really mean to.")
+        raise RecycleError(TOO_LONG.format(name))
     path = real
     root = os.path.splitdrive(path)[0] + "\\"
-    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-    ole32 = ctypes.WinDLL("ole32")
-    shell32.SHQueryRecycleBinW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(SHQUERYRBINFO)]
-    shell32.SHQueryRecycleBinW.restype = ctypes.c_long
-    shell32.SHFileOperationW.argtypes = [ctypes.POINTER(SHFILEOPSTRUCTW)]
-    shell32.SHFileOperationW.restype = ctypes.c_int
-    ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    ole32.CoInitializeEx.restype = ctypes.c_long
-    ole32.CoUninitialize.restype = None
-
     if drive_type(root) != DRIVE_FIXED:
         raise RecycleError(said(NO_RECYCLE_BIN))
-    # FOF_WANTNUKEWARNING only asks before deleting for good (and a Yes would
-    # delete): refuse up front whatever the Recycle Bin would not take. The
-    # warning stays as a backstop for a case this does not foresee.
     if bin_refuses(root, tree_size(path)):
         raise RecycleError(said(NO_ROOM))
-    source = ctypes.create_unicode_buffer(path + "\0")   # double-NUL terminated; kept referenced
-    op = SHFILEOPSTRUCTW(hwnd=owner or None, wFunc=FO_DELETE,
-                         pFrom=ctypes.cast(source, ctypes.c_wchar_p), pTo=None, fFlags=RECYCLE_FLAGS)
-    hr = ole32.CoInitializeEx(None, COINIT_APARTMENTTHREADED)   # the shell calls below need COM
-    try:
-        info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
-        if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
-            raise RecycleError(said(NO_RECYCLE_BIN))
-        if before is not None:
-            before()
-        code = shell32.SHFileOperationW(ctypes.byref(op))
-    finally:
-        if hr >= 0:                                      # S_OK or S_FALSE; not RPC_E_CHANGED_MODE
-            ole32.CoUninitialize()
-    del source
-    if code == 0 and not op.fAnyOperationsAborted and not os.path.lexists(path):
+    if not _bin_exists(root):
+        raise RecycleError(said(NO_RECYCLE_BIN))
+    _prune_lingering()
+    decide = RecycleOnly(path)
+    hr, aborted = (shell or shell_recycle)(path, owner or None, before, decide)
+    if decide.succeeded(hr, aborted):
         return
-    if code == 0 or (is_file and code in (5, 32, 33)):   # access denied, sharing or lock violation
+    if decide.vetoed == "nuke":
+        raise RecycleError(said(NO_ROOM))
+    code = decide.failure if decide.failure is not None else hr & 0xFFFFFFFF
+    win32 = code & 0xFFFF if code & 0xFFFF0000 == 0x80070000 else None
+    if code in (COPYENGINE_E_RECYCLE_FORCE_NUKE, COPYENGINE_E_RECYCLE_SIZE_TOO_BIG,
+                COPYENGINE_E_RECYCLE_UNKNOWN_ERROR):
+        raise RecycleError(said(NO_ROOM))
+    if code == COPYENGINE_E_RECYCLE_BIN_NOT_FOUND:
+        raise RecycleError(said(NO_RECYCLE_BIN))
+    if code == COPYENGINE_E_RECYCLE_PATH_TOO_LONG:
+        raise RecycleError(TOO_LONG.format(name))
+    if (code in (S_OK, HR_CANCELLED, COPYENGINE_E_USER_CANCELLED, COPYENGINE_E_CANCELLED,
+                 COPYENGINE_E_ACCESS_DENIED_SRC, COPYENGINE_E_SHARING_VIOLATION_SRC)
+            or win32 in (5, 32, 33)):                # access denied, sharing or lock violation
         raise RecycleError((FILE_IN_USE if is_file else IN_USE).format(name))
-    raise RecycleError(f"{name} was not moved to the Recycle Bin (code 0x{code & 0xFFFFFFFF:x}).")
+    raise RecycleError(f"{name} was not moved to the Recycle Bin (code 0x{code:x}).")

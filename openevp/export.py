@@ -2,7 +2,7 @@
 
 Shared by the command-line downloader and the desktop app. Format-specific
 equality (e.g. .dvf audio with block counters removed) belongs to the format:
-see st25.export.save_dvf.
+see sony_icd.export.save_dvf.
 """
 import os
 import re
@@ -27,7 +27,7 @@ def publish(data, final_path):
     it with an operation that fails if the destination exists.
     """
     folder = os.path.dirname(final_path)
-    fd, tmp = tempfile.mkstemp(prefix=".st25-", suffix=".part", dir=folder)
+    fd, tmp = tempfile.mkstemp(prefix=".openevp-", suffix=".part", dir=folder)
     try:
         with os.fdopen(fd, "wb") as f:
             for part in _parts(data):
