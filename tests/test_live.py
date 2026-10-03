@@ -1060,6 +1060,28 @@ class DispatcherTests(unittest.TestCase):
         self.assertNotIn(("x-progress", "c", 1), events_seen)
         self.assertEqual([e for e, *_ in events_seen].count("x-row"), 2)
 
+    def test_coalesced_progress_never_runs_backwards(self):
+        # Astra's sixth pass: 10%, 20% queued, the queue full, then 90%: it delivered 90% then 20%.
+        import threading
+        from app import events
+        gate, got = threading.Event(), []
+        d = events.Dispatcher(lambda e, p: (gate.wait(), got.append((e, p))), max_queued=3)
+        d.emit("first", {})                               # taken by the dispatcher, which then waits
+        import time as clock
+        for _ in range(100):
+            if not d._queue:
+                break
+            clock.sleep(0.01)
+        d.emit("import-split-progress", {"job": "a", "percent": 10})
+        d.emit("import-split-progress", {"job": "a", "percent": 20})
+        d.emit("library-row", {"scan_id": 1})
+        d.emit("import-split-progress", {"job": "a", "percent": 90})
+        gate.set()
+        d.close(timeout=5)
+        percents = [p["percent"] for e, p in got if e == "import-split-progress"]
+        self.assertEqual(percents, [90])
+        self.assertEqual([e for e, _ in got], ["first", "library-row", "import-split-progress"])
+
     def test_close_is_bounded_whatever_the_page_does(self):
         import threading
         import time as clock

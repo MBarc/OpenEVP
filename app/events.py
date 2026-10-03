@@ -11,8 +11,9 @@ daemon: it never keeps the process alive) sends them to the page in order.
 
 Only progress is ever given up, never another event (a row, a "done", a
 "failed": the page would wait for it for ever). When the queue is full, an
-incoming progress event replaces the queued one of the same kind (the same
-event and job or scan), else it is dropped; an incoming other event makes room
+incoming progress event replaces the queued ones of the same kind (the same
+event and job or scan: they go, it goes at the end, so delivery never goes
+backwards), else it is dropped; an incoming other event makes room
 by dropping the oldest queued progress, and if there is none the queue grows
 beyond its size rather than lose it.
 """
@@ -51,13 +52,15 @@ class Dispatcher:
                 return
             if len(self._queue) >= self._max:
                 if _progress(event):
+                    # Every queued progress of its kind goes and the new one goes at the end: the
+                    # page never gets an older value after a newer one.
                     key = _kind(event, payload)
-                    for i, (e, p) in enumerate(self._queue):
-                        if _progress(e) and _kind(e, p) == key:
-                            self._queue[i] = (event, payload)     # the latest progress of its kind, in its place
-                            return
-                    self.dropped += 1                            # no room: this progress is given up
-                    return
+                    kept = collections.deque(x for x in self._queue if not (_progress(x[0]) and _kind(*x) == key))
+                    if len(kept) == len(self._queue):
+                        self.dropped += 1                        # no room: this progress is given up
+                        return
+                    self.dropped += len(self._queue) - len(kept)
+                    self._queue = kept
                 self._drop_progress()                            # room for it, if progress can give it
             self._queue.append((event, payload))
             self._cond.notify()
