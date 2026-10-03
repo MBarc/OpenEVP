@@ -11,6 +11,14 @@ class OpenEVPCapture extends AudioWorkletProcessor {
     this.batch = o.batch || 2048;
     this.buf = new Int16Array(this.batch * this.channels);
     this.n = 0; this.peak = 0; this.sumsq = 0;
+    // Stop: the page asks for the samples that do not fill a batch yet; they are sent, then
+    // the answer, on the same port (so the page has them all when the answer comes).
+    this.port.onmessage = (e) => {
+      const id = e.data && e.data.flush;
+      if (id === undefined) return;
+      if (this.n) this.flush();
+      this.port.postMessage({ flushed: id });
+    };
   }
   process(inputs) {
     const input = inputs[0];

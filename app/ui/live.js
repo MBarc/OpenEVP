@@ -14,7 +14,8 @@ const LV = {
   mode: "live",                          // "live" or "import"
   stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0,
   rate: 0, channels: 0, deviceId: "", label: "", devices: [],
-  rec: null,                             // the recording: {session, seq, pending, pendingFrames, frames, inflight, stopping, marks}
+  rec: null,                             // the recording (see startRecording)
+  flushId: 0, flushWaiters: new Map(),   // worklet flushes waiting for their answer
   meter: { peak: 0, rms: 0, held: 0, heldAt: 0 },
   wave: { cols: [], min: 32768, max: -32769, n: 0, perCol: 0 },
   spec: { bins: null, last: 0, lut: null, img: null },
@@ -22,6 +23,15 @@ const LV = {
 };
 const LIVE_COLS_PER_SEC = 40;            // waveform and spectrogram: the same time scale, 25 ms a column
 const LIVE_CHUNK_SEC = 0.5;              // audio sent to the backend per call
+const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by the backend, at most
+const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
+const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
+const LIVE_DRAIN_MS = 30000;             // Stop waits at most this long for the queued audio to be taken
+const QUEUE_FULL = "Recording stopped: OpenEVP could not save the audio as fast as it came in, so it stopped " +
+                   "rather than hold more and more of it in memory. What was saved until then is kept.";
+const NOT_ANSWERING = "OpenEVP stopped answering while saving the recording. What was saved until then is kept.";
+const STOP_NOT_ANSWERING = "OpenEVP is not answering. What was recorded until then is on disk and is finished " +
+                           "when OpenEVP closes, or when it starts again.";
 const LIVE_SPEC_HZ = 8000;               // the spectrogram's top (as the player's)
 const LIVE_DB_FLOOR = -100, LIVE_DB_TOP = -25;   // its range: 75 dB, as the player's
 const MIC_SETTINGS = { label: "Open microphone settings", run: () => api().open_mic_settings() };
@@ -112,7 +122,7 @@ function splitChanged() {
 
 // The buttons and fields: what can be changed now.
 function renderLive() {
-  const rec = liveRecording(), stopping = rec && LV.rec.stopping;
+  const rec = liveRecording(), stopping = rec && LV.rec.closing;
   const ready = !!LV.node && !LV.opening;
   $("live-record").textContent = rec ? (stopping ? "Saving…" : "■ Stop") : "● Record";
   $("live-record").disabled = stopping || (!rec && !ready);
@@ -283,6 +293,12 @@ function applyMonitor() {
 
 // ---- audio from the worklet: meter, waveform, and the chunks a recording sends ----
 function liveAudio(m) {
+  if (m.flushed !== undefined) {                       // the worklet's answer to a flush: all it held came first
+    const done = LV.flushWaiters.get(m.flushed);
+    LV.flushWaiters.delete(m.flushed);
+    if (done) done();
+    return;
+  }
   const pcm = new Int16Array(m.pcm), ch = LV.channels, n = m.frames;
   const meter = LV.meter;
   meter.peak = Math.max(meter.peak * 0.85, m.peak);
@@ -305,7 +321,12 @@ function liveAudio(m) {
     rec.pending.push(pcm);
     rec.pendingFrames += n;
     rec.frames += n;
-    if (rec.pendingFrames >= LV.rate * LIVE_CHUNK_SEC) sendChunk(rec);
+    if (rec.pendingFrames >= LV.rate * LIVE_CHUNK_SEC) queueChunk(rec);
+    // Audio the backend has not taken yet, bounded: a bridge that stalls must not fill memory.
+    if (!rec.overflow && rec.queuedFrames + rec.pendingFrames > LV.rate * LIVE_MAX_QUEUE_SEC) {
+      rec.overflow = true;
+      stopRecording({ reason: QUEUE_FULL, drain: false });
+    }
   }
 }
 
@@ -321,35 +342,69 @@ function toBase64(int16s) {
   return btoa(s);
 }
 
-// One call at a time, in order: the next chunk waits for the previous answer.
-function sendChunk(rec) {
-  if (!rec.pending.length) return rec.inflight;
-  const data = toBase64(rec.pending), seq = rec.seq++;
-  rec.pending = []; rec.pendingFrames = 0;
-  rec.inflight = rec.inflight.then(async () => {
-    if (rec.ended) return;
-    let r;
-    try { r = await api().live_chunk(rec.session, seq, data); }
-    catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
-    if (rec.ended) return;
-    if (!r.ok) { rec.failed = r.error; return; }
-    rec.status = r;
-    if (r.stopped) { rec.ended = true; rec.stoppedBy = r; }
+// A backend call that gives up after ms: {ok: false, timeout: true} if the bridge does not answer.
+function callWithTimeout(call, ms) {
+  return new Promise((resolve) => {
+    let done = false;
+    const timer = setTimeout(() => { if (!done) { done = true; resolve({ ok: false, timeout: true, error: NOT_ANSWERING }); } }, ms);
+    Promise.resolve().then(call).then(
+      (r) => { if (!done) { done = true; clearTimeout(timer); resolve(r || { ok: false, error: "no answer" }); } },
+      (e) => { if (!done) { done = true; clearTimeout(timer); resolve({ ok: false, error: `${(e && e.message) || e}` }); } });
   });
-  rec.inflight.then(() => afterChunk(rec));
-  return rec.inflight;
+}
+
+// Resolves after ms (or never sooner): a bound for waiting on something else.
+function liveDelay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+
+// The audio held so far becomes the next numbered chunk; one sender sends them in order, one at a time.
+function queueChunk(rec) {
+  if (rec.pending.length) {
+    rec.queue.push({ seq: rec.seq++, data: toBase64(rec.pending), frames: rec.pendingFrames });
+    rec.queuedFrames += rec.pendingFrames;
+    rec.pending = []; rec.pendingFrames = 0;
+  }
+  if (!rec.sending && rec.queue.length && !rec.abandoned) rec.sending = pump(rec);
+  return rec.sending || Promise.resolve();
+}
+
+async function pump(rec) {
+  try {
+    while (rec.queue.length && !rec.ended && !rec.dead && !rec.abandoned) {
+      const c = rec.queue[0];
+      const r = await callWithTimeout(() => api().live_chunk(rec.session, c.seq, c.data), LIVE_CALL_MS);
+      rec.queue.shift();
+      rec.queuedFrames -= c.frames;
+      if (r.timeout) { rec.dead = true; rec.failed = NOT_ANSWERING; break; }
+      if (!r.ok) { rec.failed = r.error; break; }
+      rec.status = r;
+      if (r.stopped) { rec.ended = true; rec.stoppedBy = r; break; }
+      afterChunk(rec);
+    }
+  } finally {
+    rec.sending = null;
+  }
+  afterChunk(rec);
+}
+
+// Until every chunk queued so far has been answered (or ms passed): true if it was.
+async function drained(rec, ms) {
+  const deadline = Date.now() + ms;
+  while (rec.sending) {
+    const left = deadline - Date.now();
+    if (left <= 0) return false;
+    if (await Promise.race([rec.sending.then(() => "sent"), liveDelay(left).then(() => "late")]) === "late") return false;
+  }
+  return !rec.queue.length || rec.abandoned || rec.dead || rec.ended;
 }
 
 // The backend's answer to a chunk: the status line, or the end the backend chose.
 function afterChunk(rec) {
   if (LV.rec !== rec) return;
-  if (rec.failed && !rec.stopping) {
-    const why = rec.failed;
-    rec.failed = null;
-    stopRecording({ reason: `Recording stopped: ${why}` });
+  if (rec.failed && !rec.closing) {
+    stopRecording({ reason: rec.dead ? `Recording stopped: ${NOT_ANSWERING}` : `Recording stopped: ${rec.failed}`, drain: false });
     return;
   }
-  if (rec.stoppedBy && !rec.stopping) { recordingDone(rec, rec.stoppedBy.result, rec.stoppedBy.stopped); return; }
+  if (rec.stoppedBy && !rec.closing) { recordingDone(rec, rec.stoppedBy.result, rec.stoppedBy.stopped); return; }
   const r = rec.status;
   if (!r) return;
   if (LV.mode === "import") {
@@ -357,6 +412,19 @@ function afterChunk(rec) {
     if (r.saved) $("live-file").textContent += ` · ${plural(r.saved, "file")} saved`;
   }
   liveStatus(r.warning || "", r.warning ? "warn" : "");
+}
+
+// Ask the worklet for the samples it holds that do not fill a batch yet; resolves once it has
+// sent them (its answer comes after them on the same port), or after ms.
+function flushWorklet(ms) {
+  const node = LV.node;
+  if (!node || !node.port || !node.port.postMessage) return Promise.resolve(false);
+  const id = ++LV.flushId;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { LV.flushWaiters.delete(id); resolve(false); }, ms);
+    LV.flushWaiters.set(id, () => { clearTimeout(timer); resolve(true); });
+    node.port.postMessage({ flush: id });
+  });
 }
 
 // ---- record, mark, stop ----
@@ -369,8 +437,9 @@ async function startRecording() {
   const folder = $("live-folder").value || "root";
   const r = await api().live_start({ mode: LV.mode, folder, rate: LV.rate, channels: LV.channels, split });
   if (!r.ok) { liveStatus([r.error, r.advice].filter(Boolean).join(" "), "warn"); return r; }
-  LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, inflight: Promise.resolve(),
-             stopping: false, ended: false, marks: [], folder, status: null, failed: null, stoppedBy: null };
+  LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
+             sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
+             overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
   $("live-file").textContent = r.file ? `Recording ${r.file}` : "Waiting for sound…";
@@ -382,11 +451,12 @@ async function startRecording() {
 // in the player afterwards).
 async function liveMark() {
   const rec = LV.rec;
-  if (!rec || rec.stopping || rec.ended) return null;
+  if (!rec || rec.closing || rec.ended) return null;
   const at = rec.frames / LV.rate;
-  sendChunk(rec);                                      // the audio up to now, before the mark
-  await rec.inflight;
-  const r = await api().live_mark(rec.session, at);
+  queueChunk(rec);                                     // the audio up to now, before the mark
+  await drained(rec, LIVE_CALL_MS);
+  if (LV.rec !== rec || rec.closing) return null;
+  const r = await callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
   const li = document.createElement("li");
@@ -395,20 +465,44 @@ async function liveMark() {
   return r;
 }
 
+// Stop and save. With drain (the default): the worklet's last samples (an acknowledged flush), then
+// every chunk queued, then the backend finishes the file; each step bounded in time. Without it (the
+// queue overflowed or the bridge stopped answering): what is queued is dropped and the backend
+// finishes what it has. If the backend does not answer at all, its file is finished when OpenEVP
+// closes (or, after a crash, when it starts again).
 async function stopRecording(opts = {}) {
   const rec = LV.rec;
-  if (!rec || rec.stopping) return null;
-  rec.stopping = true;
+  if (!rec || rec.closing) return null;
+  rec.closing = true;
   renderLive();
   liveStatus("Saving…");
-  sendChunk(rec);
-  await rec.inflight;
+  const drain = opts.drain !== false && !rec.dead;
+  if (drain && !rec.ended) await flushWorklet(LIVE_FLUSH_MS);   // batches still arrive until its answer
+  rec.stopping = true;                                            // from here on nothing more is taken
+  if (drain && !rec.ended) {
+    queueChunk(rec);
+    if (!await drained(rec, LIVE_DRAIN_MS)) rec.abandoned = true;
+  } else {
+    rec.abandoned = true;
+    rec.queue = []; rec.queuedFrames = 0; rec.pending = []; rec.pendingFrames = 0;
+    if (rec.sending) await Promise.race([rec.sending, liveDelay(LIVE_CALL_MS)]);
+  }
   let r;
   if (rec.stoppedBy) r = rec.stoppedBy.result;
   else {
-    try { r = await api().live_stop(rec.session); } catch (e) { r = { ok: false, error: `${(e && e.message) || e}` }; }
+    r = await callWithTimeout(() => api().live_stop(rec.session), LIVE_CALL_MS);
+    if (r.timeout) r = { ok: false, error: STOP_NOT_ANSWERING };
   }
   return recordingDone(rec, r, opts.reason || (rec.stoppedBy && rec.stoppedBy.stopped) || "", opts);
+}
+
+// The window is closing during a recording (app/main.py waits for this, bounded): stop and save
+// as Stop does, without opening the player.
+async function liveDrainForClose() {
+  window.__liveDrained = false;
+  try { if (LV.rec) await stopRecording({ open: false, reason: "OpenEVP is closing." }); }
+  finally { window.__liveDrained = true; }
+  return true;
 }
 
 // The recording is over (Stop, or the backend stopped it): say what was saved; a Live recording

@@ -242,7 +242,19 @@ const navigator = { mediaDevices: {
 } };
 const worklets = [];
 class FakeWorkletNode {
-  constructor(ctx, name, opts) { this.ctx = ctx; this.name = name; this.opts = opts; this.outs = []; this.port = { onmessage: null };
+  constructor(ctx, name, opts) {
+    this.ctx = ctx; this.name = name; this.opts = opts; this.outs = [];
+    // The worklet's port: a flush is answered at once (after any tail the test queues in port.tail),
+    // unless the test answers itself (port.manual).
+    const port = this.port = { onmessage: null, posted: [], manual: false, tail: null,
+      postMessage(m) {
+        port.posted.push(m);
+        if (port.manual || m.flush === undefined) return;
+        Promise.resolve().then(() => {
+          if (port.tail) { port.onmessage({ data: port.tail }); port.tail = null; }
+          port.onmessage({ data: { flushed: m.flush } });
+        });
+      } };
                                  this.kind = "worklet"; ctx.nodes.push(this); worklets.push(this); }
   connect(n) { this.outs.push(n); return n; }
   disconnect() { this.outs = []; }
@@ -2566,9 +2578,14 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                            fp: "fp-live", marks: [{ id: "m1", start: 0, end: 0.55, cls: "C", note: "Marked while recording" }],
                            reviewed: false, backup: { status: null, detail: "" }, name: "Live 2026-10-03 21-05-09.wav" } };
   batch(2048, 9);
+  const tail = new Int16Array(100 * 2).fill(1234);         // held by the worklet: less than a batch
+  tap2.port.tail = { pcm: tail.slice().buffer, frames: 100, peak: 0.04, sumsq: 0 };
   await $("live-record").onclick();
   await settle();
   assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
+  assert.ok(tap2.port.posted.some((m) => m.flush !== undefined), "Stop asks the worklet for its last samples");
+  const lastChunk = Buffer.from(lv[lv.length - 2][3], "base64");
+  assert.ok(lastChunk.subarray(lastChunk.length - 400).equals(Buffer.from(tail.buffer)), "they are saved, at the end");
   assert.strictEqual(vm.runInContext("S.view", context), "library");
   assert.strictEqual(vm.runInContext("S.playing", context), "lib|lf1");
   assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-live");
@@ -2644,6 +2661,79 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await context.liveRecover();
   assert.strictEqual($("banner-text").textContent,
                      "A recording was cut off last time; OpenEVP saved what it had: Live 2026-10-02 22-00-00.wav (in Old Mill).");
+  // ---- A bridge that stalls: the audio waiting for it is bounded, and Stop never waits forever ----
+  const liveTimers = [];
+  context.setTimeout = (fn, ms) => { liveTimers.push({ fn, ms }); return liveTimers.length; };
+  const fireLiveTimers = async () => { const now = liveTimers.splice(0); for (const t of now) t.fn(); await settle(); };
+  const stalled = [];                                     // chunk calls that never answer
+  const stallingChunks = async (sid, seq) => { stalled.push(seq); return new Promise(() => {}); };
+  // 1. The backend never answers a chunk: after 10 s of audio waiting, recording stops with a clear
+  //    message, nothing more is queued, and what the backend has is saved.
+  context.setLiveMode("live");
+  await context.openLive();
+  await settle();
+  api.live_chunk = stallingChunks;
+  let stops = 0;
+  api.live_stop = async () => { stops++; return { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                                  files: [{ id: "s1", name: "Live 2026-10-03 21-07-00.wav", seconds: 0.5, marks: 0 }] }; };
+  await $("live-record").onclick();
+  const tapS = worklets[worklets.length - 1];
+  const half = () => tapS.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  for (let i = 0; i < 19; i++) half();                    // 9.5 s: still recording, one call in flight, the rest queued
+  await settle();
+  assert.ok(vm.runInContext("liveRecording() && !LV.rec.closing", context));
+  assert.strictEqual(stalled.length, 1, "one call at a time");
+  half(); half();                                          // past 10 s waiting: stopped
+  await settle();
+  assert.ok(vm.runInContext("LV.rec.closing && LV.rec.abandoned && LV.rec.queue.length === 0", context),
+            "the queue is dropped, not kept growing");
+  const queuedAfter = vm.runInContext("LV.rec.queuedFrames", context);
+  for (let i = 0; i < 40; i++) half();                     // more audio arrives: never taken
+  assert.strictEqual(vm.runInContext("LV.rec.queuedFrames + LV.rec.pendingFrames", context), queuedAfter);
+  await fireLiveTimers();                                      // the stalled call's time runs out
+  await settle();
+  assert.strictEqual(stops, 1);
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, `${vm.runInContext("QUEUE_FULL", context)} ✓ Saved Live 2026-10-03 21-07-00.wav in OpenEVP.`);
+  // 2. The backend stops answering: a call that takes too long ends the recording; Stop itself
+  //    is bounded too, and says the file is finished when OpenEVP closes or starts again.
+  await context.openLive();
+  await settle();
+  stalled.length = 0;
+  api.live_stop = async () => { stops++; return new Promise(() => {}); };
+  await $("live-record").onclick();
+  const tapT = worklets[worklets.length - 1];
+  tapT.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  assert.strictEqual(stalled.length, 1);
+  assert.ok(liveTimers.some((t) => t.ms === vm.runInContext("LIVE_CALL_MS", context)));
+  await fireLiveTimers();                                      // the chunk call times out
+  assert.ok(vm.runInContext("LV.rec && LV.rec.dead && LV.rec.closing", context));
+  await fireLiveTimers();                                      // and so does live_stop
+  await fireLiveTimers();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.ok($("banner-text").textContent.startsWith("The recording could not be saved: OpenEVP is not answering."),
+            $("banner-text").textContent);
+  // 3. Stop when the worklet never answers its flush: bounded too, and the rest still saved.
+  await context.openLive();
+  await settle();
+  const sentNow = [];
+  api.live_chunk = async (sid, seq, data) => { sentNow.push(seq); return { ok: true, seconds: 1, file: "x", saved: 0, stopped: null }; };
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] });
+  await $("live-record").onclick();
+  const tapU = worklets[worklets.length - 1];
+  tapU.port.manual = true;
+  tapU.port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  const stopping = $("live-record").onclick();
+  await settle();
+  assert.ok(tapU.port.posted.some((m) => m.flush !== undefined), "the worklet was asked for its last samples");
+  assert.ok(vm.runInContext("liveRecording()", context), "waiting for the worklet");
+  await fireLiveTimers();                                      // no answer: Stop goes on without it
+  await stopping;
+  await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.deepStrictEqual(sentNow, [0], "what was held was still sent");
+  context.setTimeout = () => 0;
   $("live-close").onclick();
   await settle();
   assert.strictEqual(vm.runInContext("S.view", context), "library");
