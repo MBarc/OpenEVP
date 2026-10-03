@@ -22,10 +22,11 @@ import traceback
 import wave
 
 from openevp import wavinfo
+from openevp.export import save_raw, save_wav
 from openevp.paths import default_output, documents_dir, open_folder  # noqa: F401
 
 from . import __version__, audio, dvf
-from .export import save_dvf, save_raw, save_wav  # noqa: F401
+from .export import save_dvf
 from .folder import TableError, parse
 from .protocol import Recorder, RecorderError
 from .session import build_dvf

@@ -181,29 +181,10 @@ class TablesMissingTests(unittest.TestCase):
     """(c) Loading without the data file raises TablesMissing."""
 
     def test_missing_data_file_raises(self):
-        missing_path = REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json"
+        missing_path = REPO_ROOT / "does-not-exist" / "lpec_tables.json"
         self.assertFalse(missing_path.exists())
         with self.assertRaises(TablesMissing):
             tables.load(missing_path)
-
-    def test_hint_names_the_old_location_when_a_copy_is_still_there(self):
-        # A checkout from before v0.8 (st25/lpec -> openevp/decoders/sony_lpec)
-        # may still have its table data at the old path: say so.
-        with tempfile.TemporaryDirectory() as d:
-            old = Path(d) / "lpec_tables.json"
-            old.write_text("{}", encoding="utf-8")
-            with mock.patch.object(tables, "_OLD_DATA_FILE", old):
-                with self.assertRaises(TablesMissing) as cm:
-                    tables.load(REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json")
-            self.assertIn("old location", cm.exception.hint)
-            self.assertIn("st25/lpec/data", cm.exception.hint)
-            self.assertIn("openevp/decoders/sony_lpec/data", cm.exception.hint)
-
-    def test_hint_is_the_plain_one_when_no_old_copy_exists(self):
-        with mock.patch.object(tables, "_OLD_DATA_FILE", REPO_ROOT / "st25" / "lpec" / "data" / "lpec_tables.json"):
-            with self.assertRaises(TablesMissing) as cm:
-                tables.load(REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json")
-        self.assertNotIn("old location", cm.exception.hint)
 
 
 class InvalidTablesTests(unittest.TestCase):
@@ -276,7 +257,7 @@ class TablesMissingMessageTests(unittest.TestCase):
     """The message that reaches users is plain: no path, no developer hint."""
 
     def test_message_is_plain(self):
-        missing = REPO_ROOT / "st25" / "lpec" / "data" / "does-not-exist.json"
+        missing = REPO_ROOT / "does-not-exist" / "lpec_tables.json"
         with self.assertRaises(TablesMissing) as cm:
             tables.load(missing)
         msg = str(cm.exception)

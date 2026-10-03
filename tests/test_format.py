@@ -14,7 +14,8 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sony_icd import dvf  # noqa: E402
-from sony_icd.export import publish, target_path  # noqa: E402
+from openevp.export import publish  # noqa: E402
+from sony_icd.export import target_path  # noqa: E402
 from sony_icd.folder import FIRST_ENTRY_PAGE, PAGE, TABLE_SIZE, TableError, parse  # noqa: E402
 from sony_icd.protocol import (BLOCK_RAW, CMD_FOLDER_INFO, CMD_READ_BLOCK,  # noqa: E402
                            _args_ok, _completion_opcode)
@@ -347,7 +348,7 @@ class PublishTests(unittest.TestCase):
 
 class RawTests(unittest.TestCase):
     def test_raw_reuses_identical_and_never_overwrites(self):
-        from sony_icd.export import save_raw
+        from openevp.export import save_raw
         with tempfile.TemporaryDirectory() as d:
             p1 = save_raw(b"one", d, "a")
             self.assertEqual(p1, os.path.join(d, "a.raw"))
@@ -359,7 +360,7 @@ class RawTests(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(d)), ["a (2).raw", "a.raw"])
 
     def test_raw_gap_and_many_names(self):
-        from sony_icd.export import save_raw
+        from openevp.export import save_raw
         with tempfile.TemporaryDirectory() as d:
             publish(b"other", os.path.join(d, "a.raw"))
             publish(b"mine", os.path.join(d, "a (3).raw"))           # "(2)" deleted

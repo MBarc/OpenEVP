@@ -38,10 +38,6 @@ DATA_DIR = Path(__file__).resolve().parent / "data"
 DEFAULT_DATA_FILE = DATA_DIR / LP.data_file          # LPEC LP (8000 Hz)
 SP_DATA_FILE = DATA_DIR / SP.data_file               # LPEC SP (16000 Hz)
 
-# Where the extracted tables lived before v0.8 (openevp/decoders/sony_lpec
-# replaced st25/lpec): a local copy may still be there.
-_OLD_DATA_FILE = Path(__file__).resolve().parents[3] / "st25" / "lpec" / "data" / "lpec_tables.json"
-
 # Extracted tables, loaded verbatim from the data file (see the "Static
 # tables" section of docs/lpec.md; every one of these is marked "no,
 # extract" there), with the shape the decoder relies on: (rows, columns)
@@ -313,10 +309,6 @@ def load(path: Optional[Path] = None, config: Config = LP) -> Tables:
     """
     path = Path(path) if path is not None else DATA_DIR / config.data_file
     if not path.is_file():
-        if config == LP and _OLD_DATA_FILE.is_file():
-            raise TablesMissing(path=path,
-                                 hint="found at the old location st25/lpec/data -- move it to "
-                                      "openevp/decoders/sony_lpec/data")
         if config == LP:
             raise TablesMissing(path=path)
         raise TablesMissing(f"this build does not include the LPEC {config.name} table data", path=path)
