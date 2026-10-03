@@ -1,6 +1,6 @@
 """Library folder operations of the Api (a mixin): create, rename, delete (to
-the Recycle Bin only), and move and rename recordings, always inside the
-library folder.
+the Recycle Bin only), and move, rename and delete (to the Recycle Bin only)
+recordings and clips, always inside the library folder.
 
 Each operation holds the Api's _busy lock (no export, WAV with marks or update
 meanwhile), refuses while a backup is queued or written or when another
@@ -1007,3 +1007,239 @@ class LibraryOps:
         else:
             problem += ". Nothing was renamed"
         return {**_fail(problem + "."), "ids": ids}
+
+    # ---- delete recordings and clips (to the Recycle Bin only) ----
+    def _delete_groups(self, root, paths):
+        """The recordings that deleting these files ({id: path}) deletes, as
+        [[(id, path, fp)]]: one list per recording, its copies in one folder
+        together -- the listed files of that folder with the same audio
+        fingerprint, as the page groups a row (a .dvf and its .wav). A file not
+        fingerprinted yet is a recording of its own, as its row is."""
+        with self._lib_lock:
+            table = dict(self._library)
+        by_folder = {}
+        for fid, path in table.items():
+            by_folder.setdefault(os.path.normcase(os.path.dirname(os.path.abspath(path))), []).append((fid, path))
+
+        def fp_of(path):
+            try:
+                st = os.stat(path)
+            except OSError:
+                return None
+            cached = self._cached_fp(path, st.st_size, st.st_mtime_ns)
+            return cached.get("fp") if cached else None
+        groups, seen = OrderedDict(), set()
+        for fid, path in paths.items():
+            if fid in seen:
+                continue
+            fp = fp_of(path)
+            here = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+            members = [(fid, path, fp)]
+            seen.add(fid)
+            if fp:
+                for other, other_path in sorted(by_folder.get(here, ()), key=lambda x: x[1].casefold()):
+                    if other not in seen and folders.inside(root, other_path) and fp_of(other_path) == fp:
+                        members.append((other, os.path.abspath(other_path), fp))
+                        seen.add(other)
+            # A recorder's own file before its WAV copy (as the row names it).
+            members.sort(key=lambda m: (os.path.splitext(m[1])[1].lower() == ".wav", m[1].casefold()))
+            groups[(here, fp or os.path.normcase(path))] = members
+        return list(groups.values())
+
+    def _delete_paths(self, file_ids):
+        """(root, {id: path}) of library files by id, or the _fail() saying why not."""
+        if not isinstance(file_ids, list) or not file_ids or not all(isinstance(i, str) for i in file_ids):
+            return _fail("Nothing valid is selected.")
+        found = self._lib_paths("root")
+        if found is None:
+            return _fail(LIB_CHANGED)
+        paths = OrderedDict()
+        for fid in file_ids:
+            path = self._library_file(fid)
+            if path is None:
+                return _fail(LIB_CHANGED)
+            paths[fid] = os.path.abspath(path)
+        return found[0], paths
+
+    def _delete_backups(self, files):
+        """{fp: (its backup record, its backup files among these, the detail)} for
+        each recorder backup recorded as saved that deleting these files ([(id,
+        path, fp)]) takes: one of its recorded files is among them, or one of them
+        has its fingerprint (as a folder delete counts them)."""
+        if self._store is None:
+            return {}
+        saved = self._store.saved_backups()
+        keys = {os.path.normcase(p) for _, p, _ in files}
+        fps = {fp for _, _, fp in files if fp}
+        found = {}
+        for fp, recorded in saved.items():
+            there = [p for p in recorded if os.path.normcase(os.path.abspath(p)) in keys]
+            if there or fp in fps:
+                found[fp] = (self._store.backup_record(fp), there, BACKUP_RECYCLED)
+        return found
+
+    def delete_info(self, file_ids):
+        """What deleting these library files (by id: rows, ticked or not) would put
+        in the Recycle Bin, each recording with its copies in its folder (a .dvf
+        and its .wav): {"ok", "ids" (every file: what delete_files takes),
+        "names", "recordings", "clips", "marks" (the EVP marks they carry: kept in
+        the marks file all the same), "with_evps", "unchecked" (files not checked
+        for marks yet), "backups" (recorder backups among them)}."""
+        try:
+            found = self._delete_paths(file_ids)
+            if isinstance(found, dict):
+                return found
+            root, paths = found
+            groups = self._delete_groups(root, paths)
+            files = [m for g in groups for m in g]
+            for _, path, _ in files:
+                if not os.path.isfile(path) or not folders.inside(root, path):
+                    return _fail(f"{os.path.basename(path)} is no longer there. Refresh the list.")
+            marks, with_evps, counted = 0, 0, set()
+            for g in groups:
+                fp = g[0][2]
+                r = self._store.recording(fp) if self._store is not None and fp else None
+                if r is not None and r["marks"]:
+                    with_evps += 1
+                    if fp not in counted:
+                        counted.add(fp)
+                        marks += len(r["marks"])
+            clips = sum(1 for g in groups if _is_clip(g[0][1], root))
+            return {"ok": True, "ids": [fid for fid, _, _ in files],
+                    "names": [os.path.basename(p) for _, p, _ in files],
+                    "recordings": len(groups) - clips, "clips": clips, "marks": marks, "with_evps": with_evps,
+                    "unchecked": sum(1 for _, _, fp in files if not fp),
+                    "backups": len(self._delete_backups(files))}
+        except Exception as e:
+            return _fail(f"Could not look at the files: {_plain(e)}")
+
+    def delete_files(self, file_ids):
+        """Move library files (by id: the "ids" of delete_info) to the Recycle Bin,
+        never deleted for good. A recording's copies in its folder go together:
+        the call is refused when a copy is not among the ids (the library changed
+        since delete_info). Their marks stay in the marks file (by fingerprint):
+        restored from the Recycle Bin, a recording has them again. A file that
+        cannot be recycled (in use) is reported and the other recordings still
+        go; within one recording the first failure stops its other copies, and a
+        recording left in part is reported in "split". {"ok", "deleted": [names],
+        "failed": [{"name", "error"}], "split": [{"deleted": [names], "kept":
+        [names]}], "backups"}: when nothing went and something failed, ok is
+        False with a summary "error" (the detail fields stay)."""
+        try:
+            return self._delete_files(file_ids)
+        except Exception as e:
+            return _fail(f"Nothing more was deleted: {_plain(e)}")
+
+    def _delete_files(self, file_ids):
+        found = self._delete_paths(file_ids)
+        if isinstance(found, dict):
+            return found
+        root, paths = found
+        refused = self._fs_begin()
+        if refused:
+            return refused
+        pins = folders.Pins()
+        try:
+            for path in paths.values():             # the folders the files are in stay put
+                refused = self._usable(root, os.path.dirname(path), allow_root=True, pins=pins)
+                if refused:
+                    return refused
+            groups = self._delete_groups(root, paths)
+            files = [m for g in groups for m in g]
+            if len(files) != len(paths):            # a copy that was not in the dialog
+                return _fail(LIB_CHANGED)
+            for _, path, _ in files:
+                if not os.path.isfile(path) or not folders.inside(root, path):
+                    return _fail(f"{os.path.basename(path)} is no longer there. Refresh the list. "
+                                 "Nothing was deleted.")
+            candidates = self._delete_backups(files)
+            # The backups going to the Recycle Bin show as not backed up (Retry backup),
+            # recorded before anything is deleted: if that cannot be saved, nothing is.
+            if candidates:
+                try:
+                    self._store.set_backups({fp: {"status": "failed", "detail": detail}
+                                             for fp, (_, _, detail) in candidates.items()})
+                except (StoreReadOnly, StoreUnavailable, ValueError) as e:
+                    return _fail(f"Nothing was deleted: the recorder backups among them could not be "
+                                 f"marked as not backed up ({e}).")
+            result = {"ok": True, "deleted": [], "failed": [], "split": [], "backups": 0}
+            gone = []
+            for group in groups:
+                went = []
+                for fid, path, _ in group:
+                    name = os.path.basename(path)
+                    try:
+                        self._recycle(path)
+                        error = f"{name} was not moved to the Recycle Bin." if os.path.lexists(path) else None
+                    except folders.RecycleError as e:
+                        error = str(e)
+                    except Exception as e:
+                        error = f"{name} was not moved to the Recycle Bin: {_plain(e)}"
+                    if error:
+                        result["failed"].append({"name": name, "error": error})
+                        if went:                    # never half a recording without saying so
+                            result["split"].append({"deleted": list(went), "kept": [
+                                os.path.basename(p) for _, p, _ in group if os.path.lexists(p)]})
+                        break
+                    went.append(name)
+                    gone.append((fid, path))
+                result["deleted"] += went
+            if gone:
+                try:
+                    self._forget_files(gone)
+                except Exception:
+                    pass                            # pruned by the next listing all the same
+            lost = set(candidates)
+            try:
+                lost -= self._backups_kept(files, candidates)
+            except Exception:
+                pass                                # kept as not backed up: Retry backup is harmless
+            result["backups"] = len(lost)
+            if not result["deleted"] and result["failed"]:
+                first = result["failed"][0]
+                result.update(_fail(first["error"] if len(result["failed"]) == 1 else
+                                    f"Nothing was deleted. {first['error']}"))
+            return result
+        finally:
+            pins.close()
+            self._fs_end()
+
+    def _backups_kept(self, files, candidates):
+        """After a delete: the candidates (see _delete_backups) whose backup is
+        still there for sure -- its recorded files among these all remain, or a
+        file with its fingerprint remains -- recorded as saved again."""
+        kept = {}
+        for fp, (record, there, _detail) in candidates.items():
+            if (there and all(os.path.lexists(p) for p in there)) or (
+                    not there and any(f == fp and os.path.lexists(p) for _, p, f in files)):
+                kept[fp] = record
+        if kept:
+            self._store.set_backups(kept)
+        return set(kept)
+
+    def _forget_files(self, gone):
+        """Deleted files ([(id, path)]): out of the listing's table, the
+        fingerprint index (the store's and this session's), the header and
+        sniff caches, and the audio server. Their marks stay (by fingerprint)."""
+        keys = {os.path.normcase(os.path.abspath(p)) for _, p in gone}
+        store = self._store
+        if store is not None and not store.read_only:
+            try:
+                if store.forget_index([p for _, p in gone]):
+                    store.flush_index()
+            except (StoreReadOnly, StoreUnavailable):
+                pass                                # pruned by the next listing
+        with self._lib_lock:
+            for fid, _ in gone:
+                self._library.pop(fid, None)
+            for key in keys:
+                self._fp_session.pop(key, None)
+        with self._headers_lock:
+            for key in keys:
+                self._headers.pop(key, None)
+        with _sniffed_lock:
+            for key in keys:
+                _sniffed.pop(key, None)
+        forget = getattr(self._server, "forget_files", None)
+        if forget is not None:
+            forget([p for _, p in gone])

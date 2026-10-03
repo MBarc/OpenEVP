@@ -23,6 +23,7 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
             loadSeq: 0, playSeq: 0, job: 0, exporting: false, deviceError: "", settingUp: false,
             view: "device",                               // "device" (a recorder) or "library" (this PC)
             drag: null,                                   // recordings being dragged in the library: {ids}
+            sharing: false, sharePreparing: false,        // a drag out or Copy file running; its MP3 being made
             // The EVP library: the listing, its scan, what is shown (see loadLibrary).
             lib: { seq: 0, loading: false, listed: false, scanId: 0, buffer: [], folder: "", exists: true,
                    truncated: false, indexing: false, done: 0, total: 0, checkError: "", problem: "",
@@ -631,6 +632,7 @@ function renderLibrary() {
   all.checked = picked > 0 && picked === L.shown.length;
   all.indeterminate = picked > 0 && picked < L.shown.length;
   all.disabled = !L.shown.length;
+  renderToolbarRenameDelete();                   // they act on the rows just shown
   // Put the rows in order, moving only the ones out of place (no flicker, scroll kept).
   const body = $("library-rows");
   let at = body.firstChild;
@@ -867,11 +869,21 @@ function loadLibraryView() {
 }
 
 // Enter on a folder row opens it; Backspace goes up a level; Escape clears the recordings
-// picked (not while typing or in a dialog).
+// picked; Ctrl+C on a recording row copies its file; Delete on a recording row deletes it (or
+// every ticked one, if it is ticked) after the dialog (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
-  if (S.view !== "library" || e.ctrlKey || e.altKey || e.metaKey) return;
+  if (S.view !== "library" || e.altKey || e.metaKey) return;
   if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
+  if (e.ctrlKey) {                             // Ctrl+C on a recording row: Copy file
+    const row = e.target.closest && e.target.closest("tr.lib-row");
+    if (!e.shiftKey && (e.key === "c" || e.key === "C") && row && row === e.target && row.group) {
+      e.preventDefault();
+      const g = row.group;
+      copyLibraryFiles(groupPicked(g) ? [...L.selected].filter((id) => L.byId.has(id)) : groupPickIds(g));
+    }
+    return;
+  }
   if (e.key === "Escape" && L.selected.size) {
     e.preventDefault();
     L.selected.clear();
@@ -881,6 +893,12 @@ function libraryKeys(e) {
   if (e.key === "F2") { renameKey(e); return; }
   const recRow = e.target.closest && e.target.closest("tr.lib-row");
   if (recRow && recRow === e.target && recRow.group) {
+    if (e.key === "Delete") {                  // as the right-click menu's Delete…
+      e.preventDefault();
+      if (S.caps.marks_read_only) banner(readOnlyTip());
+      else if (libraryToolsReady()) deleteRecordingsDialog(deleteIds(recRow.group));
+      return;
+    }
     if (e.key === "Enter") {
       e.preventDefault();
       if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
@@ -936,15 +954,67 @@ function renderLibraryBar() {
   if (L.indexing && !L.flat && libraryFiltering()) st.textContent += " (folders may appear as recordings are checked)";
   st.title = L.indexing ? "" : L.checkError;
   $("library-flat").checked = L.flat;
-  // The folder tools: New / Rename / Delete in the folder view, Move to… in both views.
-  for (const id of ["library-new", "library-rename", "library-delete"]) $(id).hidden = L.flat;
+  // The folder tools: New folder in the folder view; Rename, Delete and Move to… in both views
+  // (Rename and Delete act on the ticked recordings shown, else on the selected folder).
+  $("library-new").hidden = L.flat;
   $("library-new").disabled = !canNewFolder();
-  $("library-rename").disabled = $("library-delete").disabled = !canChangeFolder(L.selFolder);
+  renderToolbarRenameDelete();
   $("library-move").disabled = !canMove([...L.selected]);
   const n = pickedRecordings();
   $("library-tools").title = S.caps.marks_read_only ? readOnlyTip() : "";
   $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
+}
+
+// The toolbar's Rename and Delete act on what is selected: the ticked recordings and clips
+// shown (never one the search, a filter or the folder shown hides, as Delete… on a ticked row),
+// else the selected folder. Ticks win when there are both: clicking or tabbing onto a folder
+// row selects it without clearing the ticks, so a folder can be highlighted by the way, while
+// the ticks are always an explicit choice -- the same one Move to… and Delete… act on.
+function toolbarTarget() {
+  const L = S.lib, groups = L.shown.filter(groupPicked);
+  if (groups.length) return { groups };
+  if (!L.flat && L.selFolder && L.folderById.has(L.selFolder)) return { folder: L.selFolder };
+  return {};
+}
+// Why the library can't be changed now ("" if it can, or if there is nothing to say).
+function libraryBusyTip() {
+  return S.caps.marks_read_only ? readOnlyTip() : S.lib.op ? "Wait for the operation to finish"
+       : savingAudio() ? "Wait until the clips or WAV being saved are done" : "";
+}
+function renderToolbarRenameDelete() {
+  const L = S.lib, t = toolbarTarget(), busy = libraryBusyTip(), ren = $("library-rename"), del = $("library-delete");
+  if (t.groups) {
+    const n = t.groups.length, g = t.groups[0], what = g.clip ? "clip" : "recording";
+    const hidden = Math.max(0, pickedRecordings() - recordingsIn(t.groups.flatMap(groupPickIds)));
+    ren.disabled = n !== 1 || !canRenameRecording(g);
+    ren.title = n !== 1 ? "Tick one recording to rename" : busy || `Rename the ticked ${what} “${g.main.name}”`;
+    del.disabled = !libraryToolsReady();
+    del.title = busy || (n === 1 ? `Move the ticked ${what} “${g.main.name}” (and its copies here) to the Recycle Bin`
+                                 : `Move the ${n} ticked recordings shown to the Recycle Bin`) +
+                       (hidden ? ` (${plural(hidden, "ticked recording")} not shown ${hidden === 1 ? "stays" : "stay"})` : "");
+  } else if (t.folder) {
+    const d = L.folderById.get(t.folder), ok = canChangeFolder(t.folder);
+    ren.disabled = del.disabled = !ok;
+    const why = t.folder === "root" ? "The library folder itself can't be renamed or deleted here" : busy;
+    ren.title = why || `Rename the folder “${d.name}”`;
+    del.title = why || `Move the folder “${d.name}” to the Recycle Bin`;
+  } else {
+    ren.disabled = del.disabled = true;
+    const or = L.flat ? "" : " (or select a folder)";
+    ren.title = `Tick one recording${or} to rename it`;
+    del.title = `Tick recordings${or} to delete them`;
+  }
+}
+function toolbarRename() {
+  const t = toolbarTarget();
+  if (t.groups) { if (t.groups.length === 1 && canRenameRecording(t.groups[0])) renameRecordingDialog(t.groups[0]); }
+  else if (t.folder && canChangeFolder(t.folder)) renameFolderDialog();
+}
+function toolbarDelete() {
+  const t = toolbarTarget();
+  if (t.groups) { if (libraryToolsReady()) deleteRecordingsDialog(shownTickedIds()); }
+  else if (t.folder && canChangeFolder(t.folder)) deleteFolderDialog();
 }
 
 // When the folder tools (and the same items of the library's right-click menu) can be used.
@@ -1010,7 +1080,6 @@ function libraryRow(g) {
     toggle.onclick = (e) => { e.stopPropagation(); toggleLibraryRow(tr.group); };
     tr.cells[0].append(pick, toggle);
     tr.ondragstart = (e) => startDrag(e, tr.group);
-    tr.ondragend = endDrag;
     tr.onclick = () => {
       if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); }
       playLibrary(tr.group, null);
@@ -1021,7 +1090,7 @@ function libraryRow(g) {
   const picked = groupPicked(g);
   tr.cells[0].firstChild.checked = picked;
   tr.classList.toggle("picked", picked);
-  tr.draggable = !L.flat;                      // onto a folder row or a breadcrumb segment
+  tr.draggable = true;                         // out of the window, or onto a folder row or a breadcrumb segment
   const total = g.marks.A + g.marks.B + g.marks.C;
   const expanded = L.expanded.has(g.recKey);
   const playable = libraryPlayable(g);
@@ -1632,6 +1701,74 @@ function renameRecordingDialog(g) {
   });
 }
 
+// ---- Delete… recordings and clips: to the Recycle Bin, each with its copies in its folder ----
+// The backend says what goes (a .dvf brings its .wav), how many EVP marks they carry, and takes
+// back exactly those ids. The marks stay in the marks file: restored files get them back. The
+// recording in the player is unloaded first if it goes (and loaded again if it stays after all).
+const DELETE_NAMES_SHOWN = 12;
+
+async function deleteRecordingsDialog(ids) {
+  const L = S.lib;
+  ids = ids.filter((id) => L.byId.has(id));
+  if (!ids.length || !libraryToolsReady()) return;
+  const info = await libraryOp("Looking at the files…", () => api().delete_info(ids));
+  if (!info.ok) { showError(info); relistAfterFailure(); return; }
+  const what = [info.recordings ? plural(info.recordings, "recording") : "",
+                info.clips ? plural(info.clips, "EVP clip") : ""].filter(Boolean).join(" and ") || plural(info.ids.length, "file");
+  const names = document.createElement("ul");
+  for (const name of info.names.slice(0, DELETE_NAMES_SHOWN)) {
+    const li = document.createElement("li"); li.textContent = name; names.appendChild(li);
+  }
+  if (info.names.length > DELETE_NAMES_SHOWN) {
+    const li = document.createElement("li"); li.textContent = `and ${info.names.length - DELETE_NAMES_SHOWN} more`; names.appendChild(li);
+  }
+  const files = info.ids.length === 1 ? "This file" : `These ${info.ids.length} files`;
+  let marks = info.marks ? `They carry ${plural(info.marks, "EVP mark")}.` : "They carry no EVP marks.";
+  if (info.unchecked) marks += ` ${plural(info.unchecked, "file")} ${info.unchecked === 1 ? "is" : "are"} not checked for EVPs yet.`;
+  const body = [dialogText(`${files} will be deleted:`), names, dialogText(marks)];
+  if (info.backups) body.push(dialogText(`${plural(info.backups, "recorder backup")} will go with them; those recordings will offer Retry backup.`));
+  body.push(dialogText("They go to the Recycle Bin. Restore them from there to get them and their marks back."));
+  folderDialog({
+    title: `Delete ${what}?`, body, ok: "Move to Recycle Bin",
+    run: async () => {
+      const held = heldLibraryFile(), touched = !!held && info.ids.includes(held.id);
+      if (touched) unloadPlayer();
+      const r = await libraryOp("Moving to the Recycle Bin…", () => api().delete_files(info.ids));
+      const deleted = r.deleted || [];
+      if (!r.ok && !deleted.length) {                    // nothing went: the dialog says why
+        finishFolderOp(async () => { await loadLibrary(); if (touched) reloadHeld(held, held.id); });
+        return errorText(r);
+      }
+      const parts = [`Moved ${plural(deleted.length, "file")} to the Recycle Bin.`];
+      for (const s of r.split || []) {
+        parts.push(`Only part of a recording went: ${s.deleted.join(", ")} ${s.deleted.length === 1 ? "is" : "are"} in the Recycle Bin, ` +
+                   `but ${s.kept.join(", ")} ${s.kept.length === 1 ? "is" : "are"} still here.`);
+      }
+      const failed = r.failed || [];
+      if (failed.length) parts.push(`Not deleted: ${failed.map((x) => String(x.error).replace(/\.$/, "")).join(" · ")}.`);
+      if (r.backups) parts.push(`${plural(r.backups, "recorder backup")} went with them; those recordings offer Retry backup.`);
+      banner(parts.join(" "), failed.length ? "warn" : "ok");
+      finishFolderOp(async () => {
+        await loadLibrary();                             // counts and the ticks follow the listing
+        if (touched) reloadHeld(held, S.lib.byId.has(held.id) ? held.id : null);   // still there: back in the player
+      });
+      return null;
+    },
+  });
+}
+
+// The files a Delete… or the Delete key takes for a row: when the row is ticked, every ticked
+// recording shown now -- never one the search, a filter or the folder shown hides (nothing is
+// deleted that is not in sight) -- else the row itself.
+function deleteIds(g) {
+  if (!groupPicked(g)) return groupPickIds(g);
+  return shownTickedIds();
+}
+function shownTickedIds() {                    // the files of the ticked recordings shown now
+  const L = S.lib;
+  return L.shown.filter(groupPicked).flatMap(groupPickIds).filter((x) => L.byId.has(x));
+}
+
 // ---- Move to… (the folder tree) and the move itself ----
 // ids: the files to move (default: the recordings ticked).
 function moveDialog(ids = [...S.lib.selected]) {
@@ -1702,18 +1839,80 @@ async function moveRecordings(ids, targetId) {
   if (touched) reloadHeld(held, newIds[held.id] || held.id);
 }
 
-// ---- drag and drop: recording rows onto a folder row or a breadcrumb segment ----
+// ---- drag and drop: library rows out to other programs, or onto a folder row or a breadcrumb ----
+// Every drag of a row is a real Windows file drag (app/native_share.py): the browser's own drag is
+// cancelled and the backend starts one with the row's files, as File Explorer would, so Discord,
+// WhatsApp, a browser, the desktop or an email take them like files from Explorer. A recorder's file
+// (.dvf) goes as the WAV beside it, or as an MP3 made for it first ("Preparing…"). The drag offers
+// Copy only: nothing dropped anywhere can move or delete the original.
+// The same drag dropped back on a library folder in this window moves the recordings, as before:
+// the page sees it as a file drag (dataTransfer "Files", effect copy) while S.drag says which rows
+// it carries. One mechanism, so a drag that leaves the window and comes back still works.
 function startDrag(e, g) {
   const L = S.lib;
-  if (L.flat || L.op) { e.preventDefault(); return; }
+  e.preventDefault();                          // not the browser's drag: the backend starts a file drag
+  if (L.op || S.drag) return;
   // A picked row drags every picked recording; any other row just itself.
   const ids = groupPicked(g) ? [...L.selected].filter((id) => L.byId.has(id)) : groupPickIds(g);
+  if (!ids.length) return;
   S.drag = { ids };
-  e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setData("application/x-openevp-recordings", JSON.stringify(ids));
-  const label = $("drag-label"), n = recordingsIn(ids);
-  label.textContent = n === 1 ? g.main.name : plural(n, "recording");
-  e.dataTransfer.setDragImage(label, -12, -12);
+  dragOut(ids);
+}
+
+// The files that stand for these recordings outside OpenEVP: one per recording (its WAV or MP3
+// copy when it has one, else its own file, which the backend shares as a playable copy).
+function shareIds(ids) {
+  const L = S.lib, byRec = new Map();
+  for (const id of ids) {
+    const f = L.byId.get(id);
+    if (!f) continue;
+    const k = (L.flat ? "" : f.folder_id) + "|" + libFileKey(f);
+    const held = byRec.get(k);
+    if (!held || (!playsAnywhere(held) && playsAnywhere(f))) byRec.set(k, f);
+  }
+  return [...byRec.values()].map((f) => f.id);
+}
+function playsAnywhere(f) { return SHARED_AS_IS.has(f.type); }
+const SHARED_AS_IS = new Set(["wav", "mp3", "mpeg", "mpga", "mp2", "m2a"]);   // openevp.formats: WAV, MP3_FORMATS
+
+async function dragOut(ids) {
+  const share = shareIds(ids);
+  S.sharing = true;
+  try {
+    const r = await api().drag_out(share);
+    if (!r.ok) showError(r);
+    else if (!r.started && r.made) status(`Ready to share: drag ${r.count === 1 ? "it" : "them"} again.`);
+    else if (S.sharePreparing) status("");
+  } catch (err) {
+    banner(String(err));
+  } finally {
+    S.sharing = false;
+    S.sharePreparing = false;
+    endDrag();
+  }
+}
+
+// Copy file (the row's right-click menu, or Ctrl+C on a row): the same files a drag shares, on the
+// clipboard as files, so Ctrl+V pastes them into Discord, WhatsApp or a folder.
+async function copyLibraryFiles(ids) {
+  const share = shareIds(ids);
+  if (!share.length || S.sharing) return;
+  S.sharing = true;
+  try {
+    const r = await api().copy_files(share);
+    if (!r.ok) showError(r);
+    else status(`Copied ${r.count === 1 ? "1 file" : plural(r.count, "file")}. Paste it with Ctrl+V into a chat, an email or a folder.`);
+  } catch (err) {
+    banner(String(err));
+  } finally {
+    S.sharing = false;
+    S.sharePreparing = false;
+  }
+}
+
+function sharePreparing(p) {
+  S.sharePreparing = true;
+  status(`Preparing ${p.name} to share…`);
 }
 
 function endDrag() {
@@ -1739,7 +1938,7 @@ function setupDragAndDrop() {
       const el = dropTarget(e);
       if (!el) return;
       e.preventDefault();                      // on a valid target only
-      e.dataTransfer.dropEffect = "move";
+      e.dataTransfer.dropEffect = "copy";      // what the file drag offers; the page moves the recordings
       for (const x of document.querySelectorAll(".drop-target")) if (x !== el) x.classList.remove("drop-target");
       el.classList.add("drop-target");
     });
@@ -1770,16 +1969,17 @@ function setupDragAndDrop() {
     endDrag();
   });
   // No pointer goes down and the window is not focused again while a drag runs: if either
-  // happens with a drag still recorded, its dragend was missed. Clear it.
-  window.addEventListener("pointerdown", () => { if (S.drag) endDrag(); }, true);
-  window.addEventListener("mousedown", () => { if (S.drag) endDrag(); }, true);
-  window.addEventListener("focus", () => { if (S.drag) endDrag(); });
+  // happens with a drag still recorded and no drag out running, its end was missed. Clear it.
+  const stale = () => { if (S.drag && !S.sharing) endDrag(); };
+  window.addEventListener("pointerdown", stale, true);
+  window.addEventListener("mousedown", stale, true);
+  window.addEventListener("focus", stale);
 }
 
 function setupFolderTools() {
   $("library-new").onclick = newFolderDialog;
-  $("library-rename").onclick = renameFolderDialog;
-  $("library-delete").onclick = deleteFolderDialog;
+  $("library-rename").onclick = toolbarRename;
+  $("library-delete").onclick = toolbarDelete;
   $("library-move").onclick = () => moveDialog();
   $("library-all").onclick = () => {
     const on = $("library-all").checked;
@@ -1823,12 +2023,18 @@ function libraryMenuItems(target) {
     const g = recRow.group;
     // A ticked row stands for every recording ticked; any other row for itself only.
     const ids = groupPicked(g) ? [...L.selected].filter((x) => L.byId.has(x)) : groupPickIds(g);
+    const dels = deleteIds(g), nDel = recordingsIn(dels);
     const n = recordingsIn(ids), playable = !!libraryPlayable(g);
     return [
       { label: "Play", disabled: !playable, title: playable ? "" : whyUnplayable(g),
         run: () => { if (L.selFolder) { L.selFolder = null; scheduleLibraryRender(); } playLibrary(g, null); } },
       // The row's own file (the one it names: a recorder's .dvf before its WAV copy), not every copy.
       { label: "Show in File Explorer", title: g.main.name, run: () => exploreLibraryFile(g.main) },
+      // The files a drag out shares (Ctrl+C on the row does the same), for pasting into a chat.
+      { label: n > 1 ? `Copy ${n} files` : "Copy file", disabled: S.sharing,
+        title: n > 1 ? "Put them on the clipboard as files: paste them with Ctrl+V into Discord, WhatsApp, an email or a folder"
+                     : "Put it on the clipboard as a file: paste it with Ctrl+V into Discord, WhatsApp, an email or a folder",
+        run: () => copyLibraryFiles(ids) },
       // Rename… is for the row clicked (its files in the folder shown), ticked or not.
       { label: "Rename…", disabled: !canRenameRecording(g),
         title: L.op ? "Wait for the operation to finish" : n > 1 ? "Renames this recording only" : "",
@@ -1840,6 +2046,12 @@ function libraryMenuItems(target) {
                         : g.clip ? `Save each EVP marked in this clip as its own ${clipLabel()} clip (in the same Clips folder)`
                         : `Save each EVP of this recording as its own ${clipLabel()} clip`),
         run: () => exportLibraryClips({ files: g.files.map((f) => f.id) }, g.main.name) },
+      // Delete… is for the ticked recordings when this row is ticked, else for this row (its copies too).
+      { label: "Delete…", disabled: !libraryToolsReady(),
+        title: S.caps.marks_read_only ? readOnlyTip() : L.op ? "Wait for the operation to finish"
+             : nDel > 1 ? `Moves ${plural(nDel, "selected recording")} shown to the Recycle Bin`
+             : "Moves it (and its copies here) to the Recycle Bin",
+        run: () => deleteRecordingsDialog(dels) },
     ];
   }
   if (L.flat) return [];                       // no folders in the All recordings view
@@ -2008,6 +2220,7 @@ $("export").onclick = async () => {
 
 // Called by app/main.py through evaluate_js. Events for an older job are ignored.
 window.onBackendEvent = (event, p) => {
+  if (event === "share-preparing") { sharePreparing(p); return; }   // a drag out or Copy file
   if (event === "update-progress") {        // not tied to an export job
     $("update-status").textContent = `Downloading… ${p.percent}%`;
     return;

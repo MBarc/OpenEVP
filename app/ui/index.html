@@ -45,8 +45,8 @@
       <label title="Every recording in the library in one list, without folders"><input type="checkbox" id="library-flat"> All recordings</label>
       <span id="library-tools" role="group" aria-label="Folders">
         <button type="button" id="library-new" title="Create a folder in the folder shown">New folder</button>
-        <button type="button" id="library-rename" title="Rename the selected folder">Rename</button>
-        <button type="button" id="library-delete" title="Move the selected folder to the Recycle Bin">Delete</button>
+        <button type="button" id="library-rename" title="Rename the ticked recording, else the selected folder">Rename</button>
+        <button type="button" id="library-delete" title="Move the ticked recordings shown, else the selected folder, to the Recycle Bin">Delete</button>
         <button type="button" id="library-move" title="Move the selected recordings to another folder">Move to…</button>
       </span>
       <span id="library-status"></span>
@@ -207,7 +207,6 @@
     </div>
   </div>
 </div>
-<div id="drag-label" aria-hidden="true"></div>
 <div id="context-menu" class="context-menu" role="menu" aria-label="Library" tabindex="-1" hidden></div>
 <script src="notes.js"></script>
 <script src="app.js"></script>

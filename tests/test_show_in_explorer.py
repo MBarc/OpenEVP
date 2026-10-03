@@ -79,7 +79,7 @@ class ShowLibraryFileTests(FolderApiBase):
     def test_a_missing_file_gets_a_plain_message(self):
         path = self.write("Old Mill/gone.wav", wav_bytes(b"g"))
         api = self.new_api()
-        fid = self.file(api.list_library(), "gone.wav")
+        fid = self.file(self.index(api), "gone.wav")    # the indexer is done with it: it can be deleted
         os.remove(path)
         res = api.show_library_file(fid)
         self.assertEqual((res["ok"], res["error"]), (False, "gone.wav is no longer there. Refresh the list."))

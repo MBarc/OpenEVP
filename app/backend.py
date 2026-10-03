@@ -87,6 +87,7 @@ from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_
                           _plain)
 from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
+from .sharing import ShareOps
 from .store import StoreReadOnly, StoreUnavailable
 
 REPLUG = "Unplug the recorder's USB cable, wait a few seconds and plug it back in."
@@ -465,10 +466,10 @@ def _recording(folder, r):
             "play_problem": r.get("play_problem") or None}
 
 
-class Api(LibraryOps):
+class Api(ShareOps, LibraryOps):
     def __init__(self, manager, emit, pick_folder, default_dest, audio_server, driver_setup=None,
                  pick_wav=None, updater=None, quit_app=None, can_install=False, before_install=None,
-                 store=None, store_problems=(), recycle=None):
+                 store=None, store_problems=(), recycle=None, drag_files=None, copy_files=None):
         self._manager = manager            # private attributes are not exposed to JS
         self._emit = emit
         self._pick = pick_folder             # (start_dir) -> path or None (a folder dialog)
@@ -520,6 +521,9 @@ class Api(LibraryOps):
         self._headers = OrderedDict()         # index key -> (size, mtime_ns, Format.file_problem result)
         self._headers_lock = threading.Lock()
         self._recycle = recycle or folders.recycle   # (path) -> None or raises folders.RecycleError
+        self._drag_files = drag_files         # (paths) -> "copy" / "none" / None: a Windows file drag (app.sharing)
+        self._copy_files = copy_files         # (paths) -> None: the files on the clipboard (app.sharing)
+        self._share_lock = threading.Lock()   # one drag out or Copy file at a time
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
         self._fs_busy = False                 # a folder operation holds _busy (not an export)
