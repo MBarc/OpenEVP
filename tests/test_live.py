@@ -489,6 +489,61 @@ class LiveApiTests(Tmp):
             self.assertFalse(b.set_live_settings(bad)["ok"], bad)
 
 
+class LivePlaybackTests(Tmp):
+    """A finished Live recording opens in the player through the real audio server: served
+    in place (its file identity checked on every open), or, on a file system with no file
+    identity (FAT/exFAT sticks), from a private copy in the cache. Either way the player gets
+    the file's exact bytes and the fingerprint the marks were stored under."""
+
+    def setUp(self):
+        super().setUp()
+        import urllib.request
+        from app.audio_server import AudioServer
+        self.urlopen = urllib.request.urlopen
+        self.cache = os.path.join(self.tmp, "cache")
+        os.makedirs(self.cache)
+        self.server = AudioServer(lambda key: None, self.cache)
+        self.server.start()
+        self.addCleanup(self.server.stop)
+        self.store = AppData(os.path.join(self.tmp, "appdata"))
+        self.addCleanup(self.store.close)
+        self.lib = os.path.join(self.tmp, "OpenEVP")
+        self.api = backend.Api(None, Events(), lambda s: None, self.lib, self.server, store=self.store)
+        self.addCleanup(self.api.shutdown)
+
+    def record(self):
+        sid = self.api.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 2})["session"]
+        x = tone(2.0, channels=2)
+        for i in range(4):
+            self.assertTrue(self.api.live_chunk(sid, i, base64.b64encode(pcm(x[i * RATE // 2:(i + 1) * RATE // 2])).decode())["ok"])
+        self.api.live_mark(sid, 1.5)
+        r = self.api.live_stop(sid)
+        path = os.path.join(self.lib, r["files"][0]["name"])
+        with open(path, "rb") as f:
+            return r, f.read(), wavinfo.wav_fingerprint(path)
+
+    def check(self, r, data, fp):
+        player = r["player"]
+        self.assertTrue(player["ok"], player)
+        self.assertEqual((player["fp"], player["duration"], player["rate"], player["channels"]), (fp, 2.0, RATE, 2))
+        self.assertEqual(len(player["marks"]), 1)                       # the mark made while recording
+        with self.urlopen(player["url"], timeout=5) as resp:
+            self.assertEqual(resp.read(), data)
+        self.assertTrue(self.api.get_marks(player["rec"])["ok"])
+
+    def test_served_in_place_with_its_identity(self):
+        r, data, fp = self.record()
+        self.check(r, data, fp)
+        self.assertEqual(os.listdir(self.cache), [n for n in os.listdir(self.cache) if n.startswith(".")], "nothing copied")
+
+    def test_served_from_a_private_copy_without_identity(self):
+        from app import audio_server
+        with mock.patch.object(audio_server, "_ident_of", return_value=None):
+            r, data, fp = self.record()
+        self.check(r, data, fp)
+        self.assertTrue([n for n in os.listdir(self.cache) if not n.startswith(".")], "a copy in the cache")
+
+
 class SmokeLiveTests(Tmp):
     """OpenEVP.exe --smoke records a moment from Chromium's fake input through the page (the
     page part runs in the real WebView2 only; here the window is a stand-in)."""
