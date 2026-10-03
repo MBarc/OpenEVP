@@ -29,6 +29,7 @@
     <div id="devices"><p class="muted">Looking for recorders…</p></div>
     <div class="nav-title">On this PC</div>
     <div id="library-entry" class="device-name">EVP Library <span id="library-count" class="muted"></span></div>
+    <div id="live-entry" class="device-name" title="Record from a microphone, or import from a recorder's headphone jack">Record live</div>
   </nav>
   <section id="list">
     <div id="library-bar" hidden>
@@ -64,11 +65,59 @@
     <p id="empty" class="muted">Plug in a supported recorder and select it on the left.</p>
     </div>
   </section>
+  <section id="live" hidden aria-labelledby="live-title">
+    <div id="live-bar">
+      <h2 id="live-title">Record live</h2>
+      <span id="live-modes" role="group" aria-label="Mode">
+        <button type="button" id="live-mode-live" aria-pressed="true" title="Record from a microphone or other input into one file">Live</button>
+        <button type="button" id="live-mode-import" aria-pressed="false" title="Copy recordings off a recorder that only has a headphone jack, played into this PC">Import from a recorder</button>
+      </span>
+      <span class="spacer"></span>
+      <button id="live-close" class="link" title="Back to the EVP Library">Close</button>
+    </div>
+    <div id="live-settings">
+      <label>Input <select id="live-input" aria-label="Audio input"></select></label>
+      <span id="live-meter" title="The input's level. Keep loud parts out of the red: that is where it clips."><span id="live-meter-fill"></span><span id="live-meter-peak"></span></span>
+      <span id="live-level">−∞ dB</span>
+      <label>Save into <select id="live-folder" aria-label="Library folder to save into"></select></label>
+    </div>
+    <div id="live-import" hidden>
+      <div id="live-split-row">
+        <label title="Each time the recorder goes quiet between recordings, the next one starts a new file"><input type="checkbox" id="live-split" checked> Start a new file after</label>
+        <input id="live-gap" type="number" min="0.5" max="60" step="0.5" value="3" aria-label="Seconds of silence"> seconds of silence
+      </div>
+      <details id="live-guide" open>
+        <summary>How to connect a recorder</summary>
+        <ol>
+          <li>Run a cable from the recorder's headphone jack to your PC's line-in, or to a USB audio adapter. Many recorders have a 3.5 mm jack; some, like the Panasonic RR-DR60, have a smaller 2.5 mm one, so you may need a 2.5 mm to 3.5 mm adapter. A line-in works better than a microphone input, which is much more sensitive.</li>
+          <li>Choose that input above, then play a little and set the recorder's volume to about the middle. The meter should move well, but loud parts should stay out of the red.</li>
+          <li>Set the recorder's playback speed to normal, and turn voice activation off.</li>
+          <li>Press Record here first, then Play on the recorder. OpenEVP starts a new file each time the recorder goes quiet for the seconds set above, and leaves the quiet gaps out.</li>
+        </ol>
+      </details>
+    </div>
+    <div id="live-controls">
+      <button id="live-record" class="primary" disabled>● Record</button>
+      <button id="live-mark" disabled title="Mark this moment as an EVP (M). It becomes a 2-second mark ending now; change its class and note in the player afterwards.">★ Mark (M)</button>
+      <span id="live-time">0:00</span>
+      <span id="live-file"></span>
+      <span class="spacer"></span>
+      <label id="live-monitor-label" title="Hear the input through your speakers or headphones. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
+      <label id="live-enhance-label" title="Apply the player's Enhance settings to what you hear while listening. The saved file is always the input as it came in."><input type="checkbox" id="live-enhance"> Enhance what I hear</label>
+    </div>
+    <p id="live-status" role="status"></p>
+    <div id="live-scopes">
+      <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
+      <canvas id="live-spec" aria-label="Spectrogram of the input"></canvas>
+    </div>
+    <ul id="live-marks" aria-label="Marks made while recording"></ul>
+  </section>
 </main>
 <footer id="player">
   <div id="player-empty">
     <p id="player-hint">Open an audio file to analyze it here.</p>
-    <button id="open-wav" title="Open a WAV or MP3 file">Open audio file…</button>
+    <span class="player-start"><button id="open-wav" title="Open a WAV or MP3 file">Open audio file…</button>
+      <button id="open-live" title="Record from a microphone, or import from a recorder's headphone jack">Record live…</button></span>
   </div>
   <div id="player-loaded" hidden>
     <button id="play" disabled title="Play / pause">▶</button>
@@ -210,5 +259,6 @@
 <div id="context-menu" class="context-menu" role="menu" aria-label="Library" tabindex="-1" hidden></div>
 <script src="notes.js"></script>
 <script src="app.js"></script>
+<script src="live.js"></script>
 </body>
 </html>

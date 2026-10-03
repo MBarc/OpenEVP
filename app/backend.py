@@ -87,6 +87,7 @@ from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_
                           _plain)
 from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
+from .live import LiveOps
 from .sharing import ShareOps
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -468,7 +469,7 @@ def _recording(folder, r):
             "play_problem": r.get("play_problem") or None}
 
 
-class Api(ShareOps, LibraryOps):
+class Api(ShareOps, LibraryOps, LiveOps):
     def __init__(self, manager, emit, pick_folder, default_dest, audio_server, driver_setup=None,
                  pick_wav=None, updater=None, quit_app=None, can_install=False, before_install=None,
                  store=None, store_problems=(), recycle=None, drag_files=None, copy_files=None):
@@ -531,6 +532,7 @@ class Api(ShareOps, LibraryOps):
         self._fs_busy = False                 # a folder operation holds _busy (not an export)
         self._fs_done = None                  # set when that operation is over (shutdown() waits for it)
         self._library_root = None             # _root_identity() of the library folder at the last listing
+        self._live_init()                     # Live mode and analog import (app/live.py)
         if store is not None:
             saved = store.get_setting("save_folder")
             if isinstance(saved, str) and saved and os.path.isdir(saved):
@@ -2405,6 +2407,8 @@ class Api(ShareOps, LibraryOps):
             return _fail("Updates install only in the installed app, not when running from source.")
         if self._stop.is_set():
             return _fail(CLOSING)
+        if self._live_busy():
+            return _fail("Stop the recording, then update.")
         if not self._busy.acquire(blocking=False):      # held from here on: no export can start
             return _fail("Wait for the export to finish, then update.")
         with self._backup_lock:                         # from here on no backup can be queued
@@ -2614,6 +2618,7 @@ class Api(ShareOps, LibraryOps):
             marked.wait()
         if fs is not None:
             fs.wait()
+        self._live_shutdown()                   # a recording running is finished and saved
         if self._store is not None:
             self._store.close()
 

@@ -164,6 +164,7 @@ const api = {
   recordings: async (id) => listing[id],
   export: async (...args) => { calls.push(["export", ...args]); return { ok: true, job: args[4] }; },
   audio: async (...args) => { calls.push(["audio", ...args]); return { ok: false, error: "stub" }; },
+  live_recover: async () => ({ ok: true, recovered: [], failed: [] }),
 };
 
 // ---- a fake Web Audio: nodes that remember their params and connections -------------------
@@ -175,9 +176,18 @@ class FakeNode {
   disconnect() { this.outs = []; }
 }
 class FakeAudioContext {
-  constructor() { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
-                  this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
+  constructor(opts = {}) { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
+                           this.sampleRate = (opts && opts.sampleRate) || 48000; this.opts = opts; this.modules = [];
+                           this.audioWorklet = { addModule: async (url) => { this.modules.push(url); } };
+                           this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
   resume() { this.resumes++; this.state = "running"; return Promise.resolve(); }
+  close() { this.state = "closed"; return Promise.resolve(); }
+  createMediaStreamSource(stream) { const n = new FakeNode(this, "stream"); n.stream = stream; return n; }
+  createAnalyser() {
+    const n = new FakeNode(this, "analyser");
+    Object.assign(n, { fftSize: 2048, frequencyBinCount: 1024, getByteFrequencyData() {} });
+    return n;
+  }
   createMediaElementSource(m) { this.sources++; const n = new FakeNode(this, "source"); n.media = m; return n; }
   createBiquadFilter() { const n = new FakeNode(this, "biquad"); n.type = "lowpass"; n.frequency = new FakeParam(350); n.Q = new FakeParam(1); return n; }
   createDynamicsCompressor() {
@@ -204,6 +214,40 @@ function audioChain(ctx) {
   return out;
 }
 
+// ---- a fake getUserMedia: the PC's inputs, and every request made ----------------------
+const mics = {
+  requests: [], fail: null,
+  devices: [{ kind: "audioinput", deviceId: "default", label: "Default - Microphone (Realtek Audio)" },
+            { kind: "audioinput", deviceId: "d-mic", label: "Microphone (Realtek Audio)" },
+            { kind: "audioinput", deviceId: "d-usb", label: "Line (USB Audio Device)" },
+            { kind: "audiooutput", deviceId: "o-1", label: "Speakers" }],
+};
+function fakeStream(device) {
+  const track = { label: device.label, stopped: false, onended: null,
+                  stop() { this.stopped = true; }, getSettings: () => ({ deviceId: device.deviceId, sampleRate: 48000, channelCount: 2 }) };
+  return { track, getAudioTracks: () => [track], getTracks: () => [track] };
+}
+const navigator = { mediaDevices: {
+  getUserMedia: async (c) => {
+    mics.requests.push(c);
+    if (mics.fail) { const e = new Error("blocked"); e.name = mics.fail; throw e; }
+    const want = c.audio.deviceId, inputs = mics.devices.filter((d) => d.kind === "audioinput");
+    let dev = inputs[0];
+    if (want && want.exact) { dev = inputs.find((d) => d.deviceId === want.exact); if (!dev) { const e = new Error("no"); e.name = "OverconstrainedError"; throw e; } }
+    else if (want && want.ideal) dev = inputs.find((d) => d.deviceId === want.ideal) || inputs[0];
+    return fakeStream(dev);
+  },
+  enumerateDevices: async () => mics.devices.map((d) => ({ ...d })),
+  addEventListener() {},
+} };
+const worklets = [];
+class FakeWorkletNode {
+  constructor(ctx, name, opts) { this.ctx = ctx; this.name = name; this.opts = opts; this.outs = []; this.port = { onmessage: null };
+                                 this.kind = "worklet"; ctx.nodes.push(this); worklets.push(this); }
+  connect(n) { this.outs.push(n); return n; }
+  disconnect() { this.outs = []; }
+}
+
 let ready = null;
 const window = {
   AudioContext: FakeAudioContext,
@@ -214,10 +258,12 @@ const window = {
 };
 const context = { window, document, WaveSurfer: anything, console, getComputedStyle: () => ({ getPropertyValue: () => "" }),
                   setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, localStorage: window.localStorage,
+                  cancelAnimationFrame() {}, navigator, AudioWorkletNode: FakeWorkletNode, btoa, atob, performance,
                   Map, Set, JSON, Promise, Number, String, Math, Object, Array, RegExp };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "notes.js"), "utf8"), context);   // as index.html loads it
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "app.js"), "utf8"), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "live.js"), "utf8"), context);
 
 const $ = (id) => document.getElementById(id);
 const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.textContent));
@@ -2413,5 +2459,178 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(dlg.lastChild.textContent, "…and 2 earlier updates.");
   $("update-later").onclick();
   assert.ok($("update-dialog").hidden);
+
+  // ---- Live mode: the view, choosing an input (remembered by name), the level meter's data,
+  // Record / Stop, M marks, Listen (off by default) with Enhance, and analog import ----
+  const lv = [];                                        // the backend's Live calls
+  const sameJSON = (a, b) => assert.strictEqual(JSON.stringify(a), JSON.stringify(b));   // the page's objects
+  let liveSettings = { ok: true, input: { id: "stale-id", label: "Line (USB Audio Device)" }, split: 3, import: false, max_split: 60 };
+  let chunkAnswer = (seq) => ({ ok: true, seconds: 0.5 * (seq + 1), piece: 1, file: "Live 2026-10-03 21-05-09.wav", saved: 0, stopped: null });
+  let stopAnswer = null;
+  Object.assign(api, {
+    live_settings: async () => { lv.push(["settings"]); return liveSettings; },
+    set_live_settings: async (c) => { lv.push(["set", c]); liveSettings = { ...liveSettings, ...c }; return liveSettings; },
+    live_start: async (o) => { lv.push(["start", o]); return { ok: true, session: "s1", file: o.mode === "live" ? "Live 2026-10-03 21-05-09.wav" : null, folder: "Old Mill" }; },
+    live_chunk: async (sid, seq, data) => { lv.push(["chunk", sid, seq, data]); return chunkAnswer(seq); },
+    live_mark: async (sid, at) => { lv.push(["mark", sid, at]); return { ok: true, mark: { at, file: "Live 2026-10-03 21-05-09.wav", start: Math.max(0, at - 2), end: at, cls: "C" } }; },
+    live_stop: async (sid) => { lv.push(["stop", sid]); return stopAnswer; },
+    open_mic_settings: async () => { lv.push(["mic-settings"]); return { ok: true }; },
+  });
+  assert.ok(html.includes('id="live-entry"') && html.includes('id="open-live"') && html.includes('src="live.js"'));
+  vm.runInContext(`S.lib.folders = [{ id: "root", name: "OpenEVP", rel: [], parent: null, in_clips: false },
+                                    { id: "f1", name: "Old Mill", rel: ["Old Mill"], parent: "root", in_clips: false },
+                                    { id: "c1", name: "Clips", rel: ["Old Mill", "Clips"], parent: "f1", in_clips: true }];
+                   S.lib.folderById = new Map(S.lib.folders.map((d) => [d.id, d])); S.lib.folderId = "f1"; S.lib.flat = false;`, context);
+  mics.requests.length = 0;
+  await context.openLive();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.view", context), "live");
+  assert.ok(!$("live").hidden && $("list").hidden && $("player").hidden);
+  // Raw input: no echo cancellation, noise suppression or automatic gain, stereo if it has it.
+  for (const c of mics.requests) {
+    assert.deepStrictEqual([c.audio.echoCancellation, c.audio.noiseSuppression, c.audio.autoGainControl], [false, false, false]);
+  }
+  // The remembered input's id is stale (ids change between sessions): found again by its name.
+  sameJSON(mics.requests.map((c) => c.audio.deviceId), [{ ideal: "stale-id" }, { exact: "d-usb" }]);
+  assert.deepStrictEqual(texts($("live-input")), ["Default - Microphone (Realtek Audio)", "Microphone (Realtek Audio)", "Line (USB Audio Device)"]);
+  assert.strictEqual($("live-input").value, "d-usb");
+  // Saved into the folder the library shows; Clips folders are not offered.
+  assert.deepStrictEqual(texts($("live-folder")), ["EVP Library (top folder)", "Old Mill"]);
+  assert.strictEqual($("live-folder").value, "f1");
+  const ctxLive = audioContexts[audioContexts.length - 1];
+  assert.strictEqual(ctxLive.sampleRate, 48000);
+  assert.deepStrictEqual(ctxLive.modules, ["live-worklet.js"]);
+  const tap = worklets[worklets.length - 1];
+  assert.strictEqual(tap.opts.processorOptions.channels, 2);
+  const stream = ctxLive.nodes.find((n) => n.kind === "stream");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);   // not to the speakers
+  assert.ok(!$("live-monitor").checked && $("live-enhance").disabled);
+  assert.ok(!$("live-record").disabled && $("live-mark").disabled);
+  // Listen: the input to the speakers; with "Enhance what I hear", through the player's Enhance chain.
+  $("live-monitor").checked = true; $("live-monitor").onchange();
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);
+  vm.runInContext(`S.enh.settings = normEnhance({ boost: 6 });`, context);
+  $("live-enhance").checked = true; $("live-enhance").onchange();
+  const chainOut = stream.outs[2];
+  assert.strictEqual(chainOut.kind, "gain");
+  assert.strictEqual(chainOut.outs[0].kind, "gain");                                 // the limiter's pre-gain, then its curve
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);
+  vm.runInContext(`S.enh.settings = normEnhance({});`, context);
+  // Another input: opened, and remembered (by id and name).
+  $("live-input").value = "d-mic";
+  await $("live-input").onchange();
+  await settle();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { input: { id: "d-mic", label: "Microphone (Realtek Audio)" } }]);
+  assert.strictEqual(mics.requests.slice(-1)[0].audio.deviceId.ideal, "d-mic");
+  const tap2 = worklets[worklets.length - 1];
+  // The level meter follows the worklet's batches.
+  const batch = (frames, value) => {
+    const pcm = new Int16Array(frames * 2).fill(value);
+    tap2.port.onmessage({ data: { pcm: pcm.buffer, frames, peak: Math.abs(value) / 32768, sumsq: frames * 2 * (value / 32768) ** 2 } });
+    return pcm;
+  };
+  batch(2048, 16384);
+  context.drawMeter();
+  assert.strictEqual($("live-level").textContent, "-6 dB");
+  assert.ok(!lv.some((c) => c[0] === "chunk"), "nothing is sent before Record");
+  // Record: the backend gets the mode, the folder, the input's rate and channels.
+  await $("live-record").onclick();
+  sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "live", folder: "f1", rate: 48000, channels: 2, split: 0 });
+  assert.strictEqual($("live-record").textContent, "■ Stop");
+  assert.ok($("live-input").disabled && $("live-folder").disabled && $("live-mode-import").disabled && $("live-close").disabled);
+  assert.ok(document.body.classList.contains("recording") && !$("live-mark").disabled);
+  assert.strictEqual($("live-file").textContent, "Recording Live 2026-10-03 21-05-09.wav");
+  // Half a second of audio goes as one chunk: numbered, base64 16-bit PCM, exactly the samples.
+  const sent = [];
+  for (let i = 0; i < 12; i++) sent.push(batch(2048, i * 100 - 500));
+  await settle();
+  const chunks = lv.filter((c) => c[0] === "chunk");
+  assert.strictEqual(chunks.length, 1);
+  assert.deepStrictEqual([chunks[0][1], chunks[0][2]], ["s1", 0]);
+  const bytes = Buffer.from(chunks[0][3], "base64");
+  const want = Buffer.concat(sent.map((p) => Buffer.from(p.buffer)));
+  assert.ok(bytes.equals(want), "the chunk holds exactly the captured samples");
+  // M marks the moment heard now (the audio before it is sent first).
+  batch(2048, 7);
+  fire([document], "keydown", { key: "m", target: document.body });
+  await settle();
+  const mark = lv.filter((c) => c[0] === "mark").pop();
+  assert.ok(Math.abs(mark[2] - 13 * 2048 / 48000) < 1e-9, String(mark[2]));
+  assert.strictEqual(lv.filter((c) => c[0] === "chunk").pop()[2], 1);
+  assert.deepStrictEqual(texts($("live-marks")), ["★ 0:01"]);
+  // Stop: the rest is sent, then the recording is saved; it opens in the player, in its folder.
+  stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0,
+                 files: [{ id: "lf1", name: "Live 2026-10-03 21-05-09.wav", seconds: 0.6, marks: 1 }],
+                 player: { ok: true, rec: "r-live", url: "http://a/live.wav", peaks: [0.1], duration: 0.6, rate: 48000, channels: 2,
+                           fp: "fp-live", marks: [{ id: "m1", start: 0, end: 0.55, cls: "C", note: "Marked while recording" }],
+                           reviewed: false, backup: { status: null, detail: "" }, name: "Live 2026-10-03 21-05-09.wav" } };
+  batch(2048, 9);
+  await $("live-record").onclick();
+  await settle();
+  assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
+  assert.strictEqual(vm.runInContext("S.view", context), "library");
+  assert.strictEqual(vm.runInContext("S.playing", context), "lib|lf1");
+  assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-live");
+  assert.ok($("live").hidden && !$("player").hidden && !document.body.classList.contains("recording"));
+  assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-05-09.wav in Old Mill.");
+  assert.strictEqual(tap2.ctx.state, "closed", "the input is let go of");
+  assert.strictEqual(vm.runInContext("S.lib.folderId", context), "f1");
+
+  // Import: the toggle, the silence setting, the guide; pieces come and go as the backend says.
+  await context.openLive();
+  await settle();
+  assert.ok($("live-import").hidden);
+  $("live-mode-import").onclick();
+  await settle();
+  assert.ok(!$("live-import").hidden);
+  assert.strictEqual($("live-title").textContent, "Import from a recorder");
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { import: true }]);
+  for (const words of ["headphone jack", "2.5 mm", "USB audio adapter", "line-in", "volume", "playback speed to normal",
+                       "voice activation off", "Press Record here first"]) assert.ok(html.includes(words), words);
+  assert.ok(!html.slice(html.indexOf('id="live-guide"'), html.indexOf("</details>")).includes("—"), "no em dashes in the guide");
+  $("live-gap").value = "5"; $("live-gap").onchange();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { split: 5 }]);
+  $("live-split").checked = false; $("live-split").onchange();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { split: 0 }]);
+  assert.ok($("live-gap").disabled);
+  $("live-split").checked = true; $("live-split").onchange();
+  $("live-folder").value = "root";
+  const FULL = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free).";
+  chunkAnswer = (seq) => (seq === 0 ? { ok: true, seconds: 0.5, piece: null, file: null, saved: 0, stopped: null }
+    : { ok: true, seconds: 1, piece: null, file: null, saved: 2, stopped: FULL,
+        result: { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                  files: [{ id: "i1", name: "Import 2026-10-03 21-05-09 (1).wav", seconds: 40, marks: 0 },
+                          { id: "i2", name: "Import 2026-10-03 21-05-09 (2).wav", seconds: 31, marks: 0 }] } });
+  const stopsBefore = lv.filter((c) => c[0] === "stop").length;
+  await $("live-record").onclick();
+  sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "import", folder: "root", rate: 48000, channels: 2, split: 5 });
+  assert.strictEqual($("live-file").textContent, "Waiting for sound…");
+  const tap3 = worklets[worklets.length - 1];
+  const feed = () => { const pcm = new Int16Array(24000 * 2); tap3.port.onmessage({ data: { pcm: pcm.buffer, frames: 24000, peak: 0, sumsq: 0 } }); };
+  feed(); await settle();
+  assert.strictEqual($("live-file").textContent, "Waiting for sound…");
+  feed(); await settle();                                  // the backend stopped it: a nearly full disk
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, `${FULL} ✓ Saved 2 recordings in OpenEVP.`);
+  assert.strictEqual(vm.runInContext("S.view", context), "live", "an import stays in the view");
+  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsBefore, "already finished by the backend");
+  // Windows blocking the microphone: said plainly, with a way to the setting.
+  mics.fail = "NotAllowedError";
+  await context.openInput(null);
+  assert.ok(/Let desktop apps access your microphone/.test($("live-status").textContent));
+  assert.strictEqual($("banner-action").textContent, "Open microphone settings");
+  await $("banner-action").onclick();
+  sameJSON(lv.pop(), ["mic-settings"]);
+  assert.ok($("live-record").disabled);
+  mics.fail = null;
+  // A recording a crash cut off is finished at startup, and said once.
+  api.live_recover = async () => ({ ok: true, failed: [], recovered: [{ name: "Live 2026-10-02 22-00-00.wav", folder: "Old Mill", seconds: 1800, marks: 2 }] });
+  await context.liveRecover();
+  assert.strictEqual($("banner-text").textContent,
+                     "A recording was cut off last time; OpenEVP saved what it had: Live 2026-10-02 22-00-00.wav (in Old Mill).");
+  $("live-close").onclick();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.view", context), "library");
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

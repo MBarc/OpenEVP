@@ -108,6 +108,7 @@ window.addEventListener("pywebviewready", async () => {
   // (and WAV export) needs our LPEC decoder; without it rows are not clickable.
   setupPlayer();
   setupLibrary();
+  setupLive();
   loadLibrary();
   if (S.caps.wav) {
     $("player-hint").textContent = "Select a recording, or open an audio file, to analyze it here.";
@@ -125,6 +126,7 @@ window.addEventListener("pywebviewready", async () => {
   if (notes.some(Boolean)) banner(notes.filter(Boolean).join(" "));
   poll();
   checkForUpdate(false);                   // quietly: only speaks up if there is an update
+  if (S.caps.marks && !S.caps.marks_read_only) liveRecover();   // recordings a crash cut off (live.js)
 });
 
 // ---- Updates: a newer GitHub release is offered in a dialog; the user decides ----
@@ -303,6 +305,7 @@ function renderDevices() {
   const nav = $("devices");
   nav.innerHTML = "";
   $("library-entry").className = "device-name" + (S.view === "library" ? " selected" : "");
+  $("live-entry").className = "device-name" + (S.view === "live" ? " selected" : "");
   if (S.device && !S.devices.some((d) => d.id === S.device)) {
     leaveDevice(); banner("The recorder was unplugged.");
   }
@@ -415,6 +418,11 @@ function sentence(t) {
 }
 
 function renderMain() {
+  const live = S.view === "live";             // the Live view (live.js) takes the recordings area and the player's place
+  $("live").hidden = !live;
+  $("list").hidden = $("player").hidden = live;
+  if (!live) liveViewLeft();
+  if (live) { updateExport(); return; }
   const library = S.view === "library";
   $("device-table").hidden = library;
   $("library-table").hidden = $("library-bar").hidden = !library;
@@ -3223,6 +3231,7 @@ async function storeWritable() {
   }
   loadLibrary();
   banner("OpenEVP's data can be changed again: marks and folders are back.", "ok");
+  liveRecover();                               // recordings a crash cut off, now that they can be finished
 }
 
 function setupMarks() {
@@ -3238,7 +3247,7 @@ function setupMarks() {
   document.addEventListener("keydown", (e) => {
     if (e.key !== "m" && e.key !== "M") return;
     if (e.ctrlKey || e.altKey || e.metaKey || typingIn(e.target)) return;
-    if (!S.region || S.markForm || !marksWritable() || $("player-loaded").hidden) return;
+    if (!S.region || S.markForm || !marksWritable() || $("player-loaded").hidden || S.view === "live") return;
     if (document.querySelector(".modal:not([hidden])")) return;        // the About or update dialog is open
     e.preventDefault();
     openMarkForm(null);

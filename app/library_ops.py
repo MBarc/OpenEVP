@@ -355,6 +355,9 @@ class LibraryOps:
         with self._workers_lock:
             if self._stop.is_set():
                 return _fail(CLOSING)
+            recording = self._live_busy()   # files being recorded into the library: no folder changes meanwhile
+            if recording:
+                return _fail(recording)
             if not self._busy.acquire(blocking=False):
                 return _fail(FS_BUSY)
             self._fs_busy = True            # exporting() is not this

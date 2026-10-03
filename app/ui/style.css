@@ -221,3 +221,38 @@ td.note { color: var(--warn); }
 .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 button.primary { background: var(--accent); color: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 14px; cursor: pointer; }
 button.primary:disabled { opacity: .5; cursor: default; }
+/* Live mode and analog import (live.js): the view takes the recordings area and the player's place */
+#list[hidden], #live[hidden], #player[hidden] { display: none; }
+#live { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; padding: 10px 14px; overflow: auto; }
+#live-bar, #live-settings, #live-controls, #live-split-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+#live-title { font-size: 16px; margin: 0; }
+#live-modes { display: inline-flex; gap: 4px; }
+#live-modes button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 12px; padding: 2px 12px; cursor: pointer; }
+#live-modes button[aria-pressed="true"] { border-color: var(--text); background: var(--accent-soft); font-weight: 600; }
+#live-modes button:disabled { opacity: .6; cursor: default; }
+#live-input, #live-folder { max-width: 32ch; }
+#live-meter { position: relative; display: inline-block; width: 180px; height: 10px; border-radius: 5px; overflow: hidden;
+              background: linear-gradient(90deg, var(--line) 0 80%, var(--warn-bg) 80% 95%, rgba(220, 60, 60, .35) 95%); }
+#live-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--accent); }
+#live-meter-peak { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--text); }
+#live-meter.clip #live-meter-fill { background: rgb(220, 60, 60); }
+#live-level { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 6ch; }
+#live-import[hidden] { display: none; }
+#live-gap { width: 6ch; font: inherit; }
+#live-guide { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; margin-top: 6px; }
+#live-guide summary { cursor: pointer; font-weight: 600; }
+#live-guide ol { margin: 6px 0; padding-left: 20px; }
+#live-guide li { margin: 3px 0; }
+#live-record { min-width: 110px; font-weight: 600; }
+#live-record.recording { background: rgb(200, 50, 50); color: #fff; border-color: rgb(200, 50, 50); }
+#live-time { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
+#live-file { color: var(--muted); overflow-wrap: anywhere; }
+#live-status { margin: 0; min-height: 1.4em; }
+#live-status.warn { color: var(--warn); background: var(--warn-bg); padding: 4px 8px; border-radius: 4px; }
+#live-scopes { display: flex; flex-direction: column; gap: 4px; }
+#live-wave { width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
+#live-spec { width: 100%; height: 150px; background: #000; border-radius: 4px; }
+#live-marks { margin: 0; padding-left: 18px; color: var(--muted); columns: 4 12ch; }
+/* While recording, the rest of the app waits: the recording's view stays in front */
+body.recording #sidebar { pointer-events: none; opacity: .55; }
+.player-start { display: inline-flex; gap: 8px; }

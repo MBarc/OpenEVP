@@ -157,11 +157,21 @@ class GuiSmokeCheckTests(unittest.TestCase):
                 mock.patch.object(release_check.os.path, "isfile", return_value=True):
             return release_check.check_gui()
 
+    GOOD_MP3 = {"available": True, "version": "1.8.4", "bytes": 9000, "decoder": True, "decoder_status": None,
+                "decoded": {"rate": 8000, "channels": 1, "seconds": 1.08}}
+    GOOD_LIVE = {"ok": True, "rate": 44100, "channels": 2, "mark": True, "label": "Fake Default Audio Input",
+                 "files": [{"name": "Live x.wav", "marks": 1}],
+                 "wav": {"rate": 44100, "channels": 2, "frames": 100000, "width": 2}}
+
     def test_a_good_report_passes(self):
         self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"},
-                                            "mp3": {"available": True, "version": "1.8.4", "bytes": 9000,
-                                                    "decoder": True, "decoder_status": None,
-                                                    "decoded": {"rate": 8000, "channels": 1, "seconds": 1.08}}}), [])
+                                            "mp3": self.GOOD_MP3, "live": self.GOOD_LIVE}), [])
+
+    def test_a_report_without_live_recording_fails(self):
+        """A build from before Live mode (its smoke test never records) is not this release."""
+        self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"},
+                                            "mp3": self.GOOD_MP3}),
+                         ["GUI smoke: the report says nothing about Live recording"])
 
     def test_a_report_without_mp3_encoding_fails(self):
         self.assertEqual(self.run_check(0, {"ok": True, "problems": [], "page": {"title": "OpenEVP"}}),

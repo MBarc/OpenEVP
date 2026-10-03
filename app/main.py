@@ -12,7 +12,7 @@ import webview
 from openevp import __version__
 from openevp.paths import default_output
 
-from . import folders, native_share, sharing, updater
+from . import folders, mic_permission, native_share, sharing, updater
 from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
 from .backend import Api, recording_wav
 from .devices import DeviceManager
@@ -125,10 +125,14 @@ def _open_store():
         return None, [f"EVP marks are off: OpenEVP could not open its data ({type(e).__name__}: {e})."]
 
 
-def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False):
+def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False,
+                    recording=False):
     """(title, text) for the close prompt while work is still running, or None."""
     backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
               "a backup that did not finish is shown as failed and can be retried later.")
+    if recording:
+        text = "A recording is running. Closing stops it and saves what was recorded. Close?"
+        return "Recording in progress", f"{backup} {text}" if backing_up else text
     if changing_files:
         text = ("Files in the library are still being renamed, moved or deleted. "
                 "OpenEVP closes once that is finished. Close?")
@@ -194,6 +198,7 @@ _SMOKE_STATE_JS = """JSON.stringify({
   title: document.title,
   app_js: typeof window.onBackendEvent === "function",
   notes_js: typeof renderNotes === "function",
+  live_js: typeof liveSmoke === "function",
   wavesurfer: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.create === "function",
   regions: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.Regions !== "undefined",
   style_css: Array.from(document.styleSheets).some(s => (s.href || "").endsWith("/style.css") && s.cssRules.length > 0),
@@ -225,7 +230,57 @@ def ui_files(ui_dir):
     return found
 
 
-def _smoke_check(window, report):
+# Live mode in the smoke test: Chromium's fake audio input (a beep) stands in for a
+# microphone, so no real input is ever opened; the app's own microphone permission
+# handler (app/mic_permission.py) must answer, or getUserMedia would wait for a prompt
+# nobody sees and the check times out.
+SMOKE_BROWSER_ARGS = "--use-fake-device-for-media-stream --autoplay-policy=no-user-gesture-required"
+SMOKE_LIVE_SECONDS = 1.5
+_SMOKE_LIVE_JS = """
+window.__openevpLive = null;
+liveSmoke(%s).then(r => { window.__openevpLive = JSON.stringify(r); },
+                   e => { window.__openevpLive = JSON.stringify({ok: false, error: String(e)}); });
+"true";
+"""
+
+
+def _smoke_live(window, report, home):
+    """Record a moment from the fake input through the Live view's own code (permission,
+    getUserMedia, the AudioWorklet, the bridge, the WAV writer, a mark), and check the
+    WAV it saved into the library folder."""
+    import wave
+    problems = report["problems"]
+    window.evaluate_js(_SMOKE_LIVE_JS % SMOKE_LIVE_SECONDS)
+    deadline = time.monotonic() + SMOKE_TIMEOUT
+    raw = None
+    while time.monotonic() < deadline:
+        raw = window.evaluate_js("window.__openevpLive")
+        if raw:
+            break
+        time.sleep(0.2)
+    if not raw:
+        problems.append(f"Live recording did not finish within {SMOKE_TIMEOUT} s (no microphone permission?)")
+        return
+    live = report["live"] = json.loads(raw)
+    if not live.get("ok") or not live.get("files"):
+        problems.append(f"Live recording failed: {live.get('error') or 'nothing was saved'}")
+        return
+    if not live.get("mark") or live["files"][0].get("marks") != 1:
+        problems.append("Live recording: the mark made while recording was not stored")
+    path = os.path.join(home, "save", live["files"][0]["name"])
+    try:
+        with wave.open(path) as w:
+            live["wav"] = {"rate": w.getframerate(), "channels": w.getnchannels(), "frames": w.getnframes(),
+                           "width": w.getsampwidth()}
+    except Exception as e:
+        problems.append(f"Live recording: the saved WAV could not be read ({type(e).__name__}: {e})")
+        return
+    got = live["wav"]
+    if got["width"] != 2 or got["rate"] != live.get("rate") or got["channels"] != live.get("channels")             or got["frames"] < 0.5 * SMOKE_LIVE_SECONDS * got["rate"]:
+        problems.append(f"Live recording: the saved WAV is wrong: {got}")
+
+
+def _smoke_check(window, report, home=None):
     """On pywebview's worker thread once the GUI loop runs: check the page, then
     close the window (which ends webview.start())."""
     problems = report["problems"]
@@ -250,7 +305,8 @@ def _smoke_check(window, report):
         report["page"] = {k: v for k, v in state.items() if k != "smoke"}
         if state.get("title") != "OpenEVP":
             problems.append(f"index.html did not load (title {state.get('title')!r})")
-        for key, what in (("app_js", "app.js"), ("notes_js", "notes.js"), ("wavesurfer", "vendor/wavesurfer.min.js"),
+        for key, what in (("app_js", "app.js"), ("notes_js", "notes.js"), ("live_js", "live.js"),
+                          ("wavesurfer", "vendor/wavesurfer.min.js"),
                           ("regions", "vendor/regions.min.js"), ("style_css", "style.css"),
                           ("bridge", "the JS bridge (window.pywebview.api)")):
             if not state.get(key):
@@ -271,6 +327,8 @@ def _smoke_check(window, report):
         for name, ok, status in smoke["files"]:
             if not ok:
                 problems.append(f"the page could not fetch {name} ({status})")
+        if home is not None and not problems:
+            _smoke_live(window, report, home)
     except Exception as e:
         problems.append(f"the smoke check failed: {type(e).__name__}: {e}")
     finally:
@@ -357,6 +415,8 @@ def _smoke_mp3(report):
 def _smoke_main(report_path):
     report = {"ok": False, "version": __version__, "problems": []}
     home = tempfile.mkdtemp(prefix="openevp-smoke-")
+    before = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = SMOKE_BROWSER_ARGS   # the fake audio input
     try:
         _smoke_decoders(report)
         _smoke_mp3(report)
@@ -364,6 +424,10 @@ def _smoke_main(report_path):
     except Exception as e:
         report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")
     finally:
+        if before is None:
+            os.environ.pop("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", None)
+        else:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = before
         shutil.rmtree(home, ignore_errors=True)
     report["ok"] = not report["problems"]
     if report_path:
@@ -455,7 +519,7 @@ def _run_app(smoke=None):
                     api.request_stop()
                 return proceed
             question = _close_question(api.exporting(), api.backing_up(), api.saving_marked(),
-                                       api.clips_running(), api.changing_files())
+                                       api.clips_running(), api.changing_files(), api.recording())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
                 if proceed:
@@ -466,11 +530,15 @@ def _run_app(smoke=None):
             return True
 
         window.events.closing += on_closing
+        # Live mode: the app's own page may use the microphone without a prompt (app/mic_permission.py).
+        mic_permission.install_when_loaded(
+            window, on_problem=(lambda e: smoke[0]["problems"].append(
+                f"the microphone permission handler could not be added: {type(e).__name__}: {e}")) if smoke else None)
         try:
             # Require WebView2: pywebview would otherwise fall back to the old MSHTML
             # engine, which cannot run this UI.
             if smoke:
-                webview.start(_smoke_check, (window, smoke[0]), gui="edgechromium", http_server=True,
+                webview.start(_smoke_check, (window, smoke[0], smoke[1]), gui="edgechromium", http_server=True,
                               icon=_icon())
             else:
                 webview.start(gui="edgechromium", http_server=True, icon=_icon())
