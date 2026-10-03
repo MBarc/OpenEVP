@@ -1,7 +1,7 @@
-"""st25-download: copy every recording off a Sony ICD-ST25 or ICD-ST10 as .dvf files.
+"""openevp-cli: copy every recording off a Sony ICD-ST25 or ICD-ST10 as .dvf files.
 
-    st25-download [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav]
-    st25-download --check-wav DVF_FILE
+    openevp-cli [OUTPUT_FOLDER] [--list] [--folder A-E] [--raw] [--wav]
+    openevp-cli --check-wav DVF_FILE
 
 --wav also writes a WAV file beside each .dvf, decoded by the built-in LPEC
 decoders (LPEC LP: 8000 Hz mono; LPEC SP: 16000 Hz mono; LPEC ST: 44.1 kHz
@@ -192,7 +192,7 @@ def check_wav(path):
     ICD-ST25 file or openevp.decoders.sony_lpec_st for an ICD-ST10 one, plus
     its bundled table data and DLL), without touching the recorder. Does not
     save anything. Used to verify a build: e.g.
-    `openevp-st25.exe --check-wav some.dvf`."""
+    `openevp-cli.exe --check-wav some.dvf`."""
     print(f"OpenEVP {__version__} (Sony ICD-ST downloader)")
     try:
         with open(path, "rb") as f:
@@ -229,7 +229,7 @@ def _wav_seconds(wav):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="st25-download", description=__doc__.splitlines()[0],
+    ap = argparse.ArgumentParser(prog="openevp-cli", description=__doc__.splitlines()[0],
                                  epilog="WAV conversion is built in: --wav decodes each recording "
                                  "with OpenEVP's own LPEC decoders (LPEC LP, and LPEC SP and ST "
                                  "from an ICD-ST10).")

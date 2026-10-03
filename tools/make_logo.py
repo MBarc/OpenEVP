@@ -3,7 +3,7 @@
 
     python tools/make_logo.py
 
-Writes assets/logo.svg, assets/logo-256.png, assets/st25.ico (16-256 px,
+Writes assets/logo.svg, assets/logo-256.png, assets/openevp.ico (16-256 px,
 including the 20/40 px sizes Windows uses at 125-150% scaling), and the installer
 wizard images (assets/wizard-small-*.bmp, assets/wizard-large-*.bmp). The design:
 audio level bars whose outline is a ghost - the tops form its dome, the bottoms
@@ -92,13 +92,13 @@ def main():
         f.write(svg())
     raster(256).save(os.path.join(ASSETS, "logo-256.png"))
     frames = [raster(px) for px in ICO_SIZES]
-    frames[-1].save(os.path.join(ASSETS, "st25.ico"), format="ICO",
+    frames[-1].save(os.path.join(ASSETS, "openevp.ico"), format="ICO",
                     sizes=[(px, px) for px in ICO_SIZES], append_images=frames[:-1])
     for px in WIZARD_SMALL:
         wizard_small(px).save(os.path.join(ASSETS, f"wizard-small-{px}.bmp"))
     for w, h in WIZARD_LARGE:
         wizard_large(w, h).save(os.path.join(ASSETS, f"wizard-large-{w}.bmp"))
-    print("wrote assets/logo.svg, logo-256.png, st25.ico and the wizard images")
+    print("wrote assets/logo.svg, logo-256.png, openevp.ico and the wizard images")
 
 
 if __name__ == "__main__":

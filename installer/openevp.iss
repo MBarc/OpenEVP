@@ -44,7 +44,7 @@ ArchitecturesInstallIn64BitMode=x64os
 MinVersion=10.0.19041
 OutputDir=..\dist
 OutputBaseFilename=OpenEVP-Setup-{#AppVersion}
-SetupIconFile=..\assets\st25.ico
+SetupIconFile=..\assets\openevp.ico
 WizardSmallImageFile=..\assets\wizard-small-55.bmp,..\assets\wizard-small-69.bmp,..\assets\wizard-small-83.bmp,..\assets\wizard-small-110.bmp
 WizardImageFile=..\assets\wizard-large-164.bmp,..\assets\wizard-large-205.bmp,..\assets\wizard-large-246.bmp,..\assets\wizard-large-328.bmp
 UninstallDisplayIcon={app}\OpenEVP.exe
@@ -71,10 +71,12 @@ Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{autopf}\ST25 Downloader"
 Type: files; Name: "{autoprograms}\ST25 Downloader.lnk"
 Type: files; Name: "{autodesktop}\ST25 Downloader.lnk"
+; 0.9.9 and earlier installed the command-line tool as openevp-st25.exe; it is openevp-cli.exe now.
+Type: files; Name: "{app}\command-line\openevp-st25.exe"
 
 [Files]
 Source: "..\dist\OpenEVP\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\dist\openevp-st25.exe"; DestDir: "{app}\command-line"; Flags: ignoreversion
+Source: "..\dist\openevp-cli.exe"; DestDir: "{app}\command-line"; Flags: ignoreversion
 Source: "..\vendor\webview2\MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]

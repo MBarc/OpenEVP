@@ -44,7 +44,7 @@ def _recycler(get_window):
 def _icon():
     """The app icon: bundled in the app folder when frozen, in assets/ when run from source."""
     base = getattr(sys, "_MEIPASS", None) or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-    path = os.path.join(base, "assets", "st25.ico")
+    path = os.path.join(base, "assets", "openevp.ico")
     return path if os.path.isfile(path) else None
 
 

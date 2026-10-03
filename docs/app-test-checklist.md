@@ -6,7 +6,7 @@ Record date, app version and result for each line.
 1. Start the app with the recorder unplugged: "No recorder connected".
 2. Plug it in: within about 2 s it appears as "Sony ICD-ST25 #1 (port …)".
 3. Click it: folders A–E appear with counts; folder A lists 20 recordings with the
-   same dates and lengths as `st25-download --list`.
+   same dates and lengths as `openevp-cli --list`.
 4. Select all in A, export as .dvf to an empty folder: "20 saved"; the files are
    byte-identical to the CLI's output (compare SHA-256).
 5. Export again to the same folder: "0 saved, 20 already there".
@@ -36,14 +36,14 @@ from the frozen build is caught):
 ICD-ST10 (LPEC ST, 44.1 kHz stereo):
 
 15. Plug it in and click it: it is listed as "Sony ICD-ST10"; its recordings show
-    "undated" (clock not set) and lengths matching `st25-download --list`; WAV
+    "undated" (clock not set) and lengths matching `openevp-cli --list`; WAV
     is available in the export menu.
 16. Export as .dvf: the files are saved (`001_A_001_Unknown.dvf`...); exporting
     again says they are already there.
 17. Click a recording: it plays in stereo; zooming in on a short one shows the
     left channel above the line and the right below.
 18. Mark it: the backup saves the .dvf and a WAV with the mark. Export an
-    unmarked one as WAV: it matches `st25-download --wav` byte for byte.
+    unmarked one as WAV: it matches `openevp-cli --wav` byte for byte.
 19. Open the Save-to folder in the EVP Library: the ST10 files are listed with
     their length and marks, and play.
 20. ICD-ST10 clips: mark an EVP on an ST recording and one on an SP recording,

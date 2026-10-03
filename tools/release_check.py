@@ -7,7 +7,7 @@ Automated (exits non-zero if any fails):
      decoder's golden tests must run, not skip (tables + C core present and
      intact), and no ResourceWarning may appear; reports how many decoder
      tests ran;
-  2. the built command-line tool (dist\\openevp-st25.exe): --version, and
+  2. the built command-line tool (dist\\openevp-cli.exe): --version, and
      --check-wav on the 10-minute test vector, the 1-minute LPEC SP vector and a
      synthetic ICD-ST10 LPEC ST file (both fast decoders, not slow mode);
   3. the built app (dist\\OpenEVP\\): every module of app/, openevp/ and sony_icd/
@@ -36,7 +36,7 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(REPO, "tests")
 DIST = os.path.join(REPO, "dist")
-CLI = os.path.join(DIST, "openevp-st25.exe")
+CLI = os.path.join(DIST, "openevp-cli.exe")
 CLI_MODULE = "sony_icd.cli"                 # the command-line tool's code: never in the app
 APP_DIR = os.path.join(DIST, "OpenEVP")
 APP_EXE = os.path.join(APP_DIR, "OpenEVP.exe")
@@ -77,7 +77,7 @@ Real Sony ICD-ST25 (and ICD-ST10), in the built app (dist\\OpenEVP\\OpenEVP.exe)
   [ ] Export .dvf and WAV: files and names as before; running it again skips them.
   [ ] Mark a recording: the backup is saved (.dvf + WAV with the marks); unplug/replug keeps the marks.
   [ ] Library: the exported files are listed with their marks; play one, export marked.
-Command-line tool (dist\\openevp-st25.exe): --list, then a download with --wav.
+Command-line tool (dist\\openevp-cli.exe): --list, then a download with --wav.
 
 Driver (a test PC or VM):
   [ ] Fresh install of the new setup: the WinUSB driver installs; the recorder is found.
@@ -283,7 +283,7 @@ BUNDLED = (   # (file in _internal, its source)
     ("openevp/decoders/sony_lpec_st/lpec_st_core.dll", "openevp/decoders/sony_lpec_st/lpec_st_core.dll"),
     ("openevp/decoders/mp3/mp3_core.dll", "openevp/decoders/mp3/mp3_core.dll"),
     ("libusb-1.0.dll", "vendor/libusb-1.0.30/libusb-1.0.dll"),
-    ("assets/st25.ico", "assets/st25.ico"),
+    ("assets/openevp.ico", "assets/openevp.ico"),
     ("driver/install-winusb.ps1", "app/driver/install-winusb.ps1"),
     ("driver/uninstall-winusb.ps1", "app/driver/uninstall-winusb.ps1"),
     ("driver/manifest.ps1", "app/driver/manifest.ps1"),
