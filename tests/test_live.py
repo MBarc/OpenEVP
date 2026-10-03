@@ -570,6 +570,19 @@ class LiveApiTests(Tmp):
         self.assertEqual(len(names), 1)
         self.assertTrue(names[0].endswith(".wav"))
 
+    def test_a_session_nobody_feeds_is_finished_by_the_backend(self):
+        a = self.api()
+        with mock.patch.object(live, "LIVE_IDLE", 0.3), mock.patch.object(live, "LIVE_WATCH_EVERY", 0.05):
+            sid = self.start(a)["session"]
+            self.send(a, sid, tone(1.0), 0)
+            s = a._live
+            self.assertTrue(s.closed.wait(5))
+        self.assertFalse(a.recording())
+        self.assertEqual(s.stopped, live.STOPPED_IDLE)
+        self.assertEqual(len([n for n in os.listdir(self.lib) if n.endswith(".wav")]), 1)
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+        self.assertEqual(a.live_chunk(sid, 1, base64.b64encode(pcm(tone(0.5))).decode())["error"], live.NOT_RECORDING)
+
     def test_a_crash_leaves_a_part_that_the_next_start_finishes(self):
         a = self.api()
         with mock.patch("app.live.datetime") as dt:
@@ -764,6 +777,50 @@ class LivePlaybackTests(Tmp):
             r, data, fp = self.record()
         self.check(r, data, fp)
         self.assertTrue([n for n in os.listdir(self.cache) if not n.startswith(".")], "a copy in the cache")
+
+
+class CloseDrainTests(unittest.TestCase):
+    """Closing during a recording: the window waits (bounded) for the page to save it."""
+
+    class Window:
+        def __init__(self, answers):
+            self.answers, self.js, self.destroyed = list(answers), [], False
+
+        def evaluate_js(self, js):
+            self.js.append(js)
+            return self.answers.pop(0) if "__liveDrained" in js and self.answers else ("true" if "liveDrain" in js else None)
+
+        def destroy(self):
+            self.destroyed = True
+
+    def test_waits_for_the_page_then_closes(self):
+        from app import main
+        w, order = self.Window([False, False, True]), []
+        main._close_after_drain(w, lambda: order.append("before_close"), sleep=lambda s: None)
+        self.assertEqual(w.js[0], main._DRAIN_START_JS)
+        self.assertEqual(w.js.count(main._DRAIN_DONE_JS), 3)
+        self.assertEqual((order, w.destroyed), (["before_close"], True))
+
+    def test_a_page_that_never_finishes_is_waited_for_only_so_long(self):
+        from app import main
+        t = [0.0]
+
+        def sleep(s):
+            t[0] += s
+        w = self.Window([])
+        main._close_after_drain(w, lambda: None, timeout=3, poll=1, clock=lambda: t[0], sleep=sleep)
+        self.assertTrue(w.destroyed)
+        self.assertLessEqual(t[0], 4)
+
+    def test_a_page_that_is_gone_still_closes(self):
+        from app import main
+
+        class Gone(self.Window):
+            def evaluate_js(self, js):
+                raise RuntimeError("no page")
+        w = Gone([])
+        main._close_after_drain(w, lambda: None)
+        self.assertTrue(w.destroyed)
 
 
 class SmokeLiveTests(Tmp):

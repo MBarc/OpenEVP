@@ -37,6 +37,7 @@ import os
 import secrets
 import shutil
 import threading
+import time
 import wave
 
 from openevp import livewav, silence, wavinfo
@@ -56,6 +57,8 @@ MAX_CHUNK = 8 << 20              # bytes of PCM in one live_chunk (half a second
 MARK_SLACK = 2.0                 # seconds a mark may be ahead of the audio received (the page's own buffer)
 LATE_MARK = 2.0                  # seconds after a piece ended a mark still goes to it (import)
 RATES = (8000, 192000)
+LIVE_IDLE = 60.0                 # seconds with no chunk or mark: the page is gone or stuck, the file is finished
+LIVE_WATCH_EVERY = 5.0
 
 NOT_RECORDING = "Nothing is being recorded."
 RECORDING = "Stop the recording first."
@@ -71,6 +74,7 @@ NO_MOMENT = "No recording was running at that moment (OpenEVP was waiting for so
 STOPPED_MOVED = ("Recording stopped because the folder it was saving into is no longer where it was "
                  "in the library. What was recorded until then is saved.")
 UNRECOVERED = " (unrecovered).raw"
+STOPPED_IDLE = "Recording stopped because no audio arrived for a minute. What was recorded until then is saved."
 
 
 class _Moved(OSError):
@@ -180,6 +184,8 @@ class _Session:
         self.ops, self.id, self.mode, self.root, self.folder = ops, sid, mode, root, folder
         self.pins, self.root_id = pins, root_id   # the folders held for the recording, and what the root was
         self.moved = False                       # the folder was found elsewhere before a new file: stopped
+        self.last_seen = time.monotonic()        # the page's last chunk or mark (see LiveOps._live_watch)
+        self.closed = threading.Event()          # set once finished
         self.rate, self.channels, self.align = rate, channels, channels * livewav.WIDTH
         self.byte_rate = rate * self.align
         self.stamp = _stamp(datetime.datetime.now())
@@ -483,12 +489,28 @@ class LiveOps:
                     pins.close()
                     return _fail(f"Could not start the recording: {_plain(e)}")
                 self._live = session
+        threading.Thread(target=self._live_watch, args=(session,), name="live-watch", daemon=True).start()
         return {"ok": True, "session": session.id, "file": session.piece.name if session.piece else None,
                 "folder": os.path.basename(os.path.normpath(folder)), "rate": rate, "channels": channels}
 
     def _session(self, sid):
         s = self._live
-        return s if s is not None and isinstance(sid, str) and s.id == sid else None
+        if s is not None and isinstance(sid, str) and s.id == sid:
+            s.last_seen = time.monotonic()
+            return s
+        return None
+
+    def _live_watch(self, s):
+        """While a session runs: if the page has sent nothing for LIVE_IDLE seconds (it
+        is gone, or its bridge stopped answering), finish the file so it is not left
+        open until the app closes."""
+        while not s.closed.wait(LIVE_WATCH_EVERY):
+            if time.monotonic() - s.last_seen > LIVE_IDLE:
+                with self._live_lock:
+                    if self._live is s and not s.done:
+                        s.stopped = STOPPED_IDLE
+                        self._live_finish(s, open_player=False)
+                return
 
     def live_chunk(self, sid, seq, data):
         """Write the next chunk (seq: 0, 1, 2... in order; data: base64 16-bit PCM,
@@ -602,15 +624,16 @@ class LiveOps:
                 return _fail(NOT_RECORDING)
             return self._live_finish(s)
 
-    def _live_finish(self, s):
+    def _live_finish(self, s, open_player=True):
         """Finish a session (under _live_lock) and describe what was saved."""
         try:
             s.finish()
         finally:
             if s.pins is not None:
                 s.pins.close()
-        if self._live is s:
-            self._live = None
+            if self._live is s:
+                self._live = None
+            s.closed.set()
         def row(f):
             return {"id": _file_id(f["path"]), "name": os.path.basename(f["path"]),
                     "seconds": round(f["frames"] / s.rate, 1), "marks": f["marks"]}
@@ -618,7 +641,7 @@ class LiveOps:
         out = {"ok": True, "files": files, "folder": os.path.basename(os.path.normpath(s.folder)),
                "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode,
                "whole": row(s.wholes[0]) if s.wholes else None}
-        if s.mode == "live" and s.saved and not self._stop.is_set():
+        if s.mode == "live" and s.saved and open_player and not self._stop.is_set():
             # Saved either way; if it cannot be opened in the player, the page says why.
             try:
                 loaded = self._play_file(s.saved[-1]["path"], root=s.root, library=True)

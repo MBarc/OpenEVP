@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 import webview
@@ -150,6 +151,32 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
     if backing_up:
         return "Backup in progress", f"{backup} Close?"
     return None
+
+
+CLOSE_DRAIN_TIMEOUT = 60           # seconds closing waits for the page to save a recording (its own steps are bounded too)
+_DRAIN_START_JS = "liveDrainForClose(); true"
+_DRAIN_DONE_JS = "window.__liveDrained === true"
+
+
+def _close_after_drain(window, before_close, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2, clock=time.monotonic,
+                       sleep=time.sleep):
+    """Closing during a recording, on a worker thread: the page stops and saves it
+    as Stop does (the worklet's last samples, every queued chunk, then the backend
+    finishes the file: live.js liveDrainForClose), and the window waits for that,
+    at most timeout seconds; then before_close() and the window closes. Whatever
+    the page could not hand over is finished by Api.shutdown() as the app exits."""
+    try:
+        window.evaluate_js(_DRAIN_START_JS)
+        deadline = clock() + timeout
+        while clock() < deadline:
+            if window.evaluate_js(_DRAIN_DONE_JS):
+                break
+            sleep(poll)
+    except Exception:
+        pass                                      # the page is gone: shutdown() finishes the file
+    finally:
+        before_close()
+        window.destroy()
 
 
 def _own_taskbar_identity():
@@ -477,6 +504,7 @@ def _run_app(smoke=None):
             return result[0] if result else None
 
         closing_for_update = False
+        closing_after_recording = False
 
         def quit_for_update():
             nonlocal closing_for_update
@@ -509,8 +537,13 @@ def _run_app(smoke=None):
         window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,
                                        width=1100, height=720, min_size=(800, 500), hidden=bool(smoke))
 
+        def close_now():
+            nonlocal closing_after_recording
+            closing_after_recording = True
+            api.request_stop()
+
         def on_closing():
-            if closing_for_update:
+            if closing_for_update or closing_after_recording:
                 return True
             if api.updating():
                 proceed = window.create_confirmation_dialog(
@@ -522,6 +555,12 @@ def _run_app(smoke=None):
                                        api.clips_running(), api.changing_files(), api.recording())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
+                if proceed and api.recording():
+                    # Not yet: the page first saves what it still holds (bounded), then the
+                    # window closes (close_now lets that close through).
+                    threading.Thread(target=_close_after_drain, args=(window, close_now), name="close-drain",
+                                     daemon=True).start()
+                    return False
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the
                     # api.shutdown() after it) may not return for a while yet.
