@@ -244,6 +244,67 @@ class LibraryOps:
             seen = self._library_root
         return seen is None or _root_identity(root) != seen
 
+    def _library_file_path(self, file_id, pins=None, missing=None):
+        """(library root, path) for a file id from the latest listing, checked as
+        every id -> path entry point checks it (see _check_library_file), or the
+        _fail() saying why not. missing: the message for an unknown id or a file
+        that is gone (default LIB_CHANGED, "<name> is no longer there..."), or
+        False to let a file that is gone through (the caller reports it)."""
+        path = self._library_file(file_id)
+        with self._lib_lock:
+            root = self._library_folders.get("root")
+        if path is None or root is None:
+            return _fail(missing or LIB_CHANGED)
+        return self._check_library_file(root, path, pins, missing)
+
+    def _check_library_file(self, root, path, pins=None, missing=None):
+        """(root, path) when root is still the library folder the latest listing
+        saw (the same folder, resolving to the same place, not swapped for a link)
+        and path is still a file strictly inside it, resolved on disk with no
+        symlink or junction between (folders.inside); else the _fail() saying why
+        not. With pins (folders.Pins) the library folder and every folder down to
+        the file's are held first, so that this stays true while they are held.
+        missing: see _library_file_path."""
+        if os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(self._library_path())):
+            return _fail(LIB_CHANGED)
+        if not folders.under(path, root):
+            return _fail(LIB_CHANGED)
+        if pins is not None:
+            try:
+                pins.chain(root, os.path.dirname(os.path.abspath(path)))
+            except (OSError, ValueError):
+                pass                                # a folder on the way is gone: said below
+        if self._root_moved(root):
+            return _fail(ROOT_CHANGED)
+        if not os.path.isfile(path):
+            if missing is False and not os.path.lexists(path):
+                return root, path
+            return _fail(missing or f"{os.path.basename(path)} is no longer there. Refresh the list.")
+        if not folders.inside(root, path):
+            return _fail(LIB_CHANGED)
+        return root, path
+
+    def _source_moved(self, source, pins):
+        """For a recording the player loaded from the library (source["library"]):
+        is its file no longer inside that library folder, as it was when loaded
+        (the folder resolving elsewhere or swapped for a link, or a folder on the
+        way swapped for a junction since)? The folders down to it are held in pins
+        first. False for anything else, and for a file that is gone (reading it
+        says so)."""
+        library = source.get("library") if source.get("kind") == "file" else None
+        if library is None:
+            return False
+        path = source["path"]
+        if not folders.under(path, library):
+            return True
+        try:
+            pins.chain(library, os.path.dirname(os.path.abspath(path)))
+        except (OSError, ValueError):
+            pass
+        if not os.path.lexists(path):
+            return False
+        return _root_identity(library) != source.get("library_id") or not folders.inside(library, path)
+
     def _usable(self, root, path, allow_root=False, pins=None):
         """None when path is still a folder inside the unchanged library folder,
         else the _fail() saying why not. With pins (folders.Pins), the library

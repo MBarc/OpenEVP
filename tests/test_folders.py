@@ -2,6 +2,7 @@
 create / rename / folder_info / delete_folder / move_files (tasks 2 and 3)."""
 import ctypes
 import dataclasses
+import io
 import os
 import shutil
 import stat
@@ -406,6 +407,84 @@ class FolderApiBase(unittest.TestCase):
 
     def names(self, *rel):
         return sorted(os.listdir(os.path.join(self.lib, *rel)))
+
+
+@unittest.skipUnless(WINDOWS, "junctions are Windows'")
+class FileIdJunctionTests(FolderApiBase):
+    """A folder listed in the library, swapped for a junction to the same audio
+    outside it: every entry point that takes a file id (or a recording loaded
+    from one) refuses it, and nothing is read from or written beside the outside
+    copy."""
+
+    def setUp(self):
+        super().setUp()
+        self.audio = wav_bytes(b"case", seconds=2.0)
+        self.path = self.write("Case/a.wav", self.audio)
+        self.outside = os.path.join(self.tmp, "outside")
+        os.makedirs(self.outside)
+        with open(os.path.join(self.outside, "a.wav"), "wb") as f:
+            f.write(self.audio)                          # the same audio: only containment can refuse it
+        self.api = self.new_api()
+        self.fid = self.file(self.index(self.api), "a.wav")
+
+    def swap(self):
+        import _winapi
+        os.rename(os.path.join(self.lib, "Case"), os.path.join(self.tmp, "Case moved"))
+        _winapi.CreateJunction(self.outside, os.path.join(self.lib, "Case"))
+        self.addCleanup(os.rmdir, os.path.join(self.lib, "Case"))     # the junction only
+
+    def assert_outside_untouched(self):
+        self.assertEqual(os.listdir(self.outside), ["a.wav"])
+
+    def test_play_marks_and_show_refuse_it(self):
+        self.swap()
+        self.assertEqual(self.api.play_library(self.fid)["error"], backend.LIB_CHANGED)
+        self.assertEqual(self.server.files, [])                          # never read
+        self.assertEqual(self.api.library_marks(self.fid)["error"], backend.LIB_CHANGED)
+        with mock.patch.object(backend, "show_in_folder", return_value=True) as show:
+            self.assertEqual(self.api.show_library_file(self.fid)["error"], backend.LIB_CHANGED)
+        show.assert_not_called()
+
+    def test_sharing_refuses_it(self):
+        dragged = []
+        self.api._drag_files = self.api._copy_files = dragged.append
+        self.swap()
+        self.assertEqual(self.api.drag_out([self.fid])["error"], backend.LIB_CHANGED)
+        self.assertEqual(self.api.copy_files([self.fid])["error"], backend.LIB_CHANGED)
+        self.assertEqual(dragged, [])
+
+    def test_library_clips_refuse_it(self):
+        self.store.add_mark(wavinfo.wav_fingerprint(io.BytesIO(self.audio)), 0.1, 0.3, "A", "", name="a.wav",
+                            duration=2.0)
+        self.swap()
+        self.assertEqual(self.api.export_clips_files([self.fid], 1)["error"], backend.LIB_CHANGED)
+        # A job whose file was swapped after it was admitted: skipped, nothing written.
+        r = self.api._start_clips(lambda: [(self.path, "wav")], None, 2)
+        self.assertTrue(r["ok"], r)
+        with self.events.cond:
+            self.assertTrue(self.events.cond.wait_for(
+                lambda: any(n == "clips-done" for n, _p in self.events.items), WAIT))
+        p = next(q for n, q in self.events.items if n == "clips-done")
+        self.assertEqual((p["saved"], p["skipped"]), (0, [f"a.wav ({backend.NOT_IN_LIBRARY})"]))
+        self.assert_outside_untouched()
+
+    def test_exports_of_a_loaded_recording_refuse_it(self):
+        loaded = self.api.play_library(self.fid)
+        self.assertTrue(loaded["ok"], loaded)
+        rec = loaded["rec"]
+        self.assertTrue(self.api.add_mark(rec, 0.1, 0.3, "A")["ok"])
+        self.swap()
+        changed = "a.wav has changed since it was loaded. Load it again."
+        self.assertEqual(self.api.export_marked(rec)["error"], changed)
+        self.assertEqual(self.api.export_clips(rec)["error"], changed)
+        self.assert_outside_untouched()
+        self.assertEqual(sorted(os.listdir(self.lib)), ["Case"], "nothing saved in Save-to either")
+
+    def test_a_loaded_recording_still_inside_exports(self):
+        loaded = self.api.play_library(self.fid)
+        self.assertTrue(self.api.add_mark(loaded["rec"], 0.1, 0.3, "A")["ok"])
+        r = self.api.export_marked(loaded["rec"])
+        self.assertTrue(r["ok"], r)
 
 
 class CreateRenameTests(FolderApiBase):

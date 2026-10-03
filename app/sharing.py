@@ -47,7 +47,7 @@ import time
 from openevp import formats, mp3
 
 from . import folders
-from .library_ops import LIB_CHANGED, ROOT_CHANGED, _decoder_problem, _fail, _not_format, _plain
+from .library_ops import LIB_CHANGED, _decoder_problem, _fail, _not_format, _plain
 
 SHARE_DIR = "openevp-share"           # in the temp folder
 SHARE_MAX_AGE = 6 * 3600             # seconds a made MP3 is kept after it was last used
@@ -280,15 +280,10 @@ class ShareOps:
             sources = [self._library.get(i) for i in file_ids]
         if root is None or any(p is None for p in sources):
             return _fail(LIB_CHANGED)
-        if os.path.normcase(os.path.abspath(root)) != os.path.normcase(os.path.abspath(self._library_path())):
-            return _fail(LIB_CHANGED)
-        if self._root_moved(root):
-            return _fail(ROOT_CHANGED)
         for path in sources:
-            if not os.path.isfile(path):
-                return _fail(f"{os.path.basename(path)} is no longer there. Refresh the list.")
-            if not folders.inside(root, path):
-                return _fail(LIB_CHANGED)
+            got = self._check_library_file(root, path)
+            if isinstance(got, dict):
+                return got
         out, seen, made = [], set(), 0
         for path in sources:
             fmt = formats.by_ext(os.path.splitext(path)[1])
