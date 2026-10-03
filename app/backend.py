@@ -529,6 +529,7 @@ class Api(ShareOps, LibraryOps):
         self._fs_op = False                   # a folder operation is moving files (under _lib_lock)
         self._fs_gen = 0                      # bumped when one starts and ends: an older scan must not prune
         self._fs_busy = False                 # a folder operation holds _busy (not an export)
+        self._fs_done = None                  # set when that operation is over (shutdown() waits for it)
         self._library_root = None             # _root_identity() of the library folder at the last listing
         if store is not None:
             saved = store.get_setting("save_folder")
@@ -2594,20 +2595,25 @@ class Api(ShareOps, LibraryOps):
         a backup finishes the file it is writing, and queued backups are recorded as
         not made; the library indexer stops before its next file; a WAV being
         saved with its marks stops its decode or finishes writing), then close the
-        store, which writes the fingerprint cache."""
+        store, which writes the fingerprint cache. A rename, move or delete in
+        the library is finished first: the store's lock is not let go (another
+        window could then start changing the library) while one runs."""
         self._stop.set()
         with self._backup_lock:                 # no backup worker can start after this
             pass
         with self._lib_lock:                    # nor a library indexer
             pass
-        with self._workers_lock:                # nor an export or export_marked()
+        with self._workers_lock:                # nor an export, export_marked() or folder operation
             workers = list(self._workers)
             marked = self._marked_done
+            fs = self._fs_done
         for t in workers:
             if t.is_alive():
                 t.join()
         if marked is not None:
             marked.wait()
+        if fs is not None:
+            fs.wait()
         if self._store is not None:
             self._store.close()
 

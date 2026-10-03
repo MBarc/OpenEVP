@@ -487,6 +487,56 @@ class FileIdJunctionTests(FolderApiBase):
         self.assertTrue(r["ok"], r)
 
 
+class ShutdownWaitsForFolderOperationsTests(FolderApiBase):
+    """A rename, move or delete holds the library: shutdown() waits for it before
+    closing the store (and letting go of its lock), and none starts once closing."""
+
+    def test_shutdown_waits_for_a_blocked_recycle(self):
+        self.write("Old Mill/a.wav", wav_bytes(b"a"))
+        entered, release, order = threading.Event(), threading.Event(), []
+
+        def slow_recycle(path, before=None):
+            entered.set()
+            release.wait(WAIT)
+            self.fake_recycle(path, before)
+            order.append("recycled")
+        api = self.new_api(recycle=slow_recycle)
+        r = self.index(api)
+        closing = self.store.close
+
+        def close():
+            order.append("store closed")
+            closing()
+        result = {}
+        with mock.patch.object(self.store, "close", close):
+            deleting = threading.Thread(target=lambda: result.update(api.delete_folder(self.folder(r, "Old Mill"))))
+            deleting.start()
+            self.assertTrue(entered.wait(WAIT))
+            self.assertTrue(api.changing_files())
+            stopping = threading.Thread(target=api.shutdown)
+            stopping.start()
+            stopping.join(0.5)
+            self.assertTrue(stopping.is_alive(), "shutdown() waits for the delete")
+            self.assertEqual(order, [])
+            release.set()
+            deleting.join(WAIT)
+            stopping.join(WAIT)
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(order, ["recycled", "store closed"])
+        self.assertTrue(result["ok"], result)
+        self.assertFalse(api.changing_files())
+
+    def test_no_folder_operation_starts_once_closing(self):
+        self.write("Old Mill/a.wav", wav_bytes(b"a"))
+        api = self.new_api()
+        r = self.index(api)
+        api.request_stop()
+        self.assertEqual(api.create_folder("root", "New")["error"], library_ops.CLOSING)
+        self.assertEqual(api.delete_folder(self.folder(r, "Old Mill"))["error"], library_ops.CLOSING)
+        self.assertEqual(self.recycled, [])
+        self.assertFalse(api.changing_files())
+
+
 class CreateRenameTests(FolderApiBase):
     def test_create_in_root_and_nested(self):
         api = self.new_api()

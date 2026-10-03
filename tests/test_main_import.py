@@ -96,6 +96,13 @@ class MainImportTests(unittest.TestCase):
                                          "Clips are still being exported. Stop after the current recording and close?"))
         self.assertIn("backup of a marked recording", main._close_question(False, True, False, True)[1])
 
+    def test_close_question_says_library_files_are_being_changed(self):
+        main = self.main()
+        title, text = main._close_question(False, False, False, False, True)
+        self.assertEqual(title, "Library files in use")
+        self.assertIn("renamed, moved or deleted", text)
+        self.assertIsNone(main._close_question(False, False, False, False, False))
+
     def test_only_an_explicit_smoke_flag_starts_the_smoke_test(self):
         """--smoke is for tools/release_check.py; any other command line runs the app as before."""
         main = self.main()

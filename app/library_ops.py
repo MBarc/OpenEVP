@@ -340,7 +340,11 @@ class LibraryOps:
     def _fs_begin(self, pause=True):
         """Start a folder operation: None, or the _fail() saying why not. Holds
         _busy until _fs_end(). With pause, the indexer is stopped between files
-        first (and no new indexer job or backup starts until _fs_end())."""
+        first (and no new indexer job or backup starts until _fs_end()).
+        Admission checks _stop under _workers_lock, the lock shutdown() takes
+        after setting _stop, and registers _fs_done in the same step: shutdown()
+        either refuses the operation or waits for it before closing the store
+        (and so letting go of its lock)."""
         if self._stop.is_set():
             return _fail(CLOSING)
         read_only = self._store_read_only()
@@ -348,9 +352,13 @@ class LibraryOps:
             # Another window holds the store: it could be exporting or backing up
             # into these folders, and backup states could not be recorded here.
             return _fail(read_only)
-        if not self._busy.acquire(blocking=False):
-            return _fail(FS_BUSY)
-        self._fs_busy = True                # exporting() is not this
+        with self._workers_lock:
+            if self._stop.is_set():
+                return _fail(CLOSING)
+            if not self._busy.acquire(blocking=False):
+                return _fail(FS_BUSY)
+            self._fs_busy = True            # exporting() is not this
+            self._fs_done = threading.Event()
         indexer = None
         if pause:
             with self._lib_lock:
@@ -373,8 +381,17 @@ class LibraryOps:
             if self._fs_op:
                 self._fs_op = False
                 self._fs_gen += 1
+        with self._workers_lock:
+            done, self._fs_done = self._fs_done, None
         self._fs_busy = False
         self._busy.release()
+        if done is not None:
+            done.set()
+
+    def changing_files(self):
+        """True while a rename, move or delete in the library runs (the close
+        prompt says so; closing waits for it)."""
+        return self._fs_done is not None
 
     def _retarget_prefix(self, old, new):
         """A file or folder moved from old to new: re-key the fingerprint cache
