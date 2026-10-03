@@ -103,7 +103,9 @@ input -> getUserMedia (EC/NS/AGC off, channelCount ideal 2)
 page:  batches -> meter + waveform columns; while recording, ~0.5 s of PCM ->
        base64 -> a queue -> one sender: Api.live_chunk(session, seq, data)
 backend (app/live.py): seq checked, base64 decoded, disk space checked,
-       -> [import split: the whole input] + Splitter, or straight -> WavPart (.part)
+       -> WavPart (.part): one file, for Live and Import alike
+after Stop (an import with a silence gap set): a background job splits the file
+       (openevp.silence, one pass over the whole file) into one WAV per recording
 ```
 
 **Bounds on the page** (`live.js`):
@@ -124,13 +126,17 @@ backend (app/live.py): seq checked, base64 decoded, disk space checked,
   worklet that never answered its flush, a drain out of time, an overflowing
   queue) is counted; the final message then says what was saved and that the
   last N seconds may be missing, and why, as a warning (never "✓ Saved").
+  Whenever sending ends unsuccessfully, the chunk in flight and everything
+  still queued (and anything that would have been queued after) is counted.
 - **Closing the window** during a recording: `main.py` holds the close, runs
-  the page's `liveDrainForClose()` (the same Stop) and waits for it, at most
-  60 s. The page is asked on a thread of its own, because pywebview's
-  `evaluate_js` waits for the page with no time limit: a hung page cannot hold
-  the close past the deadline. If the page did not finish in time,
-  `Api.finish_recording()` finishes the file with what has arrived; then the
-  window closes, and `shutdown()` finishes anything still open.
+  the page's `liveDrainForClose()` (the same Stop) and waits for it. The whole
+  close takes at most 70 s, whatever hangs: the page is asked on a thread of its
+  own (pywebview's `evaluate_js` waits for the page with no time limit) and gets
+  the first three quarters; if it did not finish, `Api.finish_recording()`
+  (which may wait on the recording's lock or the disk) runs on a thread of its
+  own until the deadline; then the window closes regardless. `shutdown()` waits
+  at most 10 s for the recording's lock. A file left unfinished is a `.part` that
+  the next start recovers.
 - The backend finishes a session that gets no chunk or mark for 60 s (the page
   is gone or stuck), so its file is not left open until the app closes.
 
@@ -170,13 +176,11 @@ costs the same as a minute. Waveform and spectrogram share one time scale
   file (`os.rename` on Windows refuses; the next free `"<stem> (N)"` is used).
   The fingerprint goes into the library's index (`remember_fp`), so listing
   never reads the file again.
-- Names: `Live YYYY-MM-DD HH-MM-SS.wav`; imports
-  `Import YYYY-MM-DD HH-MM-SS (n).wav` (the time Record was pressed, n the
-  piece) and, when split into more than one piece, the whole input as
-  `Import YYYY-MM-DD HH-MM-SS (full).wav`.
+- Names: `Live YYYY-MM-DD HH-MM-SS.wav`; an import `Import YYYY-MM-DD HH-MM-SS.wav`,
+  or `Import YYYY-MM-DD HH-MM-SS (full).wav` when it is to be split, and then its
+  pieces `Import YYYY-MM-DD HH-MM-SS (n).wav` (the time Record was pressed).
 - Limits: recording stops (and saves) when the drive would have less than
-  500 MB free, warning from 15 minutes before (an import that keeps the whole
-  input counts twice the data rate); and at 4 GiB - 2 MiB of audio per file
+  500 MB free, warning from 15 minutes before; and at 4 GiB - 2 MiB of audio per file
   (RIFF's limit), about 6.2 h of 48 kHz stereo. Start is refused with less than
   500 MB + one minute free.
 
@@ -190,50 +194,57 @@ edited in the player afterwards. The page sends the time it counted (frames
 captured since Record) after its queued audio has been taken; the backend keeps
 the mark in memory and in the sidecar and stores it against the fingerprint
 when the file is finished (clamped to the file's length, times rounded down to
-the millisecond: the store refuses a mark past the end). In an import, a mark
-goes to the piece being written (during a gap that is still the piece before
-it) and to the whole input's file.
+the millisecond: the store refuses a mark past the end). When an import is
+split, each piece gets the marks of the whole file that end in it, at its own
+times (a mark starting before the piece is cut at its start).
 
-## Splitting an import on silence (`openevp/silence.py`)
+## Splitting an import on silence (`openevp/silence.py`, `LiveOps._split_job`)
 
-50 ms blocks, RMS in dBFS over all channels. **Nothing is discarded**: the
-pieces, put back together, are the input sample for sample.
+An import is recorded as one file, exactly as Live mode records. After Stop,
+with a silence gap set, a background job (registered with the workers, so
+closing waits for it to stop) splits it. Splitting while recording was dropped
+after three reviews: a streaming splitter could not know the true floor in
+advance (a later quiet stretch redefined it), and its evidence checks grew
+quadratic over a long import. Looking at the whole file at once fixes both.
 
-- **Idle floor:** the 20th percentile of the last second, the lowest seen so far
-  (never rises), with -100 dBFS as the lowest floor used (all-zero input).
-  `threshold = floor + 8 dB`. The cable's hiss is the floor; a recording's own
-  background (room tone, the recorder's mic hiss, played back) is above it.
-- **Pieces:** the first starts with the first sample. After `gap` seconds
-  (default 3, 0.5-60, or off) of blocks at or under the threshold, a split is
-  pending; at the next loud block the piece ends and the next starts. The last
-  0.5 s of every quiet run is always held back before it is written (a rolling
-  pre-roll), so the next piece begins 0.5 s before its sound even when the gap
-  is exactly `gap` seconds (Astra's re-review: it started at the sound). Stop:
-  whatever is held back goes into the last piece, and so does the last partial
-  block.
-- **Evidence before a split** (both reviews: changing loudness was taken for a
-  background, and split recordings in two). A piece may end only when:
-  - it has a background of its own: a level it holds **steadily** for whole
-    seconds (the 10th-90th percentile of a second's block levels within 6 dB),
-    in **at least two separate stretches** (the level comes back), the quietest
-    such level at least 8 dB above the floor. A quieter passage heard once, or
-    loudness that just changes, is not a background;
-  - its content stands out from that background (95th percentile of its blocks
-    at least 8 dB over it);
-  - the quiet run is back at the idle floor seen before (its median within
-    4 dB): the input returned to the level it had while the recorder played
-    nothing;
-  - at least 3 s of the piece were judged, not counting the quiet run being
-    judged, nor quiet before the piece's first sound (the gap before it);
-  - it has at least 1 s of loud blocks (a click joins the next piece).
-  Otherwise the quiet becomes part of the piece. When Play was pressed before
-  Record, the first recording's background was the floor at first, so it shows
-  none of its own and stays joined to the next recording.
-- **The whole input is kept too** (decision for the review's suggestion): an
-  import split on silence also writes `Import ... (full).wav`, with the marks,
-  so a split in the wrong place costs nothing. It is dropped when only one
-  piece was made (the same audio). It costs twice the disk space while
-  importing, which the disk check counts.
+1. **Levels:** one pass reads the file in chunks and computes the RMS (dBFS) of
+   every 50 ms block (`file_levels`).
+2. **Floor:** every whole second whose block levels are steady (10th-90th
+   percentile within 6 dB) gives its median; the floor is the 10th percentile of
+   those medians over the entire file, fixed before any decision (-100 dBFS at
+   the lowest).
+3. **Gaps:** runs of blocks at the floor (within 4 dB) lasting at least the gap
+   setting (default 3 s, 0.5-60), with sound (more than 8 dB above the floor)
+   before and after them. Quiet at the start and the end is never a gap. A click
+   between two stretches at the floor (under 1 s of sound) does not break the
+   gap; it stays at the end of the piece before.
+4. **Cuts:** each new piece starts 0.5 s before its first sound (never before
+   its gap starts), so the gap stays at the end of the piece before it.
+5. **Evidence per piece:** a piece (its content, from its first sound up to its
+   gap) is kept only with at least 1 s of sound and its own quiet level (20th
+   percentile) at least 8 dB above the floor. A recording whose pauses sit at
+   the floor (no line hiss between recordings to tell them apart) is never cut
+   at those pauses; a piece without the evidence joins the next one. When in
+   doubt, no cut.
+
+All of this is linear in the length of the file (an hour of 8 kHz audio is
+planned in about a second here).
+
+The pieces are written from the whole file to `.part` files, listed in
+`live_parts` with a `"derived": true` sidecar (a crash leaves nothing to finish:
+the next start deletes them), and only when all are written does each get its
+name, its marks and its fingerprint in the index. The pieces put together are
+the whole file, sample for sample, and **the whole file is always kept**, so a
+bad split costs nothing. Cancelled (the banner's **Cancel splitting**), failed,
+or the app closing: the pieces written so far are deleted and the page is told
+(`import-split-failed`); no gaps found: the page is told the import stays one
+file. Progress comes as `import-split-progress` (reading the levels is the first
+half, writing the pieces the second), the result as `import-split-done`.
+
+While an import is being split, Record, the library's folder operations and
+updates wait (`_live_busy`), the destination folders are held (`folders.Pins`)
+and checked again before each piece, and splitting needs free space for the
+pieces plus the 500 MB reserve.
 
 ## While recording
 
@@ -283,13 +294,17 @@ report without a good `live` section.
 - `tests/test_live.py`:
   - the writer: incremental writes, header rewrites, never overwriting, the
     size limit, recovery of a cut-off `.part`, an unreadable one kept;
-  - the splitter on synthetic signals, every case checking that the pieces put
-    together are the input: tones with gaps, hiss only, pauses shorter than the
-    gap, a recording no louder than the floor, Astra's steady-sound case, Play
-    before Record, clicks, Stop in a gap, stereo, digital silence;
+  - the splitter on synthetic signals: recordings with gaps, a gap of exactly
+    the setting (its pre-roll), hiss only and quiet at the ends, pauses shorter
+    than the gap, a recording whose pauses sit at the floor, Astra's third case
+    (a split only at the true floor), quiet that is not the floor, a click in a
+    gap, a longer gap setting, stereo, digital silence, and an hour-long file
+    planned in seconds;
   - the backend: placement, names, marks after finishing (also at the last
-    sample), the player result and its failure, Clips refused, import pieces,
-    the whole input and their marks, the disk-space and 4 GB stops, a second
+    sample), the player result and its failure, Clips refused, an import split
+    after Stop (pieces put together equal the whole file, marks in the right
+    piece, no gaps, cancelled, folder moved, half-written pieces deleted at the
+    next start), the disk-space and 4 GB stops, a second
     window, folder operations and updates waiting (both directions), the
     destination held and re-checked, closing saves, an idle session finished,
     crash recovery (a cut-off `.part`, a crash between rename and marks, a
@@ -300,7 +315,8 @@ report without a good `live` section.
 - `tests/ui_check.js`: the view, the input found again by name, raw-input
   constraints, folder choice, Listen with Enhance, record / stop states, the
   chunk bytes, the flushed tail saved on Stop, M, the player opening and its
-  failure, Import with its settings, guide and whole-input message, a
+  failure, Import with its settings, guide, the split's progress, Cancel and
+  results, a
   backend-initiated stop, a stalled bridge (bounded queue, timeouts, Stop
   bounded), a worklet that never answers its flush, Windows blocking the
   microphone, recovery messages.
@@ -316,5 +332,6 @@ report without a good `live` section.
 - A file stops at 4 GB rather than continuing into a second file.
 - While recording, the library folder and the folders down to the destination
   cannot be renamed in File Explorer either (they are held open).
-- The import splitter errs towards not splitting: recordings with no quieter
-  background of their own (steady sound) stay joined to the next one.
+- The import splitter errs towards not splitting: a recording whose own
+  quiet parts sit at the floor stays joined to the next one. The pieces appear
+  shortly after Stop (an hour takes seconds, plus writing the copies).

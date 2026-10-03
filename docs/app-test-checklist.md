@@ -313,10 +313,13 @@ test opens a real input):
     3.5 mm adapter) or any recorder, into a USB adapter's line or mic input.
     **Import from a recorder**, the guide is shown; volume at about the middle,
     meter out of the red. Record first, then play three recordings back to
-    back: three files `Import <date> <time> (1).wav`, `(2)`, `(3)`, each starting
-    just before its sound, each gap at the end of the file before it, none split
-    in the middle of a pause inside a recording. Untick the split: one file. Set 10 s: recordings
-    with shorter gaps stay together.
+    back, then Stop: `Import <date> <time> (full).wav` is saved at once, and a
+    few seconds later (the banner shows progress) three files
+    `Import <date> <time> (1).wav`, `(2)`, `(3)`, each starting just before its
+    sound, each gap at the end of the file before it, none split in the middle of
+    a pause inside a recording. Untick the split: one file. Set 10 s: recordings
+    with shorter gaps stay together. Start another import and click **Cancel
+    splitting** while it splits: only the full file remains, and the banner says so.
 51. **An hour-long session.** Record live for 60+ minutes at 48 kHz: the
     waveform and spectrogram keep scrolling smoothly to the end; Task Manager
     shows OpenEVP's (and its WebView2 processes') CPU low and memory flat after
@@ -340,7 +343,8 @@ test opens a real input):
     seconds and the saved file ends with what you said (nothing cut off). Try
     renaming the recording's folder in File Explorer during a recording: Windows
     refuses; after Stop it works.
-56. **Import, whole input.** Import three recordings split on silence: besides
-    `(1)`, `(2)`, `(3)` there is `Import <date> <time> (full).wav`, as long as the
-    three together, with the marks made while importing; playing the three back
-    to back sounds exactly like the full one.
+56. **Import, whole input.** After an import split on silence, the full file is
+    as long as the three together and has the marks made while importing; each
+    piece has the marks that fall in it; playing the three back to back sounds
+    exactly like the full one. Import an hour from a recorder: the pieces appear
+    within a minute or so of Stop.

@@ -230,30 +230,27 @@ get their recordings onto the PC by playing them into it.
 5. Click **● Record** first, then press Play on the recorder, and let it play
    through. Click **■ Stop** when it's done.
 
-With **Start a new file after 3 seconds of silence** ticked (the default),
-OpenEVP starts a new file each time the recorder goes quiet between
-recordings. Each file is named after when you started, with a number:
-`Import 2026-10-03 21-05-09 (1).wav`, `(2)` and so on. Nothing is ever cut
-out: the quiet between two recordings stays at the end of the first file, and
-the next one starts half a second before its sound. Put the files back to back
-and you have exactly what came in.
+With **Split into separate recordings at 3 seconds of silence** ticked (the
+default), the import is recorded as one file, `Import 2026-10-03 21-05-09 (full).wav`.
+Shortly after you press Stop, OpenEVP goes through it and saves one file per
+recording beside it, wherever the recorder went quiet for 3 seconds:
+`Import 2026-10-03 21-05-09 (1).wav`, `(2)` and so on. The banner shows how far
+it has got, with a button to cancel. The whole import is always kept, so if it
+ever splits in the wrong place, nothing is lost. Nothing is cut out either: the
+quiet between two recordings stays at the end of the first file, and the next
+one starts half a second before its sound. If it finds no gaps, it says so and
+the import stays one file. You can change the 3 seconds, or untick it to keep
+the import as one plain file.
 
-OpenEVP also saves the whole import as one file, `Import 2026-10-03 21-05-09 (full).wav`,
-so if it ever splits in the wrong place, nothing is lost. (When it doesn't
-split at all, there's just the one file.) You can change the 3 seconds, or
-untick it to get everything in one file.
+How it tells a gap from a pause: it looks at the whole import at once and finds
+the quietest level the input settles at, which is the cable's hiss while the
+recorder plays nothing. Only quiet at that level, between two recordings, is a
+gap. A recording's own background (room noise, hiss) is louder than that, so
+pauses inside a recording never split it. When it can't tell, it doesn't
+split. A short click when you press a button doesn't get a file of its own.
 
-How it tells a gap from a pause: in the first moments it learns how quiet the
-cable is when nothing plays. A recording's own background (room noise, hiss)
-is louder than that, so pauses inside a recording never split it. That's why
-it helps to press Record before Play. If you press Play first, the first
-recording may stay joined to the next one until OpenEVP has heard a real gap.
-When in doubt it doesn't split: a recording made of steady sound, with no
-quieter background of its own, stays joined to the next one. A short click
-when you press a button doesn't get a file of its own either.
-
-Marks work here too: press **M** and the mark goes into the file being
-recorded at that moment, and into the whole import's file.
+Marks work here too: press **M** and the mark goes into the import, and into
+whichever recording's file it falls in once it's split.
 
 ## Opening WAV and MP3 files
 
