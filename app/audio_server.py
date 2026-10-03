@@ -12,9 +12,16 @@ decode a whole file just to draw it.
 prepare_file() does the same for a WAV file the user picked (for example from a
 recorder that writes WAV itself): it is served from where it is, never copied or
 deleted, and only files registered this way can be reached. The file's size and
-modification time are recorded when it is fingerprinted; if either differs when
-the player asks for audio, the request is refused (409), so the player never gets
-different audio under a handle whose marks belong to the fingerprinted audio.
+modification time are recorded when it is fingerprinted, and which file it is
+(its volume serial number and file id, kept across renames and moves); if any of
+them differs when the player asks for audio, the request is refused (409), so
+the player never gets different audio under a handle whose marks belong to the
+fingerprinted audio -- nor another file put at that path, or reached through a
+folder swapped for a junction since it was loaded, even with the same size and
+time. (The file is reopened by path for each request rather than held open for
+as long as it is loaded: an open file, even one shared for deleting, stops
+Windows renaming, moving or recycling the folder it is in, and the library does
+those with a recording loaded.)
 The file is not copied to snapshot it: WAVs can be gigabytes. Files are opened
 so that they can still be moved, renamed or recycled while they are being read
 (Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
@@ -146,6 +153,21 @@ def _open_shared(path):
 def _stat_of(st):
     """(size, mtime_ns): what identifies one version of a file served in place."""
     return st.st_size, st.st_mtime_ns
+
+
+def _ident_of(st):
+    """(volume serial number, file id) of an open file: which file it is, the
+    same across renames and moves on its volume. None where the file system
+    gives no file id."""
+    return (st.st_dev, st.st_ino) if st.st_ino else None
+
+
+def _not_as_loaded(e, st):
+    """Is the open file (os.fstat st) not the one a served-in-place entry was
+    loaded from: another version of it, or another file altogether?"""
+    if "stat" in e and _stat_of(st) != e["stat"]:
+        return True
+    return e.get("ident") is not None and _ident_of(st) != e["ident"]
 
 
 # The decoded-WAV cache's budget on disk. The longest ICD-ST10 recording (its
@@ -348,8 +370,9 @@ class AudioServer:
         WAV, or that changed while it was being read."""
         path = os.path.abspath(path)
         with _open_shared(path) as f:
-            stat = _stat_of(os.fstat(f.fileno()))
-            key = ("file", os.path.normcase(path), *stat)
+            st = os.fstat(f.fileno())
+            stat, ident = _stat_of(st), _ident_of(st)
+            key = ("file", os.path.normcase(path), *stat, ident)
             with self._lock:
                 e = self._entries.get(key)
                 if e is not None:
@@ -357,13 +380,15 @@ class AudioServer:
                     return {**self._info(e), "stat": e["stat"]}
             peaks, duration, rate, fp = _analyze(f)
             channels = _channels(f)
-            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(os.stat(path)) != stat:
+            now = os.stat(path)
+            if _stat_of(os.fstat(f.fileno())) != stat or _stat_of(now) != stat or (
+                    ident is not None and _ident_of(now) != ident):
                 raise ValueError("the file changed while it was being read; try again")
         file_id = secrets.token_hex(8)
         with self._lock:
             # size 0: served in place, so it takes nothing from the decoded-WAV cache budget
             self._entries[key] = {"file": file_id, "size": 0, "peaks": peaks, "duration": duration, "rate": rate,
-                                  "channels": channels, "fp": fp, "path": path, "stat": stat}
+                                  "channels": channels, "fp": fp, "path": path, "stat": stat, "ident": ident}
             self._by_file[file_id] = key
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
@@ -426,7 +451,7 @@ class AudioServer:
         (ValueError), as the player's requests are."""
         path, e = self._file_of(url)
         f = _open_shared(path)
-        if "stat" in e and _stat_of(os.fstat(f.fileno())) != e["stat"]:
+        if _not_as_loaded(e, os.fstat(f.fileno())):
             f.close()
             raise ValueError("the file changed on disk: load it again")
         return f
@@ -562,7 +587,7 @@ class AudioServer:
             return
         with f:
             st = os.fstat(f.fileno())
-            if "stat" in entry and _stat_of(st) != entry["stat"]:
+            if _not_as_loaded(entry, st):
                 # Not the audio that was fingerprinted (and marked): the page must load it again.
                 h.send_error(409, "The file changed on disk")
                 return

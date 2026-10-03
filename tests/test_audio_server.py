@@ -415,5 +415,71 @@ class PickedFileTests(unittest.TestCase):
             self.assertEqual(urllib.request.urlopen(again["url"], timeout=5).status, 200)
 
 
+class SameFileTests(unittest.TestCase):
+    """A file served in place is served only while the path still names the very
+    file that was loaded: another file there with the same size and time (put in
+    its place, or reached through a folder swapped for a junction) is refused."""
+
+    def setUp(self):
+        cache = tempfile.TemporaryDirectory()
+        self.addCleanup(cache.cleanup)
+        mine = tempfile.TemporaryDirectory()
+        self.addCleanup(mine.cleanup)
+        self.mine = mine.name
+        self.s = AudioServer(lambda key: WAV, cache.name)
+        self.s.start()
+        self.addCleanup(self.s.stop)
+        self.folder = os.path.join(self.mine, "Case")
+        os.makedirs(self.folder)
+        self.path = os.path.join(self.folder, "a.wav")
+        pcm_wav(self.path, 2, 1, 4800)
+        self.info = self.s.prepare_file(self.path)
+
+    def same_size_and_time(self, path, like):
+        """Another recording at path with the size and modification time of like."""
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "r+b") as f:                     # other samples, same length
+            f.seek(-4, os.SEEK_END)
+            f.write(b"\x11\x22\x33\x44")
+        st = os.stat(like)
+        os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+    def refused(self):
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            urllib.request.urlopen(self.info["url"], timeout=5)
+        self.assertEqual(cm.exception.code, 409)
+        cm.exception.close()
+        with self.assertRaises(ValueError):
+            self.s.open_audio(self.info["url"])
+
+    def test_another_file_at_the_path_with_the_same_size_and_time_is_refused(self):
+        other = os.path.join(self.mine, "other.wav")
+        self.same_size_and_time(other, self.path)
+        os.replace(other, self.path)
+        st = os.stat(self.path)
+        self.assertEqual((st.st_size, st.st_mtime_ns), tuple(self.info["stat"]))
+        self.refused()
+
+    @unittest.skipUnless(sys.platform == "win32", "junctions are Windows'")
+    def test_a_folder_swapped_for_a_junction_is_refused(self):
+        import _winapi
+        outside = os.path.join(self.mine, "outside")
+        os.makedirs(outside)
+        self.same_size_and_time(os.path.join(outside, "a.wav"), self.path)
+        os.rename(self.folder, os.path.join(self.mine, "Case moved"))
+        _winapi.CreateJunction(outside, self.folder)
+        self.addCleanup(os.rmdir, self.folder)
+        self.refused()
+
+    def test_the_same_file_moved_and_retargeted_still_plays(self):
+        moved = os.path.join(self.mine, "Case 2")
+        os.rename(self.folder, moved)                    # nothing holds the file open between requests
+        self.s.retarget_prefix(self.folder, moved)
+        with urllib.request.urlopen(self.info["url"], timeout=5) as r:
+            self.assertEqual(r.status, 200)
+        with self.s.open_audio(self.info["url"]) as f:
+            self.assertTrue(f.read(4) == b"RIFF")
+
+
 if __name__ == "__main__":
     unittest.main()
