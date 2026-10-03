@@ -517,9 +517,39 @@ class SameFileTests(unittest.TestCase):
         self.assertNotEqual(again["fp"], first["fp"])
         with urllib.request.urlopen(again["url"], timeout=5) as r:
             self.assertEqual(r.read(), replaced)
-        with self.assertRaises(ValueError):
-            self.s.open_audio(first["url"])                  # the earlier copy is gone
-        self.assertEqual(len(os.listdir(self.cache)), 1)
+        with self.s.open_audio(first["url"]) as f:            # the earlier copy: left to eviction
+            self.assertNotEqual(f.read(), replaced)
+
+    def test_overlapping_loads_of_one_file_without_identity_both_stay_playable(self):
+        """Load A is still copying when load B of the same path starts and finishes;
+        then A finishes. Neither drops the other's copy: both URLs play."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "rb") as f:
+            original = f.read()
+        real_copy = audio_server.shutil.copyfileobj
+        a_copying, b_done = threading.Event(), threading.Event()
+        first = []
+
+        def copy(src, dst, length=0):
+            if not first:
+                first.append(True)
+                a_copying.set()
+                self.assertTrue(b_done.wait(10))             # B runs start to finish meanwhile
+            return real_copy(src, dst, length)
+        results = {}
+        with mock.patch.object(audio_server, "_ident_of", return_value=None),                 mock.patch.object(audio_server.shutil, "copyfileobj", copy):
+            a = threading.Thread(target=lambda: results.update(a=self.s.prepare_file(path)))
+            a.start()
+            self.assertTrue(a_copying.wait(10))
+            results["b"] = self.s.prepare_file(path)
+            b_done.set()
+            a.join(10)
+        self.assertNotEqual(results["a"]["url"], results["b"]["url"])
+        for name in ("b", "a"):                              # B started last; A finished last
+            with urllib.request.urlopen(results[name]["url"], timeout=5) as r:
+                self.assertEqual(r.read(), original, name)
+        self.assertEqual(len(os.listdir(self.cache)), 2)
 
     def test_without_usable_identity_means_no_file_id_or_no_volume_serial(self):
         import types

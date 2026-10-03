@@ -406,18 +406,16 @@ class AudioServer:
         be served in its place. ValueError when it changed while being copied.
         Every load makes a copy of its own (a fresh key): with no identity, the
         same path, size and time say nothing about the audio, so an earlier copy
-        is never reused. Earlier copies of the same path go at once, except one
-        pinned (still playing until the player moves on), which the usual
-        eviction takes later."""
+        is never reused. Earlier copies are not dropped here (two loads of one
+        path at once would each drop the other's): they go by the cache's usual
+        eviction, oldest first and never a pinned one, or with forget_files()."""
         def write(out):
             f.seek(0)
             shutil.copyfileobj(f, out, 1 << 20)
             if _stat_of(os.fstat(f.fileno())) != stat:
                 raise ValueError("the file changed while it was being read; try again")
-        prefix = ("copy", os.path.normcase(path))
-        info = self.prepare((*prefix, *stat, secrets.token_hex(8)), write=write, expected=stat[0])
-        self.drop_versions(prefix, [info["url"]])
-        return {**info, "stat": stat}
+        key = ("copy", os.path.normcase(path), *stat, secrets.token_hex(8))
+        return {**self.prepare(key, write=write, expected=stat[0]), "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the
