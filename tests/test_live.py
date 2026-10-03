@@ -514,6 +514,41 @@ class LiveApiTests(Tmp):
         a.live_stop(sid)
         self.assertTrue(a.rename_folder(fid, "y")["ok"])
 
+    def updater_api(self):
+        """An Api that can install updates, with a download that waits until released."""
+        import threading
+        started, release = threading.Event(), threading.Event()
+
+        class Updater:
+            def download(self, info, progress=None, cancelled=None):
+                started.set()
+                release.wait(10)
+                raise OSError("stopped by the test")
+
+            def discard(self, path):
+                pass
+        a = backend.Api(None, self.events, lambda s: None, self.lib, self.server, store=self.store,
+                        updater=Updater(), can_install=True)
+        self.addCleanup(a.shutdown)
+        a._update = {"version": "9.9.9"}
+        return a, started, release
+
+    def test_an_update_and_a_recording_never_both_start(self):
+        import threading
+        a, started, release = self.updater_api()
+        # An update is admitted first: Record is refused while it runs, allowed after.
+        t = threading.Thread(target=a.install_update)
+        t.start()
+        self.assertTrue(started.wait(10))
+        r = a.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 1})
+        self.assertEqual(r["error"], live.UPDATING)
+        release.set()
+        t.join(10)
+        sid = self.start(a)["session"]
+        # A recording first: the update is refused.
+        self.assertEqual(a.install_update()["error"], backend.UPDATE_RECORDING)
+        a.live_stop(sid)
+
     def test_closing_the_app_saves_the_recording(self):
         a = backend.Api(None, self.events, lambda s: None, self.lib, self.server, store=self.store)
         sid = self.start(a)["session"]

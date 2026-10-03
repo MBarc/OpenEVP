@@ -66,6 +66,7 @@ NO_SPACE = ("There is not enough free space on that drive to record (OpenEVP kee
             "Free some space or choose a folder on another drive.")
 STOPPED_DISK = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free)."
 STOPPED_SIZE = "Recording stopped because the file reached 4 GB, the most a WAV file can hold."
+UPDATING = "An update is being installed, so OpenEVP is about to close. Record after it restarts."
 NO_MOMENT = "No recording was running at that moment (OpenEVP was waiting for sound)."
 STOPPED_MOVED = ("Recording stopped because the folder it was saving into is no longer where it was "
                  "in the library. What was recorded until then is saved.")
@@ -466,6 +467,9 @@ class LiveOps:
                 if self._fs_done is not None:
                     pins.close()
                     return _fail("Wait for the library to finish renaming, moving or deleting files.")
+                if self._update_claim:           # install_update() admits itself under this lock too
+                    pins.close()
+                    return _fail(UPDATING)
                 try:
                     session = _Session(self, secrets.token_hex(8), mode, root, folder, rate, channels, split,
                                        pins=pins, root_id=root_id)

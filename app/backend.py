@@ -103,6 +103,7 @@ NO_AUDIO = "This recording has no audio to mark."
 GONE = "That file is no longer there. Refresh the list."
 NOT_IN_LIBRARY = "it is no longer inside the library folder"
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
+UPDATE_RECORDING = "Stop the recording, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
 CLIPS_BUSY = "Wait for the export to finish, then export the clips."
@@ -488,6 +489,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         self._update = None                   # the release found by the last check_update()
         self._before_install = before_install # () -> None, just before the installer starts
         self._updating = False
+        self._update_claim = False            # an update is being installed (set with _busy, under _workers_lock)
         self._busy = threading.Lock()      # held while an export, export_marked() or an update install runs
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
@@ -2407,12 +2409,17 @@ class Api(ShareOps, LibraryOps, LiveOps):
             return _fail("Updates install only in the installed app, not when running from source.")
         if self._stop.is_set():
             return _fail(CLOSING)
-        if self._live_busy():
-            return _fail("Stop the recording, then update.")
-        if not self._busy.acquire(blocking=False):      # held from here on: no export can start
-            return _fail("Wait for the export to finish, then update.")
+        # Admitted against a recording in one step: live_start() checks _update_claim, and
+        # sets the recording, under _workers_lock too.
+        with self._workers_lock:
+            if self._live_busy():
+                return _fail(UPDATE_RECORDING)
+            if not self._busy.acquire(blocking=False):  # held from here on: no export can start
+                return _fail("Wait for the export to finish, then update.")
+            self._update_claim = True
         with self._backup_lock:                         # from here on no backup can be queued
             if self._backup_queue or self._backup_running is not None:
+                self._update_claim = False
                 self._busy.release()
                 return _fail(BACKUP_RUNNING)
             self._updating = True
@@ -2438,6 +2445,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
                 self._updater.discard(path)
             with self._backup_lock:
                 self._updating = False
+            self._update_claim = False
             self._busy.release()
             if isinstance(e, _BackupRunning):
                 return _fail(BACKUP_RUNNING)
