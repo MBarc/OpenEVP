@@ -22,13 +22,24 @@ removed only once they are SHARE_MAX_AGE old: at the next start, or when the nex
 one is made. Sharing only ever copies: the drag offers Copy as its only effect, so
 no drop target can move or delete the original.
 
+The share cache's folders are never followed through a link: the cache folder
+and every subfolder must be a plain folder (no symlink, junction or other
+reparse point), checked with lstat and held open while it is used (so it can't
+be swapped for a link halfway); a link found in their place is removed -- the
+link only -- and the folder made afresh. Cleaning removes only what the app
+positively made: subfolders named as made_path names them and marked with
+OWNER_MARK (or, as v0.9.9 left them, holding nothing but .mp3 and .part files),
+and in them only plain files. Anything else in the temp folder is left alone.
+
 The drag and the clipboard themselves are Windows calls on the window's GUI
 thread (app.native_share); the backend gets them as callables, so all of this is
 tested without a window."""
 import hashlib
 import io
 import os
+import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -44,6 +55,11 @@ SHARE_LIMIT = 100                    # files in one drag or copy
 SHARE_BUSY = "A drag is still being prepared. Try again in a moment."
 NOT_HERE = "Dragging files out of OpenEVP is not available here."
 COPY_NOT_HERE = "Copying files is not available here."
+OWNER_MARK = ".openevp-share"        # in every share-cache subfolder the app made
+NOT_PLAIN = "the share folder in the temp folder is not a plain folder"
+_SUBFOLDER = re.compile(r"[0-9a-f]{16}")
+_REPARSE_POINT = 0x400               # FILE_ATTRIBUTE_REPARSE_POINT
+_DIRECTORY = 0x10                    # FILE_ATTRIBUTE_DIRECTORY
 
 
 def share_root():
@@ -69,28 +85,131 @@ def made_path(root, path, st):
     return os.path.join(root, sub, os.path.splitext(os.path.basename(path))[0] + ".mp3")
 
 
+def _is_reparse(st):
+    """Is an lstat result a symlink, junction or any other reparse point?"""
+    return stat.S_ISLNK(st.st_mode) or bool(getattr(st, "st_file_attributes", 0) & _REPARSE_POINT)
+
+
+def _plain_folder(st):
+    return stat.S_ISDIR(st.st_mode) and not _is_reparse(st)
+
+
+def _plain_file(st):
+    return stat.S_ISREG(st.st_mode) and not _is_reparse(st)
+
+
+def _drop_link(path, st):
+    """Remove the link or junction at path itself, never what it leads to."""
+    if stat.S_ISDIR(st.st_mode) or getattr(st, "st_file_attributes", 0) & _DIRECTORY:
+        os.rmdir(path)                              # a junction or folder symlink: the link goes
+    else:
+        os.unlink(path)
+
+
+def _folder(path, pins, make=True):
+    """path as a plain folder, held in pins (folders.Pins: while held it can't be
+    renamed, removed or swapped for a link) and checked again once held. Made if
+    missing (with make; else None). A link or junction at path is removed -- the
+    link only -- and a folder made in its place. Raises OSError otherwise."""
+    for _ in range(3):
+        try:
+            st = os.lstat(path)
+        except FileNotFoundError:
+            if not make:
+                return None
+            try:
+                os.mkdir(path)
+            except FileExistsError:
+                pass
+            continue
+        if _is_reparse(st):
+            _drop_link(path, st)
+            continue
+        if not stat.S_ISDIR(st.st_mode):
+            break
+        pins.add(path)
+        if not _plain_folder(os.lstat(path)):
+            break
+        return path
+    raise OSError(None, NOT_PLAIN, path)
+
+
+def _cache_folder(sub, pins):
+    """The share cache's subfolder `sub`, a plain folder marked as the app's,
+    held (with the cache folder) in pins."""
+    root = _folder(share_root(), pins)
+    folder = _folder(os.path.join(root, sub), pins)
+    mark = os.path.join(folder, OWNER_MARK)
+    try:
+        if not _plain_file(os.lstat(mark)):
+            raise OSError(None, NOT_PLAIN, mark)
+    except FileNotFoundError:
+        with open(mark, "xb"):
+            pass
+    return folder
+
+
+def _reusable(path):
+    """Is path a plain file (never a link) that can be handed out again?"""
+    try:
+        return _plain_file(os.lstat(path))
+    except OSError:
+        return False
+
+
+def _remove_owned(folder, pins):
+    """Remove one subfolder of the share cache if the app made it: marked with
+    OWNER_MARK (or, as v0.9.9 made them, holding only .mp3 and .part files), and
+    holding nothing but plain files. Anything else is left alone. The folder is
+    held while its files go, so it can't be swapped for a link meanwhile.
+    True when it went."""
+    pins.add(folder)
+    try:
+        if not _plain_folder(os.lstat(folder)):
+            return False
+        with os.scandir(folder) as it:
+            entries = [(e.name, e.stat(follow_symlinks=False)) for e in it]
+        if not all(_plain_file(st) for _name, st in entries):
+            return False
+        names = [name for name, _st in entries]
+        if OWNER_MARK not in names and not all(n.lower().endswith((".mp3", ".part")) for n in names):
+            return False
+        for name in names:
+            if name != OWNER_MARK:
+                os.remove(os.path.join(folder, name))
+        if OWNER_MARK in names:
+            os.remove(os.path.join(folder, OWNER_MARK))     # last: a half-cleaned folder stays known
+    finally:
+        pins.release(folder)
+    os.rmdir(folder)
+    return True
+
+
 def clean(root=None, max_age=SHARE_MAX_AGE, now=None):
-    """Remove what the share cache holds that is max_age old or more (a subfolder
-    by its own modification time, refreshed whenever its MP3 is shared again).
-    Never raises; returns how many entries went."""
+    """Remove the share cache's subfolders that are max_age old or more (by their
+    own modification time, refreshed whenever their MP3 is shared again), only
+    those the app made (see _remove_owned). The cache folder must be a plain
+    folder: a link in its place is removed (the link only) and nothing else.
+    Never raises; returns how many subfolders went."""
     root = root or share_root()
     now = time.time() if now is None else now
     gone = 0
     try:
-        entries = list(os.scandir(root))
+        with folders.Pins() as pins:
+            if _folder(root, pins, make=False) is None:
+                return 0
+            with os.scandir(root) as it:
+                entries = list(it)
+            for entry in entries:
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    if (now - st.st_mtime >= max_age and _plain_folder(st)
+                            and _SUBFOLDER.fullmatch(entry.name) and _remove_owned(entry.path, pins)):
+                        gone += 1
+                except OSError:
+                    pass                            # in use (being dropped or pasted): next time
     except OSError:
-        return 0
-    for entry in entries:
-        try:
-            if now - entry.stat(follow_symlinks=False).st_mtime < max_age:
-                continue
-            if entry.is_dir(follow_symlinks=False):
-                shutil.rmtree(entry.path)
-            else:
-                os.remove(entry.path)
-            gone += 1
-        except OSError:
-            pass                                    # in use (being dropped or pasted): next time
+        pass
     return gone
 
 
@@ -208,21 +327,22 @@ class ShareOps:
         try:
             st = os.stat(path)
             target = made_path(root, path, st)
-            if os.path.isfile(target) and os.path.getsize(target) == st.st_size:
+            if _reusable(target) and os.lstat(target).st_size == st.st_size:
                 _touch(os.path.dirname(target))
                 return {"ok": True, "path": target}
             clean(root)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            part = target + f".{os.getpid()}-{threading.get_ident()}.part"
-            try:
-                shutil.copyfile(path, part)
-                os.replace(part, target)
-            except BaseException:
+            with folders.Pins() as pins:
+                _cache_folder(os.path.basename(os.path.dirname(target)), pins)
+                part = target + f".{os.getpid()}-{threading.get_ident()}.part"
                 try:
-                    os.remove(part)
-                except OSError:
-                    pass
-                raise
+                    shutil.copyfile(path, part)
+                    os.replace(part, target)
+                except BaseException:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    raise
         except Exception as e:
             return _fail(f"Could not prepare {name} to share: {_plain(e)}")
         return {"ok": True, "path": target}
@@ -245,7 +365,7 @@ class ShareOps:
             if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
                 return _fail(f"{name} is too large to be {fmt.a_recording()}.")
             target = made_path(root, path, st)
-            if os.path.isfile(target):
+            if _reusable(target):
                 _touch(os.path.dirname(target))
                 return {"ok": True, "path": target, "made": 0}
             clean(root)
@@ -253,18 +373,19 @@ class ShareOps:
             wav = self._share_wav(path, fmt, st)
             data = mp3.encode(wav, title=os.path.splitext(name)[0])
             del wav
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            part = target + f".{os.getpid()}-{threading.get_ident()}.part"
-            try:
-                with open(part, "wb") as f:
-                    f.write(data)
-                os.replace(part, target)
-            except BaseException:
+            with folders.Pins() as pins:
+                _cache_folder(os.path.basename(os.path.dirname(target)), pins)
+                part = target + f".{os.getpid()}-{threading.get_ident()}.part"
                 try:
-                    os.remove(part)
-                except OSError:
-                    pass
-                raise
+                    with open(part, "wb") as f:
+                        f.write(data)
+                    os.replace(part, target)
+                except BaseException:
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    raise
         except formats.Cancelled:
             return _fail("The app is closing.")
         except Exception as e:

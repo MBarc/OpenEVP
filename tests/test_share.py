@@ -7,6 +7,8 @@ target may read it after the drag ends). The Windows drag and clipboard calls
 are stand-ins here (see test_native_share.py for the real ones)."""
 import io
 import os
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -19,6 +21,24 @@ from test_folders import FolderApiBase  # noqa: E402
 from test_library import DECODED, FakeDecoder, dvf_bytes, wav_bytes  # noqa: E402
 from app import backend, library_ops, sharing  # noqa: E402
 from openevp import mp3  # noqa: E402
+
+
+WINDOWS = sys.platform == "win32"
+
+
+def made_files(folder):
+    """What a share-cache subfolder holds besides the app's owner mark."""
+    return sorted(n for n in os.listdir(folder) if n != sharing.OWNER_MARK)
+
+
+def all_made(root):
+    return [f for _d, _s, files in os.walk(root) for f in files if f != sharing.OWNER_MARK]
+
+
+def junction(link, target):
+    """A directory junction at link leading to target (Windows)."""
+    import _winapi
+    _winapi.CreateJunction(target, link)
 
 
 def id3_title(data):
@@ -98,7 +118,7 @@ class SharePathTests(ShareBase):
             self.assertEqual(os.stat(orig).st_nlink, 1)
             with open(copy, "rb") as f:
                 self.assertEqual(f.read(), data)
-            self.assertEqual(os.listdir(os.path.dirname(copy)), [os.path.basename(copy)], "no partial file left")
+            self.assertEqual(made_files(os.path.dirname(copy)), [os.path.basename(copy)], "no partial file left")
         # A program writing to what it was given leaves the original as it was.
         with open(shared[0], "r+b") as f:
             f.write(b"XXXX")
@@ -132,7 +152,7 @@ class SharePathTests(ShareBase):
             r = api.drag_out([fid])
         self.assertTrue(r["error"].startswith("Could not prepare x.mpeg to share: "), r)
         self.assertEqual(self.dragged, [])
-        self.assertEqual([f for _d, _s, files in os.walk(self.share) for f in files], [], "no partial file left")
+        self.assertEqual(all_made(self.share), [], "no partial file left")
         self.assertTrue(os.path.isfile(orig))
 
     def test_a_dvf_goes_as_the_wav_beside_it(self):
@@ -165,7 +185,7 @@ class SharePathTests(ShareBase):
         self.assertEqual(data, mp3.encode(DECODED, "Night one"))      # the whole recording, as clips are encoded
         self.assertEqual(fake.calls, 1)
         self.assertIn(("share-preparing", {"name": "Night one.dvf"}), self.events.items)
-        self.assertEqual(os.listdir(os.path.dirname(made)), ["Night one.mp3"], "no partial file left")
+        self.assertEqual(made_files(os.path.dirname(made)), ["Night one.mp3"], "no partial file left")
         # The next drag (or Copy file) reuses it; the original is untouched.
         with fake.installed():
             r = api.copy_files([ids["Night one.dvf"]])
@@ -270,8 +290,53 @@ class SharePathTests(ShareBase):
             r = api.drag_out([fid])
         self.assertTrue(r["error"].startswith("Could not prepare x.dvf to share: "), r)
         self.assertEqual(self.dragged, [])
-        left = [f for _d, _s, files in os.walk(self.share) for f in files]
-        self.assertEqual(left, [], "nothing half-made is left")
+        self.assertEqual(all_made(self.share), [], "nothing half-made is left")
+
+
+@unittest.skipUnless(WINDOWS, "junctions are Windows'")
+class ShareCacheLinkTests(ShareBase):
+    """The share cache folder, or a subfolder of it, swapped for a junction: what is
+    made goes into a plain folder in its place, and nothing behind the link is touched."""
+
+    def setUp(self):
+        super().setUp()
+        self.outside = os.path.join(self.tmp, "recordings")
+        os.makedirs(self.outside)
+        self.keep = os.path.join(self.outside, "keep.wav")
+        with open(self.keep, "wb") as f:
+            f.write(b"wav")
+
+    def test_a_junction_for_the_cache_folder_is_replaced(self):
+        self.write("x.mpeg", mp3.encode(wav_bytes(b"m"), "m"))
+        junction(self.share, self.outside)
+        api = self.new_api()
+        self.assertTrue(api.drag_out([self.ids(api)["x.mpeg"]])["ok"])
+        (shared,) = self.dragged[0]
+        self.assertFalse(sharing._is_reparse(os.lstat(self.share)), "a plain folder now")
+        self.assertEqual(os.path.dirname(os.path.dirname(shared)), self.share)
+        self.assertEqual(os.listdir(self.outside), ["keep.wav"])
+
+    def test_a_junction_for_a_made_subfolder_is_replaced(self):
+        dvf = self.write("x.dvf", dvf_bytes())
+        target = sharing.made_path(self.share, dvf, os.stat(dvf))
+        os.makedirs(self.share)
+        junction(os.path.dirname(target), self.outside)
+        api = self.new_api()
+        with FakeDecoder().installed():
+            self.assertTrue(api.drag_out([self.ids(api)["x.dvf"]])["ok"])
+        self.assertFalse(sharing._is_reparse(os.lstat(os.path.dirname(target))))
+        self.assertTrue(os.path.isfile(target))
+        self.assertEqual(os.listdir(self.outside), ["keep.wav"])
+
+    def test_a_cache_folder_that_is_a_file_is_refused(self):
+        self.write("x.mpeg", mp3.encode(wav_bytes(b"m"), "m"))
+        with open(self.share, "wb") as f:
+            f.write(b"someone else's")
+        api = self.new_api()
+        r = api.drag_out([self.ids(api)["x.mpeg"]])
+        self.assertTrue(r["error"].startswith("Could not prepare x.mpeg to share: "), r)
+        with open(self.share, "rb") as f:
+            self.assertEqual(f.read(), b"someone else's")
 
 
 class DragTests(ShareBase):
@@ -332,38 +397,84 @@ class CleanTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = tmp.name
 
-    def entry(self, name, age, folder=True):
-        path = os.path.join(self.root, name)
+    def entry(self, name, age, folder=True, files=("x.mp3",), mark=True, root=None):
+        path = os.path.join(root or self.root, name)
         if folder:
             os.makedirs(path)
-            with open(os.path.join(path, "x.mp3"), "wb") as f:
-                f.write(b"mp3")
+            for f_name in files + ((sharing.OWNER_MARK,) if mark else ()):
+                with open(os.path.join(path, f_name), "wb") as f:
+                    f.write(b"mp3")
         else:
             with open(path, "wb") as f:
                 f.write(b"part")
-        t = time.time() - age
-        os.utime(path, (t, t))
+        self.age(path, age)
         return path
 
+    def age(self, path, age):
+        t = time.time() - age
+        os.utime(path, (t, t))
+
+    OLD = sharing.SHARE_MAX_AGE + 60
+
     def test_only_what_is_old_enough_goes(self):
-        old = self.entry("old", sharing.SHARE_MAX_AGE + 60)
-        young = self.entry("young", sharing.SHARE_MAX_AGE - 600)
-        stray = self.entry("stray.part", sharing.SHARE_MAX_AGE + 60, folder=False)
+        old = self.entry("0123456789abcdef", self.OLD)
+        young = self.entry("fedcba9876543210", sharing.SHARE_MAX_AGE - 600)
+        legacy = self.entry("00000000000000aa", self.OLD, files=("x.mp3", "x.mp3.1-2.part"), mark=False)   # v0.9.9
         self.assertEqual(sharing.clean(self.root), 2)
-        self.assertEqual((os.path.exists(old), os.path.exists(young), os.path.exists(stray)), (False, True, False))
+        self.assertEqual([os.path.exists(p) for p in (old, young, legacy)], [False, True, False])
         self.assertEqual(sharing.clean(os.path.join(self.root, "missing")), 0)
 
+    def test_only_what_the_app_made_goes(self):
+        foreign = [
+            self.entry("Holiday photos", self.OLD, files=("a.jpg",), mark=False),       # not a made name
+            self.entry("0123456789abcdef", self.OLD, files=("a.jpg",), mark=False),     # unmarked, not an MP3
+            self.entry("notes.txt", self.OLD, folder=False),                            # a loose file
+        ]
+        nested = self.entry("fedcba9876543210", self.OLD)                               # marked, but a folder in it
+        os.makedirs(os.path.join(nested, "keep"))
+        self.age(nested, self.OLD)
+        self.assertEqual(sharing.clean(self.root), 0)
+        for path in foreign + [nested, os.path.join(nested, "x.mp3")]:
+            self.assertTrue(os.path.exists(path), path)
+
     def test_a_shared_mp3_is_kept_while_in_use(self):
-        old = self.entry("old", sharing.SHARE_MAX_AGE + 60)
-        with mock.patch.object(sharing.shutil, "rmtree", side_effect=PermissionError("in use")):
+        old = self.entry("0123456789abcdef", self.OLD)
+        with mock.patch.object(sharing.os, "remove", side_effect=PermissionError("in use")):
             self.assertEqual(sharing.clean(self.root), 0)            # never raises; tried again next time
         self.assertTrue(os.path.exists(old))
 
     def test_sharing_again_keeps_it_fresh(self):
-        old = self.entry("old", sharing.SHARE_MAX_AGE - 1)
+        old = self.entry("0123456789abcdef", sharing.SHARE_MAX_AGE - 1)
         sharing._touch(old)
         self.assertEqual(sharing.clean(self.root, now=time.time() + 2), 0)
         self.assertTrue(os.path.exists(old))
+
+    @unittest.skipUnless(WINDOWS, "junctions are Windows'")
+    def test_a_junction_for_the_cache_folder_is_never_followed(self):
+        outside = os.path.join(self.root, "recordings")                  # what the junction leads to
+        os.makedirs(outside)
+        victim = self.entry("0123456789abcdef", self.OLD, root=outside)  # looks just like a made subfolder
+        cache = os.path.join(self.root, "openevp-share")
+        junction(cache, outside)
+        self.assertEqual(sharing.clean(cache), 0)
+        self.assertTrue(os.path.isfile(os.path.join(victim, "x.mp3")))
+        self.assertFalse(os.path.lexists(cache), "the junction itself went, nothing behind it")
+
+    @unittest.skipUnless(WINDOWS, "junctions are Windows'")
+    def test_a_link_inside_a_made_subfolder_is_never_followed(self):
+        outside = os.path.join(self.root, "recordings")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "keep.wav"), "wb") as f:
+            f.write(b"wav")
+        old = self.entry("0123456789abcdef", self.OLD)
+        junction(os.path.join(old, "inner"), outside)
+        sub = self.entry("fedcba9876543210", self.OLD, root=outside)     # behind a junction named like one
+        junction(os.path.join(self.root, "00000000000000aa"), outside)
+        self.age(old, self.OLD)
+        self.assertEqual(sharing.clean(self.root), 0)
+        self.assertTrue(os.path.isfile(os.path.join(outside, "keep.wav")))
+        self.assertTrue(os.path.isfile(os.path.join(sub, "x.mp3")))
+        self.assertTrue(os.path.isfile(os.path.join(old, "x.mp3")))
 
     def test_made_path(self):
         st = os.stat(self.root)
