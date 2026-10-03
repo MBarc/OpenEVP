@@ -53,8 +53,11 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
-; The app holds this mutex while it runs (app/main.py; the old name is 0.5.0's): setup and uninstall ask the user
-; to close it first, instead of leaving files in use behind for a restart.
+; The app holds this mutex while it runs (app/main.py): setup and uninstall ask the user to close it
+; first, instead of leaving files in use behind for a restart. ST25DownloaderRunning is the mutex the
+; 0.5.0 app ("ST25 Downloader") holds. Keep it while [InstallDelete] below still removes 0.5.0's folder:
+; 0.5.0 has no updater, so its users upgrade by running this setup directly, and if the 0.5.0 app were
+; still open its folder could not be deleted.
 AppMutex=OpenEVPRunning,Global\OpenEVPRunning,ST25DownloaderRunning,Global\ST25DownloaderRunning
 
 [Messages]
