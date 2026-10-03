@@ -27,7 +27,7 @@ def publish(data, final_path):
     it with an operation that fails if the destination exists.
     """
     folder = os.path.dirname(final_path)
-    fd, tmp = tempfile.mkstemp(prefix=".st25-", suffix=".part", dir=folder)
+    fd, tmp = tempfile.mkstemp(prefix=".openevp-", suffix=".part", dir=folder)
     try:
         with os.fdopen(fd, "wb") as f:
             for part in _parts(data):

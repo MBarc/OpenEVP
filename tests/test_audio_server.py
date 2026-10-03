@@ -208,11 +208,12 @@ class AudioServerTests(unittest.TestCase):
             starting = folder(audio_server.CACHE_PREFIX + "starting", age=0)
             other = folder("something-else")
             mine = folder(audio_server.CACHE_PREFIX + "mine")
+            old_name = folder("st25-audio-crashed")                  # 0.9.9 and earlier's name
             try:
                 removed = audio_server.clean_stale_caches(parent, keep=mine)
                 if sys.platform == "win32":                          # an open file can't be deleted there
                     self.assertTrue(os.path.isdir(running))
-                self.assertEqual(sorted(removed), sorted([crashed, marked] +
+                self.assertEqual(sorted(removed), sorted([crashed, marked, old_name] +
                                                          ([] if sys.platform == "win32" else [running])))
                 for path in (starting, other, mine):
                     self.assertTrue(os.path.isdir(path))
@@ -348,7 +349,7 @@ class RealDecoderFingerprintTests(unittest.TestCase):
     VECTOR = os.path.join(os.path.dirname(__file__), "vectors", "single-frame.dvf")
 
     def test_fp_matches_real_decoded_audio_and_survives_markers(self):
-        from st25 import audio
+        from sony_icd import audio
         if not audio.available():
             release_gate.skip_or_fail(f"WAV conversion is not available: {audio.status()}")
         from app import audio_server

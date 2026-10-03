@@ -154,7 +154,8 @@ def _stat_of(st):
 # entry just prepared is always kept, so the cache can exceed the budget by at
 # most that one file; older entries are evicted first.
 CACHE_BYTES = 2 << 30
-CACHE_PREFIX = "st25-audio-"           # the app's cache folder in the temp folder: <prefix><random>
+CACHE_PREFIX = "openevp-audio-"        # the app's cache folder in the temp folder: <prefix><random>
+OLD_CACHE_PREFIXES = ("st25-audio-",)  # 0.9.9 and earlier: their leftovers are cleaned up too
 
 
 IN_USE = ".in-use"                     # held open by the app that owns a cache folder
@@ -169,8 +170,9 @@ def hold_cache(folder):
 
 
 def clean_stale_caches(parent, keep=None):
-    """Delete cache folders (CACHE_PREFIX*) that earlier runs left in ``parent``
-    (the temp folder) after a crash or a power cut: they can hold gigabytes of
+    """Delete cache folders (CACHE_PREFIX*, or an OLD_CACHE_PREFIXES one) that
+    earlier runs left in ``parent`` (the temp folder) after a crash or a power
+    cut: they can hold gigabytes of
     decoded audio. Two OpenEVP windows can run at once, so a folder whose
     IN_USE file cannot be deleted (another running app holds it open) is kept,
     and so is one without it that is younger than STALE_AFTER (an app just
@@ -184,7 +186,7 @@ def clean_stale_caches(parent, keep=None):
         return removed
     for name in names:
         path = os.path.join(parent, name)
-        if not name.startswith(CACHE_PREFIX) or (keep and os.path.normcase(path) == os.path.normcase(keep)):
+        if not name.startswith((CACHE_PREFIX,) + OLD_CACHE_PREFIXES) or (keep and os.path.normcase(path) == os.path.normcase(keep)):
             continue
         if not os.path.isdir(path) or os.path.islink(path):
             continue
