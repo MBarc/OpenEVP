@@ -42,7 +42,7 @@ import wave
 from openevp import livewav, silence, wavinfo
 
 from . import folders
-from .library_ops import CLOSING, _fail, _file_id, _plain, _under_clips
+from .library_ops import CLOSING, ROOT_CHANGED, _fail, _file_id, _plain, _root_identity, _under_clips
 from .store import MIN_MARK_LENGTH, StoreReadOnly, StoreUnavailable
 
 PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute paths)
@@ -67,7 +67,16 @@ NO_SPACE = ("There is not enough free space on that drive to record (OpenEVP kee
 STOPPED_DISK = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free)."
 STOPPED_SIZE = "Recording stopped because the file reached 4 GB, the most a WAV file can hold."
 NO_MOMENT = "No recording was running at that moment (OpenEVP was waiting for sound)."
+STOPPED_MOVED = ("Recording stopped because the folder it was saving into is no longer where it was "
+                 "in the library. What was recorded until then is saved.")
 UNRECOVERED = " (unrecovered).raw"
+
+
+class _Moved(OSError):
+    """The folder a recording goes into is no longer where it was in the library."""
+
+    def __init__(self):
+        super().__init__("the folder is no longer where it was in the library")
 
 
 class _Kept(Exception):
@@ -166,8 +175,10 @@ class _Piece:
 
 
 class _Session:
-    def __init__(self, ops, sid, mode, root, folder, rate, channels, split):
+    def __init__(self, ops, sid, mode, root, folder, rate, channels, split, pins=None, root_id=None):
         self.ops, self.id, self.mode, self.root, self.folder = ops, sid, mode, root, folder
+        self.pins, self.root_id = pins, root_id   # the folders held for the recording, and what the root was
+        self.moved = False                       # the folder was found elsewhere before a new file: stopped
         self.rate, self.channels, self.align = rate, channels, channels * livewav.WIDTH
         self.byte_rate = rate * self.align
         self.stamp = _stamp(datetime.datetime.now())
@@ -193,7 +204,14 @@ class _Session:
             self.start(0)
 
     # ---- the sink: openevp.silence.Splitter (or Live mode itself) drives these ----
+    def contained(self):
+        """Is the folder still where it was, inside the same library folder (no link on the way)?"""
+        return (self.root_id is None or _root_identity(self.root) == self.root_id) and \
+            folders.inside(self.root, self.folder, allow_root=True)
+
     def _open(self, name, stream_frame):
+        if not self.contained():
+            raise _Moved()
         piece = _Piece(self.folder, name, self.rate, self.channels, stream_frame, self.mode)
         try:
             self.ops._register_part(piece.part)
@@ -206,10 +224,17 @@ class _Session:
     def start(self, stream_frame):
         self.count += 1
         name = (f"Live {self.stamp}.wav" if self.mode == "live" else f"Import {self.stamp} ({self.count}).wav")
-        self.piece = self._open(name, stream_frame)
+        if self.done or self.moved:
+            return
+        try:
+            self.piece = self._open(name, stream_frame)
+        except _Moved:
+            if self.count == 1:
+                raise                            # at the start: refused, nothing recorded yet
+            self.moved = True                    # the recording stops (live_chunk says why)
 
     def _put(self, piece, data):
-        if self.full:
+        if self.full or piece is None:
             return
         try:
             piece.writer.write(data)
@@ -362,6 +387,12 @@ class LiveOps:
         library folder itself, created if it is not there yet."""
         if folder_id in (None, "root"):
             root = self._library_path()
+            with self._lib_lock:
+                listed = self._library_root is not None and self._library_folders.get("root") is not None \
+                    and os.path.normcase(os.path.abspath(self._library_folders["root"])) == \
+                    os.path.normcase(os.path.abspath(root))
+            if listed and self._root_moved(root):     # swapped for a link since the library listed it
+                return _fail(ROOT_CHANGED)
             try:
                 os.makedirs(root, exist_ok=True)
             except OSError as e:
@@ -403,26 +434,49 @@ class LiveOps:
             if isinstance(got, dict):
                 return got
             root, folder = got
+            # Held for the whole recording: no folder from the library folder down to this
+            # one can be renamed, moved or swapped for a junction while files go into it.
+            pins = folders.Pins()
+            try:
+                pins.chain(root, folder)
+            except (OSError, ValueError):
+                pins.close()
+                return _fail(NO_FOLDER)
+            root_id = _root_identity(root)
+            if root_id is None or not folders.inside(root, folder, allow_root=True):
+                pins.close()
+                return _fail(NO_FOLDER)
             if _under_clips(folder, root):
+                pins.close()
                 return _fail(IN_CLIPS)
             try:
                 free = shutil.disk_usage(folder).free
             except OSError as e:
+                pins.close()
                 return _fail(f"Could not check the free space: {_plain(e)}")
             if free < RESERVE_BYTES + 60 * rate * channels * livewav.WIDTH * (2 if mode == "import" and split else 1):
+                pins.close()
                 return _fail(NO_SPACE)
             # Admitted against folder operations in one step: _fs_begin() checks for a
             # recording under _workers_lock (never take _lib_lock inside it: see _list_library).
             with self._workers_lock:
                 if self._stop.is_set():
+                    pins.close()
                     return _fail(CLOSING)
                 if self._fs_done is not None:
+                    pins.close()
                     return _fail("Wait for the library to finish renaming, moving or deleting files.")
                 try:
-                    session = _Session(self, secrets.token_hex(8), mode, root, folder, rate, channels, split)
+                    session = _Session(self, secrets.token_hex(8), mode, root, folder, rate, channels, split,
+                                       pins=pins, root_id=root_id)
                 except (StoreReadOnly, StoreUnavailable) as e:
+                    pins.close()
                     return _fail(f"{NO_STORE}: {e}")
+                except _Moved:
+                    pins.close()
+                    return _fail(NO_FOLDER)
                 except OSError as e:
+                    pins.close()
                     return _fail(f"Could not start the recording: {_plain(e)}")
                 self._live = session
         return {"ok": True, "session": session.id, "file": session.piece.name if session.piece else None,
@@ -464,6 +518,8 @@ class LiveOps:
                 return self._live_end(s, f"Recording stopped: the file could not be written ({_plain(e)}).")
             if s.full:
                 return self._live_end(s, STOPPED_SIZE)
+            if s.moved:
+                return self._live_end(s, STOPPED_MOVED)
             out = s.status()
             left = None
             if free is not None:
@@ -544,7 +600,11 @@ class LiveOps:
 
     def _live_finish(self, s):
         """Finish a session (under _live_lock) and describe what was saved."""
-        s.finish()
+        try:
+            s.finish()
+        finally:
+            if s.pins is not None:
+                s.pins.close()
         if self._live is s:
             self._live = None
         def row(f):

@@ -414,6 +414,52 @@ class LiveApiTests(Tmp):
         self.assertEqual(len([n for n in os.listdir(self.lib) if n.endswith(".wav")]), 1)
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
+    @unittest.skipUnless(sys.platform == "win32", "folders are held open only on Windows")
+    def test_the_destination_cannot_be_renamed_or_swapped_while_recording(self):
+        a = self.api()
+        os.makedirs(os.path.join(self.lib, "Night 1"))
+        fid = next(d["id"] for d in a.list_library()["folders"] if d["rel"] == ["Night 1"])
+        sid = self.start(a, folder=fid)["session"]
+        self.send(a, sid, tone(0.5), 0)
+        for src in (os.path.join(self.lib, "Night 1"), self.lib):
+            with self.assertRaises(PermissionError):
+                os.rename(src, src + " moved")
+        a.live_stop(sid)
+        os.rename(os.path.join(self.lib, "Night 1"), os.path.join(self.lib, "Night 2"))   # let go after Stop
+
+    def test_an_import_stops_before_a_new_file_if_the_folder_moved(self):
+        a = self.api()
+        sid = self.start(a, mode="import", split=3.0)["session"]
+        line = lambda s, seed: noise(s, db=-85, seed=seed)
+
+        def rec(s, seed):
+            x = noise(s, db=-50, seed=seed)
+            x[len(x) // 3:2 * len(x) // 3] += tone(s, db=-15)[:2 * len(x) // 3 - len(x) // 3]
+            return x
+        stream = np.concatenate([line(2, 1), rec(4, 2), line(5, 3), rec(3, 4)])
+        step, seq, r = RATE // 2, 0, None
+        for i in range(0, len(stream), step):
+            if i == 11 * RATE:                            # the next piece is about to start: the root now resolves elsewhere
+                patch = mock.patch("app.live._root_identity", return_value=("elsewhere", False))
+                patch.start()
+                self.addCleanup(patch.stop)
+            r = a.live_chunk(sid, seq, base64.b64encode(pcm(stream[i:i + step])).decode())
+            seq += 1
+            if r.get("stopped"):
+                break
+        self.assertEqual(r["stopped"], live.STOPPED_MOVED)
+        self.assertEqual([f["name"][-7:] for f in r["result"]["files"]], ["(1).wav"])   # the first piece is kept
+        self.assertFalse(a.recording())
+
+    def test_a_library_folder_swapped_since_it_was_listed_is_refused(self):
+        a = self.api()
+        os.makedirs(self.lib)
+        a.list_library()
+        with mock.patch("app.live._root_identity", return_value=("elsewhere", False)), \
+                mock.patch.object(type(a), "_root_moved", return_value=True):
+            r = a.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 1})
+        self.assertFalse(r["ok"])
+
     def test_the_disk_filling_up_stops_and_saves(self):
         a = self.api()
         free = collections.namedtuple("usage", "total used free")
@@ -490,6 +536,7 @@ class LiveApiTests(Tmp):
         # The crash: the process dies with the file open (simulated: closed without finishing).
         s = a._live
         s.piece.writer._f.close()
+        s.pins.close()                                    # a dead process holds nothing
         a._live = None
         part = s.piece.part
         with wave.open(part) as w:                        # already playable as it is
