@@ -811,6 +811,115 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("folder-dialog-error").textContent, "Wait for the export or backup to finish.");
   context.closeFolderDialog();
   await settle();
+  // The toolbar's Rename and Delete act on what is selected: the ticked recordings shown (the
+  // same dialogs as the right-click menu, the same visible-only rule), else the selected folder.
+  // Ticks win over a selected folder.
+  {
+    const ren = $("library-rename"), del = $("library-delete");
+    deleteCalls.length = 0;
+    L.selected.clear(); L.selFolder = null; L.search = ""; context.renderLibrary();
+    assert.ok(ren.disabled && del.disabled && !ren.hidden && !del.hidden);
+    assert.strictEqual(ren.title, "Tick one recording (or select a folder) to rename it");
+    assert.strictEqual(del.title, "Tick recordings (or select a folder) to delete them");
+    // One ticked recording: Delete opens Delete… for it (its copies too), Rename opens Rename….
+    context.pickGroup(recRow("r4").group, true); context.renderLibrary();
+    assert.ok(!ren.disabled && !del.disabled);
+    assert.strictEqual(ren.title, "Rename the ticked recording “x.dvf”");
+    assert.strictEqual(del.title, "Move the ticked recording “x.dvf” (and its copies here) to the Recycle Bin");
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r4", "r5"]]);
+    assert.ok(dialogShown());
+    assert.strictEqual($("folder-dialog-title").textContent, "Delete 1 recording?");
+    context.closeFolderDialog();
+    ren.onclick();
+    assert.ok(dialogShown());
+    assert.strictEqual($("folder-dialog-title").textContent, "Rename “x.dvf”");
+    assert.strictEqual($("folder-dialog-name").value, "x");
+    context.closeFolderDialog();
+    // Two ticked: Delete takes both; Rename is off and says why.
+    context.pickGroup(recRow("r1").group, true); context.renderLibrary();
+    assert.ok(ren.disabled && !del.disabled);
+    assert.strictEqual(ren.title, "Tick one recording to rename");
+    assert.strictEqual(del.title, "Move the 2 ticked recordings shown to the Recycle Bin");
+    ren.onclick();
+    assert.ok(!dialogShown());
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1", "r4", "r5"]]);
+    context.closeFolderDialog();
+    // A ticked recording the search hides is left alone (and is not counted against Rename).
+    L.search = "a.wav"; context.renderLibrary();
+    assert.ok(!ren.disabled && !del.disabled);
+    assert.strictEqual(del.title, "Move the ticked recording “a.wav” (and its copies here) to the Recycle Bin (1 ticked recording not shown stays)");
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1"]]);
+    context.closeFolderDialog();
+    ren.onclick();
+    assert.strictEqual($("folder-dialog-title").textContent, "Rename “a.wav”");
+    context.closeFolderDialog();
+    L.search = ""; context.renderLibrary();
+    // Ticks win over a selected folder.
+    L.selFolder = "f1"; context.renderLibrary();
+    assert.strictEqual(ren.title, "Tick one recording to rename");
+    assert.strictEqual(del.title, "Move the 2 ticked recordings shown to the Recycle Bin");
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r1", "r4", "r5"]]);
+    assert.ok(/^Delete /.test($("folder-dialog-title").textContent), "the recordings' Delete…, not the folder's");
+    context.closeFolderDialog();
+    // No ticks: the selected folder, as before.
+    L.selected.clear(); context.renderLibrary();
+    assert.ok(!ren.disabled && !del.disabled);
+    assert.strictEqual(ren.title, "Rename the folder “Old Mill”");
+    assert.strictEqual(del.title, "Move the folder “Old Mill” to the Recycle Bin");
+    ren.onclick();
+    assert.strictEqual($("folder-dialog-title").textContent, "Rename “Old Mill”");
+    context.closeFolderDialog();
+    const folderInfoBefore = api.folder_info;
+    api.folder_info = async (id) => { deleteCalls.push(["folder_info", id]);
+                                      return { ok: true, name: "Old Mill", recordings: 1, clips: 0, with_evps: 0, backups: 0,
+                                               other_files: 0, subfolders: 0, bytes: 2048 }; };
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["folder_info", "f1"]);
+    assert.strictEqual($("folder-dialog-title").textContent, "Move “Old Mill” to the Recycle Bin?");
+    context.closeFolderDialog();
+    api.folder_info = folderInfoBefore;
+    L.selFolder = "root"; context.renderLibrary();
+    assert.ok(ren.disabled && del.disabled);
+    L.selFolder = null;
+    // Off in a second window, during an operation and while audio is being saved; the tip says why.
+    context.pickGroup(recRow("r4").group, true);
+    vm.runInContext(`S.caps.marks_read_only = true; renderLibrary();`, context);
+    assert.ok(ren.disabled && del.disabled);
+    assert.strictEqual(del.title, vm.runInContext("readOnlyTip()", context));
+    assert.strictEqual(ren.title, vm.runInContext("readOnlyTip()", context));
+    del.onclick(); ren.onclick();
+    await settle();
+    assert.ok(!dialogShown() && !deleteCalls.length);
+    vm.runInContext(`S.caps.marks_read_only = false; renderLibrary();`, context);
+    assert.ok(!ren.disabled && !del.disabled);
+    L.op = true; context.renderLibrary();
+    assert.ok(ren.disabled && del.disabled && del.title === "Wait for the operation to finish");
+    L.op = false;
+    vm.runInContext(`S.savingClips = true; renderLibrary();`, context);
+    assert.ok(ren.disabled && del.disabled && del.title === "Wait until the clips or WAV being saved are done");
+    vm.runInContext(`S.savingClips = false; renderLibrary();`, context);
+    // All recordings: Rename and Delete stay for ticked rows (New folder goes); no folder is selected there.
+    L.selected.clear(); L.flat = true; L.selFolder = "f1"; context.renderLibrary();
+    assert.ok($("library-new").hidden && !ren.hidden && !del.hidden);
+    assert.ok(ren.disabled && del.disabled);
+    assert.strictEqual(ren.title, "Tick one recording to rename it");
+    context.pickGroup(recRow("r4").group, true); context.renderLibrary();
+    assert.ok(!ren.disabled && !del.disabled);
+    del.onclick();
+    await settle();
+    assert.deepStrictEqual(deleteCalls.pop(), ["info", ["r4", "r5"]]);
+    context.closeFolderDialog();
+    L.flat = false; L.selFolder = null; L.selected.clear(); context.renderLibrary();
+  }
   deleteCalls.length = 0;
   context.pickGroup(recRow("r1").group, true); context.pickGroup(recRow("r2").group, true);   // as before
   context.renderLibrary();

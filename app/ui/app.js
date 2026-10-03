@@ -632,6 +632,7 @@ function renderLibrary() {
   all.checked = picked > 0 && picked === L.shown.length;
   all.indeterminate = picked > 0 && picked < L.shown.length;
   all.disabled = !L.shown.length;
+  renderToolbarRenameDelete();                   // they act on the rows just shown
   // Put the rows in order, moving only the ones out of place (no flicker, scroll kept).
   const body = $("library-rows");
   let at = body.firstChild;
@@ -953,15 +954,67 @@ function renderLibraryBar() {
   if (L.indexing && !L.flat && libraryFiltering()) st.textContent += " (folders may appear as recordings are checked)";
   st.title = L.indexing ? "" : L.checkError;
   $("library-flat").checked = L.flat;
-  // The folder tools: New / Rename / Delete in the folder view, Move to… in both views.
-  for (const id of ["library-new", "library-rename", "library-delete"]) $(id).hidden = L.flat;
+  // The folder tools: New folder in the folder view; Rename, Delete and Move to… in both views
+  // (Rename and Delete act on the ticked recordings shown, else on the selected folder).
+  $("library-new").hidden = L.flat;
   $("library-new").disabled = !canNewFolder();
-  $("library-rename").disabled = $("library-delete").disabled = !canChangeFolder(L.selFolder);
+  renderToolbarRenameDelete();
   $("library-move").disabled = !canMove([...L.selected]);
   const n = pickedRecordings();
   $("library-tools").title = S.caps.marks_read_only ? readOnlyTip() : "";
   $("library-move").title = n ? `Move ${plural(n, "selected recording")} to another folder`
                               : "Tick recordings, then move them to another folder (or drag them onto a folder)";
+}
+
+// The toolbar's Rename and Delete act on what is selected: the ticked recordings and clips
+// shown (never one the search, a filter or the folder shown hides, as Delete… on a ticked row),
+// else the selected folder. Ticks win when there are both: clicking or tabbing onto a folder
+// row selects it without clearing the ticks, so a folder can be highlighted by the way, while
+// the ticks are always an explicit choice -- the same one Move to… and Delete… act on.
+function toolbarTarget() {
+  const L = S.lib, groups = L.shown.filter(groupPicked);
+  if (groups.length) return { groups };
+  if (!L.flat && L.selFolder && L.folderById.has(L.selFolder)) return { folder: L.selFolder };
+  return {};
+}
+// Why the library can't be changed now ("" if it can, or if there is nothing to say).
+function libraryBusyTip() {
+  return S.caps.marks_read_only ? readOnlyTip() : S.lib.op ? "Wait for the operation to finish"
+       : savingAudio() ? "Wait until the clips or WAV being saved are done" : "";
+}
+function renderToolbarRenameDelete() {
+  const L = S.lib, t = toolbarTarget(), busy = libraryBusyTip(), ren = $("library-rename"), del = $("library-delete");
+  if (t.groups) {
+    const n = t.groups.length, g = t.groups[0], what = g.clip ? "clip" : "recording";
+    const hidden = Math.max(0, pickedRecordings() - recordingsIn(t.groups.flatMap(groupPickIds)));
+    ren.disabled = n !== 1 || !canRenameRecording(g);
+    ren.title = n !== 1 ? "Tick one recording to rename" : busy || `Rename the ticked ${what} “${g.main.name}”`;
+    del.disabled = !libraryToolsReady();
+    del.title = busy || (n === 1 ? `Move the ticked ${what} “${g.main.name}” (and its copies here) to the Recycle Bin`
+                                 : `Move the ${n} ticked recordings shown to the Recycle Bin`) +
+                       (hidden ? ` (${plural(hidden, "ticked recording")} not shown ${hidden === 1 ? "stays" : "stay"})` : "");
+  } else if (t.folder) {
+    const d = L.folderById.get(t.folder), ok = canChangeFolder(t.folder);
+    ren.disabled = del.disabled = !ok;
+    const why = t.folder === "root" ? "The library folder itself can't be renamed or deleted here" : busy;
+    ren.title = why || `Rename the folder “${d.name}”`;
+    del.title = why || `Move the folder “${d.name}” to the Recycle Bin`;
+  } else {
+    ren.disabled = del.disabled = true;
+    const or = L.flat ? "" : " (or select a folder)";
+    ren.title = `Tick one recording${or} to rename it`;
+    del.title = `Tick recordings${or} to delete them`;
+  }
+}
+function toolbarRename() {
+  const t = toolbarTarget();
+  if (t.groups) { if (t.groups.length === 1 && canRenameRecording(t.groups[0])) renameRecordingDialog(t.groups[0]); }
+  else if (t.folder && canChangeFolder(t.folder)) renameFolderDialog();
+}
+function toolbarDelete() {
+  const t = toolbarTarget();
+  if (t.groups) { if (libraryToolsReady()) deleteRecordingsDialog(shownTickedIds()); }
+  else if (t.folder && canChangeFolder(t.folder)) deleteFolderDialog();
 }
 
 // When the folder tools (and the same items of the library's right-click menu) can be used.
@@ -1708,8 +1761,11 @@ async function deleteRecordingsDialog(ids) {
 // recording shown now -- never one the search, a filter or the folder shown hides (nothing is
 // deleted that is not in sight) -- else the row itself.
 function deleteIds(g) {
-  const L = S.lib;
   if (!groupPicked(g)) return groupPickIds(g);
+  return shownTickedIds();
+}
+function shownTickedIds() {                    // the files of the ticked recordings shown now
+  const L = S.lib;
   return L.shown.filter(groupPicked).flatMap(groupPickIds).filter((x) => L.byId.has(x));
 }
 
@@ -1922,8 +1978,8 @@ function setupDragAndDrop() {
 
 function setupFolderTools() {
   $("library-new").onclick = newFolderDialog;
-  $("library-rename").onclick = renameFolderDialog;
-  $("library-delete").onclick = deleteFolderDialog;
+  $("library-rename").onclick = toolbarRename;
+  $("library-delete").onclick = toolbarDelete;
   $("library-move").onclick = () => moveDialog();
   $("library-all").onclick = () => {
     const on = $("library-all").checked;
