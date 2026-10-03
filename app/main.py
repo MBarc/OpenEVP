@@ -158,23 +158,39 @@ _DRAIN_START_JS = "liveDrainForClose(); true"
 _DRAIN_DONE_JS = "window.__liveDrained === true"
 
 
-def _close_after_drain(window, before_close, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2, clock=time.monotonic,
-                       sleep=time.sleep):
+def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
+                       clock=time.monotonic, sleep=time.sleep):
     """Closing during a recording, on a worker thread: the page stops and saves it
     as Stop does (the worklet's last samples, every queued chunk, then the backend
     finishes the file: live.js liveDrainForClose), and the window waits for that,
-    at most timeout seconds; then before_close() and the window closes. Whatever
-    the page could not hand over is finished by Api.shutdown() as the app exits."""
+    at most timeout seconds. The page is asked on a thread of its own: pywebview's
+    evaluate_js waits for the page without a time limit, so a hung page cannot hold
+    the close past the deadline. If the page did not finish in time (or is gone),
+    finalize() finishes the recording with what the backend has. Then
+    before_close() and the window closes."""
+    drained = threading.Event()
+    deadline = clock() + timeout
+
+    def ask_page():
+        try:
+            window.evaluate_js(_DRAIN_START_JS)
+            while clock() < deadline:
+                if window.evaluate_js(_DRAIN_DONE_JS):
+                    drained.set()
+                    return
+                sleep(poll)
+        except Exception:
+            pass                                  # the page is gone
+    asker = threading.Thread(target=ask_page, name="close-drain-page", daemon=True)
     try:
-        window.evaluate_js(_DRAIN_START_JS)
-        deadline = clock() + timeout
-        while clock() < deadline:
-            if window.evaluate_js(_DRAIN_DONE_JS):
-                break
-            sleep(poll)
-    except Exception:
-        pass                                      # the page is gone: shutdown() finishes the file
+        asker.start()
+        asker.join(timeout)                       # never longer, whatever the page does
     finally:
+        if not drained.is_set() and finalize is not None:
+            try:
+                finalize()
+            except Exception:
+                pass
         before_close()
         window.destroy()
 
@@ -558,8 +574,8 @@ def _run_app(smoke=None):
                 if proceed and api.recording():
                     # Not yet: the page first saves what it still holds (bounded), then the
                     # window closes (close_now lets that close through).
-                    threading.Thread(target=_close_after_drain, args=(window, close_now), name="close-drain",
-                                     daemon=True).start()
+                    threading.Thread(target=_close_after_drain, args=(window, close_now, api.finish_recording),
+                                     name="close-drain", daemon=True).start()
                     return False
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the

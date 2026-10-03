@@ -117,10 +117,20 @@ backend (app/live.py): seq checked, base64 decoded, disk space checked,
   of a batch, then its answer, on the same port; at most 2 s), then the queue
   drains (at most 30 s), then `live_stop` (at most 15 s). If the backend never
   answers, the page says the file is finished when OpenEVP closes or starts again.
+- There is one Stop per recording: `stopRecording()` returns the Stop already
+  running, so Stop pressed twice, or the window closing during "Saving...",
+  waits for it.
+- Audio Stop could not hand over (a chunk that timed out or was refused, a
+  worklet that never answered its flush, a drain out of time, an overflowing
+  queue) is counted; the final message then says what was saved and that the
+  last N seconds may be missing, and why, as a warning (never "✓ Saved").
 - **Closing the window** during a recording: `main.py` holds the close, runs
-  the page's `liveDrainForClose()` (the same steps as Stop) and waits for it, at
-  most 60 s, then closes; `shutdown()` finishes whatever the page could not hand
-  over.
+  the page's `liveDrainForClose()` (the same Stop) and waits for it, at most
+  60 s. The page is asked on a thread of its own, because pywebview's
+  `evaluate_js` waits for the page with no time limit: a hung page cannot hold
+  the close past the deadline. If the page did not finish in time,
+  `Api.finish_recording()` finishes the file with what has arrived; then the
+  window closes, and `shutdown()` finishes anything still open.
 - The backend finishes a session that gets no chunk or mark for 60 s (the page
   is gone or stuck), so its file is not left open until the app closes.
 

@@ -583,6 +583,15 @@ class LiveApiTests(Tmp):
         self.assertEqual(a.install_update()["error"], backend.UPDATE_RECORDING)
         a.live_stop(sid)
 
+    def test_finish_recording_saves_what_has_arrived(self):
+        a = self.api()
+        self.assertEqual(a.finish_recording(), {"ok": True, "finished": False})
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(1.0), 0)
+        self.assertEqual(a.finish_recording(), {"ok": True, "finished": True})
+        self.assertFalse(a.recording())
+        self.assertEqual(len([n for n in os.listdir(self.lib) if n.endswith(".wav")]), 1)
+
     def test_closing_the_app_saves_the_recording(self):
         a = backend.Api(None, self.events, lambda s: None, self.lib, self.server, store=self.store)
         sid = self.start(a)["session"]
@@ -834,6 +843,30 @@ class CloseDrainTests(unittest.TestCase):
         main._close_after_drain(w, lambda: None, timeout=3, poll=1, clock=lambda: t[0], sleep=sleep)
         self.assertTrue(w.destroyed)
         self.assertLessEqual(t[0], 4)
+
+    def test_a_hung_page_cannot_hold_the_close_past_the_deadline(self):
+        # evaluate_js waits for the page without a time limit; a hung page never answers.
+        import threading
+        import time as clock
+        from app import main
+        never = threading.Event()
+
+        class Hung(self.Window):
+            def evaluate_js(self, js):
+                never.wait()
+        w, order = Hung([]), []
+        t0 = clock.monotonic()
+        main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"), timeout=0.3)
+        self.assertLess(clock.monotonic() - t0, 3)
+        self.assertEqual((order, w.destroyed), (["finalize", "close"], True))
+        never.set()
+
+    def test_a_page_that_finishes_needs_no_finalize(self):
+        from app import main
+        w, order = self.Window([True]), []
+        main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"),
+                                sleep=lambda s: None)
+        self.assertEqual(order, ["close"])
 
     def test_a_page_that_is_gone_still_closes(self):
         from app import main

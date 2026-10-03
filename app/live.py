@@ -716,6 +716,17 @@ class LiveOps:
         except (OSError, StoreReadOnly, StoreUnavailable):
             pass
 
+    def finish_recording(self):
+        """Finish the recording running now with what has arrived (the window is closing
+        and its page did not stop it in time). {"ok", "finished"}."""
+        with self._live_lock:
+            s = self._live
+            if s is None:
+                return {"ok": True, "finished": False}
+            s.stopped = s.stopped or "OpenEVP was closing."
+            self._live_finish(s, open_player=False)
+        return {"ok": True, "finished": True}
+
     def _live_shutdown(self):
         """The app is closing: finish the recording running (its file is saved)."""
         with self._live_lock:
