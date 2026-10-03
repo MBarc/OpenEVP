@@ -14,10 +14,10 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice, make_raw, make_table  # noqa: E402
-from st25 import dvf  # noqa: E402
-from st25.folder import parse  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from sony_icd import dvf  # noqa: E402
+from sony_icd.folder import parse  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 VECTORS = os.path.join(os.path.dirname(__file__), "vectors")
 

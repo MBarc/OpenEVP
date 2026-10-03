@@ -294,7 +294,7 @@ def _smoke_decoders(report):
     """Record whether each Sony decoder loads (tables, fast C core); a problem when
     one is unavailable or would run in slow mode. The LPEC ST decoder also decodes
     a few frames, so its C core is initialised from the bundled tables."""
-    from st25 import audio
+    from sony_icd import audio
     decoders = report["decoders"] = {}
     for name, codec, what in SMOKE_DECODERS:
         ok, status = audio.available(codec), audio.status(codec)

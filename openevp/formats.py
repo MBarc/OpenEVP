@@ -53,7 +53,7 @@ when it has them and fall back to to_wav.
 The registry holds .wav (built in, a PCM passthrough), .dvf (Sony ICD-ST25
 and ICD-ST10), and MP3 under each of its extensions (.mp3, .mpeg, .mpga, .mp2,
 .m2a: one decoder, openevp.decoders.mp3, with minimp3; a file counts only when
-its first bytes sniff as MPEG audio). A .dvf is decoded by its codec byte, through st25.audio:
+its first bytes sniff as MPEG audio). A .dvf is decoded by its codec byte, through sony_icd.audio:
 LPEC LP (ICD-ST25, ICD-ST10) and LPEC SP (ICD-ST10, 16 kHz) by the Sony LPEC
 decoder, LPEC ST (ICD-ST10) by the Sony LPEC ST decoder. The format-level
 availability is the LP decoder's; header_problem says when an LPEC ST or SP
@@ -72,8 +72,8 @@ from typing import Callable, Optional
 
 from openevp import wavinfo as _wavinfo
 from openevp.decoders import mp3 as _mp3dec
-from st25 import audio as _st25_audio
-from st25 import dvf as _dvf
+from sony_icd import audio as _dvf_audio
+from sony_icd import dvf as _dvf
 
 
 class Cancelled(Exception):
@@ -195,7 +195,7 @@ WAV = Format(ext=".wav", label="WAV", decoder=_PcmPassthrough(),
 
 
 # ---- Sony ICD-ST .dvf ---------------------------------------------------------
-LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # ST25 LP audio
+LP_BYTES_PER_SECOND = _dvf.LP_BYTES_PER_SECOND     # LPEC LP audio
 CODEC_LP, CODEC_SP, CODEC_ST = _dvf.CODEC_LP, _dvf.CODEC_SP, _dvf.CODEC_ST
 
 
@@ -203,7 +203,7 @@ def codec_problem(codec):
     """Why .dvf recordings of ``codec`` (CODEC_LP, CODEC_SP or CODEC_ST) cannot
     be decoded now (a phrase, e.g. the LPEC ST or SP tables are missing), or
     None."""
-    return None if _st25_audio.available(codec) else _st25_audio.status(codec)
+    return None if _dvf_audio.available(codec) else _dvf_audio.status(codec)
 
 
 def _dvf_problem(header):
@@ -214,19 +214,19 @@ def _dvf_problem(header):
 
 
 class _SonyLpec:
-    """st25.audio (the Sony LPEC and LPEC ST decoders) behind the Format
+    """sony_icd.audio (the Sony LPEC and LPEC ST decoders) behind the Format
     decoder contract. The format-level availability is the LP decoder's; an
     LPEC ST or SP file whose decoder is unavailable raises DecoderUnavailable
     (not the file's fault)."""
 
     def available(self):
-        return _st25_audio.available()
+        return _dvf_audio.available()
 
     def reason(self):
-        return None if _st25_audio.available() else _st25_audio.status()
+        return None if _dvf_audio.available() else _dvf_audio.status()
 
     def warning(self):
-        return _st25_audio.status() if _st25_audio.available() else None
+        return _dvf_audio.status() if _dvf_audio.available() else None
 
     def _run(self, data, call):
         problem = _dvf_problem(data[:HEADER_BYTES])
@@ -235,7 +235,7 @@ class _SonyLpec:
         return _translated(call)
 
     def to_wav(self, data, should_stop=None):
-        return self._run(data, lambda: _st25_audio.dvf_to_wav(data, should_stop=should_stop))
+        return self._run(data, lambda: _dvf_audio.dvf_to_wav(data, should_stop=should_stop))
 
     def wav_bytes(self, data):
         """The WAV's size from the header's payload field: at most every LPEC ST
@@ -254,10 +254,10 @@ class _SonyLpec:
         return 44 + payload * 64 // 3
 
     def write_wav(self, data, f, should_stop=None):
-        return self._run(data, lambda: _st25_audio.dvf_write_wav(data, f, should_stop=should_stop))
+        return self._run(data, lambda: _dvf_audio.dvf_write_wav(data, f, should_stop=should_stop))
 
     def pcm(self, data, should_stop=None):
-        stream = self._run(data, lambda: _st25_audio.dvf_pcm(data, should_stop=should_stop))
+        stream = self._run(data, lambda: _dvf_audio.dvf_pcm(data, should_stop=should_stop))
         if stream is None:
             return None
         channels, width, rate, chunks = stream
@@ -273,12 +273,12 @@ class _SonyLpec:
 
 
 def _translated(call):
-    """call(), with st25.audio's and the decoder's exceptions in this module's terms."""
+    """call(), with sony_icd.audio's and the decoder's exceptions in this module's terms."""
     try:
         return call()
-    except _st25_audio.Cancelled as e:
+    except _dvf_audio.Cancelled as e:
         raise Cancelled(str(e)) from e
-    except _st25_audio.DecoderUnavailable as e:
+    except _dvf_audio.DecoderUnavailable as e:
         raise DecoderUnavailable(str(e)) from e
     except (MemoryError, OSError):     # not the file's fault; OSError may name a path
         raise

@@ -21,7 +21,7 @@ def _pause():
 if __name__ == "__main__":
     code = 1
     try:
-        from st25.cli import main
+        from sony_icd.cli import main
         code = main()
     except SystemExit as e:
         code = e.code if isinstance(e.code, int) else 1

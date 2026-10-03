@@ -25,11 +25,11 @@ from test_app_recorders import AppTestBase  # noqa: E402
 from test_st10_model import FRAMES  # noqa: E402
 from app import backend  # noqa: E402
 from openevp import formats  # noqa: E402
-from openevp.recorders.sony_st25 import ST25Session  # noqa: E402
-from st25 import audio, cli, dvf  # noqa: E402
-from st25.folder import parse  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
+from sony_icd import audio, cli, dvf  # noqa: E402
+from sony_icd.folder import parse  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 NO_SP = "the WAV decoder could not be loaded: this build does not include the LPEC SP table data"
 UNDATED = b"\xff" * 8
@@ -193,7 +193,7 @@ class MixedModesAppTests(AppTestBase):
         r.dev = FakeRecorderDevice(folders, voice=voice, identify="ICD-ST10")
         s = RecorderSession(r)
         s.connect()
-        return ST25Session(s)
+        return SonyIcdSession(s)
 
     def test_listing(self):
         r = self.api.recordings(ID)

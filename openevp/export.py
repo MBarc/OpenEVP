@@ -2,7 +2,7 @@
 
 Shared by the command-line downloader and the desktop app. Format-specific
 equality (e.g. .dvf audio with block counters removed) belongs to the format:
-see st25.export.save_dvf.
+see sony_icd.export.save_dvf.
 """
 import os
 import re

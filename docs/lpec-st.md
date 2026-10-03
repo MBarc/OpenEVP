@@ -57,8 +57,8 @@ rate, channels, pcm = decode(frames_bytes)    # 44100, 2, interleaved little-end
 pcm = decode(payload_from_raw(raw_dump))[2]   # a raw 1056-byte-block ICD-ST10 voice dump
 ```
 
-`dvf_to_wav` checks the file (`st25.dvf.validate`) and its codec byte (0x24)
-first, so a damaged file or an LPEC LP file raises `st25.dvf.FormatError`.
+`dvf_to_wav` checks the file (`sony_icd.dvf.validate`) and its codec byte (0x24)
+first, so a damaged file or an LPEC LP file raises `sony_icd.dvf.FormatError`.
 `dvf_write_wav(dvf_bytes, f)` writes the same WAV into a file as it decodes,
 and `dvf_pcm(dvf_bytes)` gives the PCM frame by frame (for the marks
 fingerprint), so a long recording is never held in memory. Every entry point

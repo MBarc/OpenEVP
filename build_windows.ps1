@@ -50,7 +50,7 @@ foreach ($core in $lpecCore, $lpecStCore, $mp3Core) {
 }
 
 # The decoders (openevp.decoders.sony_lpec and openevp.decoders.sony_lpec_st) are
-# imported dynamically (st25/audio.py), so PyInstaller cannot see them: the
+# imported dynamically (sony_icd/audio.py), so PyInstaller cannot see them: the
 # openevp package is collected explicitly, with the decoders' DLLs, for both
 # builds below, or the frozen app/CLI silently lose WAV support. The extracted
 # table data ($lpecDir\data\lpec_tables.json and $lpecDir\data\lpec_sp_tables.json

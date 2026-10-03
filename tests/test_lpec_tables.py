@@ -325,7 +325,7 @@ class CachingTests(unittest.TestCase):
 
 
 class CheckTests(unittest.TestCase):
-    """openevp.decoders.sony_lpec.check(), which st25/audio.py uses to detect
+    """openevp.decoders.sony_lpec.check(), which sony_icd/audio.py uses to detect
     TablesMissing without decoding anything, mirrors tables.load()'s availability."""
 
     def test_check_matches_tables_load(self):

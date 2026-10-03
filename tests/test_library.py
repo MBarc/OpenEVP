@@ -19,7 +19,7 @@ from app import backend  # noqa: E402
 from app.store import AppData  # noqa: E402
 from openevp import formats  # noqa: E402
 from openevp import wavinfo  # noqa: E402
-from st25 import audio, dvf  # noqa: E402
+from sony_icd import audio, dvf  # noqa: E402
 
 WAIT = 30
 

@@ -22,7 +22,7 @@ import struct
 from array import array
 from typing import Callable, Iterator, List, Optional, Tuple
 
-from st25 import dvf as dvf_module
+from sony_icd import dvf as dvf_module
 from . import _core, bitstream, dsp
 from . import tables as tables_module
 
@@ -231,7 +231,7 @@ def payload_from_raw(raw: bytes) -> bytes:
     return bytes(pay)
 
 
-# ---- .dvf files (st25.dvf) ----------------------------------------------------
+# ---- .dvf files (sony_icd.dvf) ----------------------------------------------------
 
 # The canonical 44-byte WAV header: RIFF, a 16-byte 'fmt ' chunk (PCM, 2
 # channels, 44100 Hz, 16-bit), then 'data': the LP decoder's layout.
@@ -247,7 +247,7 @@ def wav_header(pcm_bytes: int) -> bytes:
 
 def dvf_payload(dvf_bytes) -> bytes:
     """The LPEC ST frame stream of a .dvf, after checking the file: raises
-    st25.dvf.FormatError for a damaged file or one of another codec (an
+    sony_icd.dvf.FormatError for a damaged file or one of another codec (an
     ICD-ST25's LPEC LP is never decoded as LPEC ST)."""
     reason = dvf_module.validate(dvf_bytes)
     if reason is not None:

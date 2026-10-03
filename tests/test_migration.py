@@ -31,7 +31,7 @@ from test_marks_api import FakeServer  # noqa: E402
 from app import backend  # noqa: E402
 from app.store import AppData  # noqa: E402
 from openevp import wavinfo  # noqa: E402
-from st25 import audio  # noqa: E402
+from sony_icd import audio  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIXTURE = os.path.join(HERE, "migration", "v0.7.2")

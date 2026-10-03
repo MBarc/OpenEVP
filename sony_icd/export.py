@@ -2,7 +2,8 @@
 
 The never-overwrite publication itself is shared (openevp.export, re-exported
 here for compatibility); what counts as "already saved" for a .dvf (identical
-audio, ignoring the time counters DVE rewrites) is ST25-specific and stays here.
+audio, ignoring the time counters DVE rewrites) is specific to
+Sony's .dvf and stays here.
 """
 from openevp.export import _choose, publish, save_raw, save_unique, save_wav  # noqa: F401
 

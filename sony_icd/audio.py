@@ -15,7 +15,7 @@ its streamed forms choose by the data's own codec byte.
 import importlib
 import sys
 
-from st25 import dvf as _dvf
+from sony_icd import dvf as _dvf
 
 DECODER = "openevp.decoders.sony_lpec"         # imported on demand: optional in a build
 ST_DECODER = "openevp.decoders.sony_lpec_st"

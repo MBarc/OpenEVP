@@ -1,4 +1,4 @@
-"""End-to-end tests for st25.cli.run()/main() against an emulated recorder:
+"""End-to-end tests for sony_icd.cli.run()/main() against an emulated recorder:
 the --wav flag writes a WAV beside each .dvf, using the same never-overwrite
 rules as the .dvf files themselves, and never crashes the download when the
 decoder is unavailable.
@@ -16,8 +16,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 import release_gate  # noqa: E402
 from fixtures import DATE, FakeRecorderDevice  # noqa: E402
-from st25 import cli  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
+from sony_icd import cli  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
 
 FOLDERS = {1: [(0, 100, 0x1000, 2958, DATE, "Casey"), (1, 900, 0x3000, 4000, DATE, "Casey")]}
 DVF_NAMES = ["001_A_001_Casey_2029_05_23.dvf", "001_A_002_Casey_2029_05_23.dvf"]
@@ -131,7 +131,7 @@ class CheckWavTests(unittest.TestCase):
 
     def _write_dvf(self, d):
         from fixtures import make_raw
-        from st25 import dvf
+        from sony_icd import dvf
         path = os.path.join(d, "sample.dvf")
         with open(path, "wb") as f:
             f.write(dvf.build(make_raw(2958, 100), DATE, "X", expected_length=2958))
@@ -245,7 +245,7 @@ class St10Tests(unittest.TestCase):
 
     def st10_file(self, d):
         from fixtures import make_st_raw
-        from st25 import dvf
+        from sony_icd import dvf
         path = os.path.join(d, "st10.dvf")
         with open(path, "wb") as f:
             f.write(dvf.build(make_st_raw(self.frames), b"\xff" * 8, "", mode=dvf.MODE_ST))
@@ -265,7 +265,7 @@ class St10Tests(unittest.TestCase):
     @release_gate.require(_st_tables(), NO_ST_TABLES)
     def test_download_with_wav_converts_the_st10_recording(self):
         from fixtures import st_audio_wav
-        from st25 import dvf
+        from sony_icd import dvf
         with tempfile.TemporaryDirectory() as d:
             code, out = self.run_cli(d, "--folder", "A", "--wav")
             outdir = os.path.join(d, "A")
@@ -287,7 +287,7 @@ class St10Tests(unittest.TestCase):
         self.assertIn("0 saved, 2 already saved before", out2)
 
     def test_download_with_wav_without_the_st_decoder(self):
-        from st25 import dvf
+        from sony_icd import dvf
         self.modules["openevp.decoders.sony_lpec_st"] = None                # a build without it
         with tempfile.TemporaryDirectory() as d:
             code, out = self.run_cli(d, "--folder", "A", "--wav")

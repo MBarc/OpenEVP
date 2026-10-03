@@ -26,7 +26,7 @@ full), 6..9 time counter.
 DVE fills the unused tail of the last block with 0xFF (the recorder sends 0x00).
 
 Three recording modes, told apart by the low byte of the folder table's
-message-list entry (st25.folder) and stored in the header's codec fields:
+message-list entry (sony_icd.folder) and stored in the header's codec fields:
 
   mode  recorder          codec (byte 61)  audio
   0x00  ICD-ST25, ST10    0x2C LPEC LP     8 kHz mono, 750 bytes/s (6000 bit/s)
@@ -71,7 +71,7 @@ PAGE, PAGE_DATA = 528, 512
 BLOCK_HEADER = 10
 HEADER_LENGTH_FIELD = struct.pack(">H", BLOCK_HEADER)   # bytes 2..3 of every audio block
 
-MODE_LP, MODE_SP, MODE_ST = 0x00, 0x20, 0x6C   # the folder table's mode byte (st25.folder.Message.mode)
+MODE_LP, MODE_SP, MODE_ST = 0x00, 0x20, 0x6C   # the folder table's mode byte (sony_icd.folder.Message.mode)
 MODES = {MODE_LP: "LPEC LP", MODE_SP: "LPEC SP", MODE_ST: "LPEC ST"}   # display names
 CODEC_AT = 61                        # header byte: the codec
 CODEC_LP, CODEC_SP, CODEC_ST = 0x2C, 0x2A, 0x24
@@ -321,7 +321,7 @@ def audio_fingerprint(dvf_bytes):
 def audio_matches(existing_bytes, fingerprint):
     """Whether a .dvf already on disk holds the recording whose
     audio_fingerprint() is ``fingerprint``: THE .dvf "already saved" test,
-    used by st25.export and openevp.formats. Frozen semantics: a plain
+    used by sony_icd.export and openevp.formats. Frozen semantics: a plain
     equality of fingerprints (so a damaged file, fingerprint None, matches
     another damaged file)."""
     return audio_fingerprint(existing_bytes) == fingerprint

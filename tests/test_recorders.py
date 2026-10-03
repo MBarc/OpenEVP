@@ -14,8 +14,8 @@ from recorder_contract import RecorderContract  # noqa: E402
 
 from openevp import formats, recorders  # noqa: E402
 from openevp.recorders import base  # noqa: E402
-from st25 import audio, dvf  # noqa: E402
-from st25.export import save_dvf, target_path  # noqa: E402
+from sony_icd import audio, dvf  # noqa: E402
+from sony_icd.export import save_dvf, target_path  # noqa: E402
 
 
 def wav_bytes(frames=b"\x01\x00\x02\x00", rate=8000):
@@ -294,7 +294,7 @@ class DvfDecoderTests(unittest.TestCase):
             self.assertIsNone(self.dec.reason())
             self.assertEqual(self.dec.warning(), audio.SLOW_MODE)
 
-    def test_to_wav_wraps_st25_audio(self):
+    def test_to_wav_wraps_sony_icd_audio(self):
         with mock.patch.object(audio, "dvf_to_wav", return_value=b"RIFF") as call:
             stop = lambda: False  # noqa: E731
             self.assertEqual(self.dec.to_wav(b"dvf", should_stop=stop), b"RIFF")

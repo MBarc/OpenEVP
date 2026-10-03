@@ -184,7 +184,7 @@ class WavOutputTests(unittest.TestCase):
         self.assertEqual(dvf_to_wav(dvf_bytes), want)
 
     def test_rejects_a_damaged_or_non_lp_file(self):
-        from st25 import dvf
+        from sony_icd import dvf
         from openevp.decoders.sony_lpec.decoder import dvf_to_wav
 
         with self.assertRaises(dvf.FormatError):

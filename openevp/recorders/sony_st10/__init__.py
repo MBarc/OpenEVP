@@ -8,7 +8,7 @@ reports model_id "sony-icd-st10" from the recorder's identify string
 then on. That is why this model claims no USB ids and no driver of its own
 (the registry allows one claim per USB id; the ST25's driver covers both).
 
-Its recordings are in one of three modes, per recording (see st25/dvf.py):
+Its recordings are in one of three modes, per recording (see sony_icd/dvf.py):
 LPEC ST (44.1 kHz stereo, openevp.decoders.sony_lpec_st), LPEC LP (the
 ICD-ST25's codec, openevp.decoders.sony_lpec) and LPEC SP (16 kHz mono, the
 same LPEC decoder in its 16 kHz configuration). All are downloaded as .dvf

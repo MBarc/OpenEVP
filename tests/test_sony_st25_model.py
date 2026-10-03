@@ -17,11 +17,11 @@ from openevp.pnp import needs_setup  # noqa: E402
 from openevp import formats, recorders  # noqa: E402
 from openevp.recorders import base  # noqa: E402
 from openevp.recorders import sony_st25  # noqa: E402
-from st25 import policy  # noqa: E402
-from st25.folder import PAGE, TableError  # noqa: E402
-from st25.protocol import PID, VID, RecorderError, RecorderStuck  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
-from st25.usb import DriverMissing, UsbError  # noqa: E402
+from sony_icd import policy  # noqa: E402
+from sony_icd.folder import PAGE, TableError  # noqa: E402
+from sony_icd.protocol import PID, VID, RecorderError, RecorderStuck  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
+from sony_icd.usb import DriverMissing, UsbError  # noqa: E402
 
 UNDATED = b"\xff" * 8
 FEB31 = bytes.fromhex("07ed021f0b0c0d00")        # 2029-02-31 11:12:13: shown as stored (A12)
@@ -65,7 +65,7 @@ class Device(FakeRecorderDevice):
 
 def today(dev):
     """Today's RecorderSession on dev, opened the way the app opens it."""
-    with mock.patch("st25.protocol.Device", lambda vid, pid, device_id: dev):
+    with mock.patch("sony_icd.protocol.Device", lambda vid, pid, device_id: dev):
         return RecorderSession.open(PORT_ID)
 
 
@@ -93,7 +93,7 @@ class Plugged:
         for target, value in (("openevp.recorders.sony_st25.list_devices", self._list),
                               ("openevp.pnp._usb_instances", lambda: list(self.instances)),
                               ("openevp.pnp.driver_of", self._driver_of),
-                              ("st25.protocol.Device", self._open)):
+                              ("sony_icd.protocol.Device", self._open)):
             patcher = mock.patch(target, value)
             patcher.start()
             testcase.addCleanup(patcher.stop)
@@ -250,7 +250,7 @@ class ErrorTests(unittest.TestCase):
         inner.owner = ""
         inner.messages.side_effect = exc
         device = base.DiscoveredDevice(PORT_ID, "sony-icd-st25", "port 1-4", locator=PORT_ID)
-        m = app_devices.DeviceManager(lambda: ([device], []), lambda model, d: sony_st25.ST25Session(inner))
+        m = app_devices.DeviceManager(lambda: ([device], []), lambda model, d: sony_st25.SonyIcdSession(inner))
         self.addCleanup(m.close)
         m.refresh()
         with self.assertRaises(Exception):
@@ -268,7 +268,7 @@ class ErrorTests(unittest.TestCase):
             with self.subTest(exc=type(exc).__name__):
                 inner = mock.Mock(spec=RecorderSession)
                 inner.messages.side_effect = exc
-                s = sony_st25.ST25Session(inner)
+                s = sony_st25.SonyIcdSession(inner)
                 with self.assertRaises(Exception) as caught:
                     s.recordings("A")
                 got = caught.exception
@@ -306,7 +306,7 @@ class ErrorTests(unittest.TestCase):
                                  (UsbError("the recorder on USB port 1-4 is no longer connected"),
                                   base.RecorderError, base.NEEDS_REPLUG)):
             with self.subTest(exc=type(exc).__name__), \
-                    mock.patch("st25.protocol.Device", side_effect=exc), self.assertRaises(kind) as caught:
+                    mock.patch("sony_icd.protocol.Device", side_effect=exc), self.assertRaises(kind) as caught:
                 model.open(device)
             self.assertEqual(str(caught.exception), str(exc))
             self.assertEqual(base.state_for(caught.exception)[0], state)

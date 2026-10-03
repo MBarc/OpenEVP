@@ -3,7 +3,7 @@
 Pages used (offsets are page numbers):
   0   message list, one u32 per message in display order: slot (u16), 0x60,
       then the recording mode (0x00 LP on the ICD-ST25, 0x6C LPEC ST on the
-      ICD-ST10: st25.dvf.MODES); 0xFFFFFFFF ends the list (all 0xFF = empty
+      ICD-ST10: sony_icd.dvf.MODES); 0xFFFFFFFF ends the list (all 0xFF = empty
       folder)
   2   start timestamp of each slot's first block (u32 BE; 128 per page)
   5   flash address range of each slot: start u32, end u32 with bit 31 set
@@ -38,7 +38,7 @@ MAX_SLOT = TABLE_PAGES - FIRST_ENTRY_PAGE - 1
 MAX_LENGTH = 32 * 1024 * 1024          # the ICD-ST25 has 32 MB of flash (the ST10's size is not known)
 # The address range is used only to derive a message's length (bounded above);
 # addresses are never sent to the recorder - GET_VOICE takes the message number
-# and block count, and those are bounded again by st25/policy.py.
+# and block count, and those are bounded again by sony_icd/policy.py.
 
 
 class TableError(ValueError):
@@ -55,7 +55,7 @@ class Message:
     date: bytes          # 8 raw bytes as stored (all 0xFF if undated)
     owner: str
     problem: str = ""    # non-empty: this message cannot be downloaded safely
-    mode: int = dvf.MODE_LP   # the message list's mode byte (st25.dvf.MODES)
+    mode: int = dvf.MODE_LP   # the message list's mode byte (sony_icd.dvf.MODES)
 
     @property
     def dated(self):
@@ -134,7 +134,7 @@ def _fill(m, table):
         return
     length = end - start + 1
     if length > MAX_LENGTH:
-        m.problem = f"implausible length {length} bytes for slot {slot} (the ST25 holds 32 MB)"
+        m.problem = f"implausible length {length} bytes for slot {slot} (an ICD-ST25 holds 32 MB)"
         return
     m.length = length
     m.blocks = math.ceil(length / 1024)

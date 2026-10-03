@@ -16,8 +16,8 @@ from fixtures import DATE, FakeRecorderDevice, made_wav, st25_manager  # noqa: E
 from app import backend  # noqa: E402
 from app.store import AppData, _acquire_lock  # noqa: E402
 from openevp import wavinfo  # noqa: E402
-from st25.protocol import Recorder  # noqa: E402
-from st25.session import RecorderSession  # noqa: E402
+from sony_icd.protocol import Recorder  # noqa: E402
+from sony_icd.session import RecorderSession  # noqa: E402
 
 FOLDERS = {1: [(0, 100, 0x1000, 2958, DATE, "Casey"), (1, 900, 0x3000, 4000, DATE, "Casey")]}
 ID = "1-4@7"
