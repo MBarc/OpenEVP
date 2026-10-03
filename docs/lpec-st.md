@@ -253,8 +253,8 @@ Python. Loading the tables takes about 0.35 s (cached per process).
 Its WAV is 176,400 bytes per second, about 930 MB for 92 minutes. The app
 decodes a recording for playback straight into its cache file and
 fingerprints it frame by frame (library indexing), so neither holds the WAV
-in memory; a WAV export or a marked backup holds it once (see the README's
-known limits).
+in memory; a WAV export or a marked backup holds it once (see the user
+guide's [known limits](user-guide.md#known-limits)).
 
 ## Open issues
 

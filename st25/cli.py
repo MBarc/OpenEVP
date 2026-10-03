@@ -83,7 +83,7 @@ def run(args, progress=None):
         rec = Recorder()
     except UsbError as e:
         print(f"\nCould not open the recorder: {e}")
-        print("Check that it is plugged in and that its driver is WinUSB (see the README).")
+        print("Check that it is plugged in and that its driver is WinUSB (see docs/technical.md).")
         return 2
     with rec:
         info = rec.device_info()
