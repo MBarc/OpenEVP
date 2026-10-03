@@ -4,7 +4,7 @@
 
 # OpenEVP
 
-**Get the recordings off your Sony voice recorder, then find, mark and share your EVPs.**
+**Get the recordings off your voice recorder, then find, mark and share your EVPs.**
 
 [![Latest release](https://img.shields.io/github/v/release/MBarc/OpenEVP?label=latest%20release)](https://github.com/MBarc/OpenEVP/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/MBarc/OpenEVP/total?label=downloads)](https://github.com/MBarc/OpenEVP/releases)
@@ -17,10 +17,14 @@ Free and open source. One installer, Windows 10 and 11.
 
 </div>
 
-If you hunt with a Sony ICD-ST25 or ICD-ST10, you probably know the problem.
-Great recorder, dead software. Sony's old program doesn't run on a modern
-Windows PC, so I wrote this for my team. You plug the recorder in, OpenEVP
-pulls the recordings off, and you can go through them properly. 👻
+A lot of us hunt with older digital voice recorders, because they're the ones
+known for catching EVPs. You probably know the problem. Great recorder, dead
+software: the program it came with won't run on a modern Windows PC, if it
+still exists at all. So I wrote this for my team. You plug the recorder in,
+OpenEVP pulls the recordings off, and you can go through them properly. 👻
+
+Right now it talks to the Sony ICD-ST25 and ICD-ST10, with more recorders on
+the way. And whatever you record on, it opens WAV and MP3 files too.
 
 ## Your recorder works on a modern PC again
 
@@ -95,6 +99,7 @@ sends a playable copy instead. Your original never moves.
 | Sony ICD-ST25 | Yes |
 | Sony ICD-ST10 | Yes, in all three of its recording modes (ST, SP and LP) |
 | Panasonic RR-DR60 | No. It has no PC connection at all, only a headphone jack. Recording it through a PC's line-in socket might happen one day, but I'm not promising anything. |
+| Panasonic QR-80 | Planned. I haven't had a look at it yet, so I don't know how it connects. |
 
 Got a different recorder? [Open an issue](https://github.com/MBarc/OpenEVP/issues)
 (that's GitHub's name for a request or bug report) and tell me which one.
