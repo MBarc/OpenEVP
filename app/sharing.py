@@ -185,7 +185,9 @@ class _Damaged(Exception):
 def _hand_out(sub, name, fill, pins):
     """A fresh copy for one recipient: <sub>/<12 random hex>/<name>, written by
     fill(part path) and put in place only once complete. Its folder is new, a
-    plain folder held in pins; nothing is left of it when fill fails."""
+    plain folder held in pins; nothing is left of it when fill fails. A folder
+    that fails that check (swapped for a link since it was made) is never looked
+    into: only the link itself is removed, never followed."""
     for _ in range(8):
         folder = os.path.join(sub, secrets.token_hex(6))
         try:
@@ -199,21 +201,31 @@ def _hand_out(sub, name, fill, pins):
     part = target + ".part"
     try:
         _folder(folder, pins)
+    except BaseException:
+        _forget_folder(folder, pins)
+        raise
+    try:
         fill(part)
         os.replace(part, target)
     except BaseException:
-        for gone in (part, target):
+        for gone in (part, target):                     # in the folder checked and held above
             try:
                 os.remove(gone)
             except OSError:
                 pass
-        pins.release(folder)
-        try:
-            os.rmdir(folder)
-        except OSError:
-            pass
+        _forget_folder(folder, pins)
         raise
     return target
+
+
+def _forget_folder(folder, pins):
+    """Let go of folder and remove it if it is empty, or if it is a link (the link
+    itself: os.rmdir never follows one). Nothing in it is touched."""
+    pins.release(folder)
+    try:
+        os.rmdir(folder)
+    except OSError:
+        pass
 
 
 def _copy_checked(src, digest, dst):
@@ -424,8 +436,12 @@ class ShareOps:
             got = self._check_library_file(root, path)
             if isinstance(got, dict):
                 return got
-        out, seen, made = [], set(), 0
+        out, seen, made, asked = [], set(), 0, set()
         for path in sources:
+            source_key = os.path.normcase(os.path.abspath(path))
+            if source_key in asked:                     # the same file twice: shared once
+                continue
+            asked.add(source_key)
             fmt = formats.by_ext(os.path.splitext(path)[1])
             if fmt is not None and not playable_as_is(fmt):
                 beside = wav_beside(path)

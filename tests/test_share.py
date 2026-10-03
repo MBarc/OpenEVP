@@ -314,6 +314,15 @@ class SharePathTests(ShareBase):
         self.assertEqual((os.path.basename(a), os.path.basename(b)), ("x.mp3", "x.mp3"))
         self.assertNotEqual(os.path.dirname(a), os.path.dirname(b))
 
+    def test_one_file_asked_twice_is_shared_once(self):
+        self.write("x.dvf", dvf_bytes())
+        self.write("y.mpeg", mp3.encode(wav_bytes(b"m"), "m"))
+        api = self.new_api()
+        with FakeDecoder().installed():
+            ids = self.ids(api)
+            self.assertEqual(api.drag_out([ids["x.dvf"], ids["y.mpeg"], ids["x.dvf"], ids["y.mpeg"]])["count"], 2)
+        self.assertEqual([os.path.basename(p) for p in self.dragged[0]], ["x.mp3", "y.mp3"])
+
     def test_several_files_in_the_order_given_each_once(self):
         a = self.write("a.wav", wav_bytes(b"a"))
         b = self.write("b.wav", wav_bytes(b"b"))
@@ -416,6 +425,38 @@ class ShareCacheLinkTests(ShareBase):
         self.assertFalse(sharing._is_reparse(os.lstat(os.path.dirname(os.path.dirname(target)))))
         self.assertTrue(os.path.isfile(target))
         self.assertEqual(os.listdir(self.outside), ["keep.wav"])
+
+    def test_a_hand_out_folder_swapped_before_it_is_held_is_never_looked_into(self):
+        """The new folder for one recipient's copy, swapped for a junction between its
+        first check and being held: refused, and nothing behind the junction (a file
+        named like the copy or its .part) is deleted -- only the junction goes."""
+        self.write("x.mpeg", mp3.encode(wav_bytes(b"m"), "m"))
+        bait = [os.path.join(self.outside, n) for n in ("x.mp3", "x.mp3.part")]
+        for path in bait:
+            with open(path, "wb") as f:
+                f.write(b"someone else's")
+        real_add = sharing.folders.Pins.add
+        swapped = []
+
+        def add(pins, path, follow=False):
+            name = os.path.basename(path)
+            if not swapped and len(name) == 12 and all(c in "0123456789abcdef" for c in name):
+                os.rmdir(path)
+                junction(path, self.outside)
+                swapped.append(path)
+            return real_add(pins, path, follow)
+        api = self.new_api()
+        fid = self.ids(api)["x.mpeg"]
+        with mock.patch.object(sharing.folders.Pins, "add", add):
+            r = api.drag_out([fid])
+        self.assertTrue(swapped)
+        self.assertTrue(r["error"].startswith("Could not prepare x.mpeg to share: "), r)
+        self.assertEqual(self.dragged, [])
+        for path in bait:
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"someone else's")
+        self.assertFalse(os.path.lexists(swapped[0]), "the junction itself was removed")
+        self.assertTrue(os.path.isfile(self.keep))
 
     def test_a_cache_folder_that_is_a_file_is_refused(self):
         self.write("x.mpeg", mp3.encode(wav_bytes(b"m"), "m"))
