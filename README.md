@@ -1,10 +1,10 @@
 <div align="center">
 
-<img src="assets/logo.svg" width="128" alt="OpenEVP logo: audio level bars shaped like a ghost">
+<img src="assets/logo.svg" width="128" alt="The OpenEVP logo: a little ghost made of audio level bars">
 
 # OpenEVP
 
-**Get the recordings off your ghost-hunting voice recorder, then find, mark and share your EVPs.**
+**Get the recordings off your Sony voice recorder, then find, mark and share your EVPs.**
 
 [![Latest release](https://img.shields.io/github/v/release/MBarc/OpenEVP?label=latest%20release)](https://github.com/MBarc/OpenEVP/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/MBarc/OpenEVP/total?label=downloads)](https://github.com/MBarc/OpenEVP/releases)
@@ -13,119 +13,171 @@
 
 ### [⬇ Download OpenEVP for Windows](https://github.com/MBarc/OpenEVP/releases/latest)
 
+Free and open source. One installer, Windows 10 and 11.
+
 </div>
 
-One free installer for a modern Windows PC. No manufacturer software, and no
-old 32-bit computer kept around just to read your recorder.
+If you hunt with a Sony ICD-ST25 or ICD-ST10, you probably know the problem.
+Great recorder, dead software. Sony's old program doesn't run on a modern
+Windows PC, so I wrote this for my team. You plug the recorder in, OpenEVP
+pulls the recordings off, and you can go through them properly. 👻
 
-![OpenEVP playing a recording: a waveform with a spectrogram underneath, a class A EVP selected, and the list of EVP marks with their notes](docs/images/player.png)
+## Your recorder works on a modern PC again
 
-## What it does
+No Sony software, and no old 32-bit computer kept around just to read the
+recorder. Install OpenEVP, plug in the recorder, tick the recordings and click
+**Export**. It only ever reads from the recorder, so nothing on it gets
+changed or deleted.
 
-- **Downloads from your recorder.** Plug it in, tick the recordings, click
-  **Export**. Nothing on the recorder is ever changed or deleted.
-- **Plays them with a waveform and a spectrogram**, so a voice stands out
-  even under noise.
-- **Marks EVPs as class A, B or C** with a note on what you hear. Marks save
-  themselves.
-- **EVP Library:** every recording you've saved, sorted into investigation
-  folders, with filters for A/B/C, “has EVPs” and “not reviewed”.
-- **Clips:** saves each EVP as its own short clip, as an **MP3 for sharing** or
-  a full-quality WAV.
-- **Speed:** slow a recording down to 0.25× (or speed it up to 2×), keeping
-  the pitch or tape-style.
-- **Enhance:** boost, leveler, voice filter, rumble, hiss and hum removal,
-  live while you listen. Your recording is never changed.
-- **Noise reduction** that learns your room's background noise.
-- **MP3 files too:** open WAVs and MP3s from anywhere on your PC, including
-  voice notes and clips saved from WhatsApp Web.
-- **Updates itself:** it tells you when a new version is out and installs it
+## See the voice before you hear it
+
+Every recording opens with its waveform and a spectrogram underneath. The
+spectrogram is a picture of the sound: time runs across, pitch goes up, and
+louder is brighter. A voice shows up as a stack of bright stripes, so you can
+often spot it even when it's buried in noise.
+
+![OpenEVP playing a recording: the waveform on top, the spectrogram under it, a class A EVP selected, and the EVP marks with their notes listed below](docs/images/player.png)
+
+## Slow it down and clean it up
+
+Found something faint? Loop it. Slow it down to a quarter of normal speed (or
+speed it up to 2×), with the voice kept at its normal pitch or dropped like a
+slowed-down tape.
+
+The **Enhance** tab makes it louder, evens out the volume, keeps only the
+range voices sit in, and takes out rumble, hiss and electrical hum. It all
+happens live while you listen. There's also noise reduction that learns your
+room's background noise (fans, air conditioning, traffic) and turns it down.
+
+None of this touches the recording. It only changes what you hear.
+
+![The Enhance tab: Boost at +9 dB, the voice filter ticked and the hum remover set to 60 Hz, with an Enhanced tag above the waveform and a class A EVP selected](docs/images/enhance.png)
+
+## Mark it and keep every investigation in order
+
+Drag across the waveform, press **M**, and pick a class: A if anyone would
+hear the words, B if most people would agree, C if it's faint. Write down what
+you hear. Marks save themselves.
+
+Everything you've saved lands in the **EVP Library**, with a folder per
+investigation. You can see at a glance how many A, B and C EVPs each recording
+has, and filter down to "has EVPs" or "not reviewed yet" when you're working
+through a night's audio.
+
+![The EVP Library: recordings from three investigations, each with its length, its A, B and C EVP counts and a reviewed tick. Two recordings are opened up to show their EVP notes.](docs/images/library.png)
+
+## Share a clip with the team
+
+Each EVP can be saved as its own short clip, an MP3 for sharing or a
+full-quality WAV. Then drag it from the library straight into Discord,
+WhatsApp, an email or a folder. Or right-click it, pick **Copy file**, and
+paste it with Ctrl+V.
+
+Dragging out a Sony `.dvf` file (which other programs can't play)? OpenEVP
+sends a playable copy instead. Your original never moves.
+
+## A few more things
+
+- It opens WAV and MP3 files from anywhere on your PC, including voice notes
+  and clips saved from WhatsApp Web.
+- Right-click any recording to show it in File Explorer, rename it, or delete
+  it. Deleted recordings go to the Recycle Bin, and if you restore one, its
+  EVP marks come back with it.
+- It updates itself. When there's a new version it tells you and installs it
   for you.
 
-## Supported recorders
+### [⬇ Download OpenEVP for Windows](https://github.com/MBarc/OpenEVP/releases/latest)
 
-| Recorder | Status |
+## Works with
+
+| Recorder | Works? |
 |---|---|
-| Sony ICD-ST25 | ✅ Supported |
-| Sony ICD-ST10 | ✅ Supported, in all three recording modes (ST, SP and LP) |
-| Panasonic RR-DR60 | ❌ Can't be read directly: it has no PC connection, only a headphone jack. Capturing its recordings through a PC's line-in is a possible future idea, not a promise. |
+| Sony ICD-ST25 | Yes |
+| Sony ICD-ST10 | Yes, in all three of its recording modes (ST, SP and LP) |
+| Panasonic RR-DR60 | No. It has no PC connection at all, only a headphone jack. Recording it through a PC's line-in socket might happen one day, but I'm not promising anything. |
 
-**Have another recorder?** [Open an issue](https://github.com/MBarc/OpenEVP/issues)
-and tell us which one.
+Got a different recorder? [Open an issue](https://github.com/MBarc/OpenEVP/issues)
+(that's GitHub's name for a request or bug report) and tell me which one.
 
 ## Quick start
 
 1. **[Download](https://github.com/MBarc/OpenEVP/releases/latest)**
    `OpenEVP-Setup-<version>.exe` and run it. When Windows asks for permission,
-   click **Yes**. The installer sets up everything, including the recorder's
-   driver.
-2. **Plug in your recorder** and open **OpenEVP** from the Start menu.
-3. **Click the recorder** on the left, tick the recordings you want and click
-   **Export**. By default they're saved to `Documents\OpenEVP`.
-4. **Click a recording to play it.** Drag across the waveform over a voice and
-   press **M** to mark it as an EVP.
+   click **Yes**. The installer sets up everything, including the driver that
+   lets the PC talk to the recorder.
+2. Plug in your recorder and open **OpenEVP** from the Start menu. Click the
+   recorder on the left, tick the recordings you want and click **Export**.
+   They're saved to `Documents\OpenEVP`.
+3. Click a recording to play it. When you hear something, drag across that
+   part of the waveform and press **M** to mark it.
 
-The [user guide](docs/user-guide.md) covers everything else.
-
-## Screenshots
-
-The **EVP Library**, with every recording sorted by investigation and its
-EVPs listed under it:
-
-![The EVP Library: recordings from three investigations with their length, A/B/C EVP counts and reviewed ticks; two recordings are expanded to show their EVP notes](docs/images/library.png)
-
-The **Enhance** tab: boost, voice filter and a 60 Hz hum remover turned on
-while a class A EVP is selected:
-
-![The player with the Enhance tab open: Boost at +9 dB, Voice filter ticked and Hum set to 60 Hz, an Enhanced tag above the waveform and a selected class A EVP](docs/images/enhance.png)
+That's enough to get through your first hunt. The [user guide](docs/user-guide.md)
+covers the rest.
 
 ## FAQ
 
-### Windows says “Windows protected your PC”. Is it safe?
+### Is it free?
 
-Click **More info**, then **Run anyway**. Windows shows this warning the first
-time because OpenEVP's installer isn't code-signed with a commercial
-certificate. It isn't a sign that anything is wrong. OpenEVP is
-open source, so anyone can read exactly what it does. Its updates are
-checked against the project's own signing key before they're installed.
+Yes, with no trial and no account. It's open source under the GPL licence
+(see [Licence](#licence)), so anyone can read the code and check what it does.
+
+### Windows says "Windows protected your PC". Is it safe?
+
+Click **More info**, then **Run anyway**. Windows shows that warning the first
+time because the installer isn't code-signed, meaning it doesn't carry a paid
+certificate from a commercial company that tells Windows who made it. It isn't
+a sign that anything is wrong. The code is public, and every update is checked
+against the project's own signing key before it's installed.
+
+### Will it change my recordings?
+
+No. OpenEVP only reads from your recorder, so nothing on it is changed or
+deleted. Saved files are never overwritten. Speed, Enhance and noise reduction
+only change what you hear, never the file. Your EVP marks are kept separately
+from the audio, so they're safe too.
+
+The only time a file goes anywhere is when you delete it yourself. OpenEVP
+asks first, and it goes to the Recycle Bin.
 
 ### Does it work on a Mac?
 
-Not yet. OpenEVP needs 64-bit (x64) Windows 10 (version 2004 or later) or
-Windows 11. Windows in “S mode” can't run it, and ARM-based Windows PCs
-aren't supported yet.
+Not yet, sorry Mac people. It needs 64-bit (x64) Windows 10, version 2004 or
+later, or Windows 11. It won't run on Windows in "S mode" (a locked-down mode
+that only allows apps from the Microsoft Store), and PCs with an ARM chip
+aren't supported yet. Not sure what you've got? **Settings → System → About**
+shows it under "System type".
 
 ### Where do my files go?
 
-By default to `Documents\OpenEVP`, with one subfolder per recorder folder. Click the
-**Save to** path in the app to open it, or **Change…** to pick another folder.
-Your EVP marks and settings are kept separately, in `%APPDATA%\OpenEVP`.
-
-### Are my recordings changed?
-
-Never. OpenEVP only reads from your recorder: nothing on it is changed or
-deleted. Saved files are never overwritten, and the listening aids (speed,
-Enhance and noise reduction) only change what you hear, not the recording.
-Your EVP marks are kept separately from the audio, so they're safe too.
+To `Documents\OpenEVP`, with one subfolder per folder on the recorder. Click
+the **Save to** path in the app to open it, or **Change…** to pick another
+folder. Your EVP marks and settings are kept separately, in
+`%APPDATA%\OpenEVP` (paste that into File Explorer's address bar to get
+there).
 
 ### How do updates work?
 
-When OpenEVP starts, it checks GitHub for a newer version. If there is one,
-it shows what's new and offers **Update now** or **Not now**. **Update now**
+When OpenEVP starts, it checks GitHub for a newer version. If there is one, it
+shows what's new and offers **Update now** or **Not now**. **Update now**
 downloads the installer, checks that it really comes from this project, asks
 Windows for permission and reopens OpenEVP on the new version. You can also
-click **Check for updates** at the top of the window at any time.
+click **Check for updates** at the top of the window any time.
 
-### The recorder shows as “needs setup”, or seems stuck
+### The recorder shows as "needs setup", or seems stuck
 
 See [Troubleshooting](docs/user-guide.md#troubleshooting) in the user guide.
+It's usually fixed by one button or by unplugging the cable.
 
-## Learn more
+## More reading
 
-- **[User guide](docs/user-guide.md):** every feature, step by step.
-- **[Technical documentation](docs/technical.md):** how OpenEVP talks to the
-  recorders, the driver setup, the command-line tool and how to build it.
-- **[Adding a recorder](openevp/recorders/README.md):** for developers.
+- [User guide](docs/user-guide.md): every feature, step by step.
+- [Technical documentation](docs/technical.md): how OpenEVP talks to the
+  recorders, why the ICD-ST25 needed it, the driver setup, the command-line
+  tool and how to build it.
+- [Adding a recorder](openevp/recorders/README.md), for developers.
+
+Try it after your next hunt, and if something breaks,
+[tell me](https://github.com/MBarc/OpenEVP/issues).
 
 ## Licence
 
@@ -154,6 +206,9 @@ not part of this repository.
 OpenEVP is provided "as is", without warranty of any kind.
 
 ## Third-party notices
+
+OpenEVP includes work by other people. Here is what it uses and under which
+licence:
 
 - **libusb:** `vendor/libusb-1.0.30/libusb-1.0.dll` is libusb 1.0.30 (MinGW64
   build) from the official PGP-signed release (signed by Tormod Volden),

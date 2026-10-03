@@ -1,8 +1,8 @@
 # OpenEVP user guide
 
-Everything OpenEVP can do, step by step. New to it? The
-[Quick start](../README.md#quick-start) gets you going in four steps; come back
-here when you want to know more.
+This is the long version. If you just want to get going, the
+[Quick start](../README.md#quick-start) in the README is three steps. Come back
+here when you want to know what a button does or why something happened.
 
 **Contents**
 
@@ -14,6 +14,8 @@ here when you want to know more.
 - [The EVP Library](#the-evp-library)
   - [Folders](#folders)
   - [Right-click menu](#right-click-menu)
+  - [Sharing a recording or clip](#sharing-a-recording-or-clip)
+  - [Deleting recordings and clips](#deleting-recordings-and-clips)
   - [Moving recordings](#moving-recordings)
   - [Backups](#backups)
   - [Export WAV with marks](#export-wav-with-marks)
@@ -32,210 +34,283 @@ You only do this once per PC.
 
 1. Download `OpenEVP-Setup-<version>.exe` from the
    [Releases](https://github.com/MBarc/OpenEVP/releases/latest) page and run it.
-2. Windows may say *"Windows protected your PC"* the first time, because the
-   installer isn't code-signed. Click **More info → Run anyway**.
-3. Windows asks for permission once; click **Yes**. That's all.
+2. The first time, Windows may say *"Windows protected your PC"*. That's
+   because the installer isn't code-signed (it doesn't carry a paid
+   certificate that tells Windows who made it). Click **More info**, then
+   **Run anyway**.
+3. Windows asks for permission once. Click **Yes**, and you're done.
 
 The installer sets up everything:
 
-- the desktop app and the command-line tool;
-- the recorder's driver. It works whether or not the recorder is plugged in;
-  Windows applies it when the recorder is plugged into any USB port. (How
-  that works is in the [technical documentation](technical.md#driver-setup).)
-- Microsoft's WebView2 runtime, if this PC doesn't have it yet (Windows 11
-  already does). On an older Windows 10 PC without WebView2, the installer
-  downloads it, so that PC needs internet during setup.
+- The OpenEVP app, plus a command-line tool. That's a text-only version for
+  people who like typing commands, and you can ignore it.
+- The recorder's driver, the piece of Windows that lets the PC talk to the
+  recorder. The recorder doesn't need to be plugged in while you install:
+  Windows uses the driver whenever you plug it into any USB port. (How that
+  works is in the [technical documentation](technical.md#driver-setup).)
+- Microsoft's WebView2, which OpenEVP uses to draw its window, if this PC
+  doesn't have it yet. Windows 11 already does. An older Windows 10 PC without
+  it downloads it during setup, so it needs internet then.
 
-**What you need:** 64-bit (x64) Windows 10 (version 2004 or later) or
-Windows 11. Windows in "S mode" can't run it, and ARM-based PCs aren't
-supported yet.
+**What you need:** 64-bit (x64) Windows 10, version 2004 or later, or
+Windows 11. Windows in "S mode" (a locked-down mode that only allows Microsoft
+Store apps) can't run it, and PCs with an ARM chip aren't supported yet.
+**Settings → System → About** tells you what you have.
 
 **Uninstalling:** **Settings → Apps → OpenEVP** removes the app, the driver
-package and the certificate the installer made, which puts the PC back as it
-was.
+package and the certificate the installer made. Your PC is back the way it was.
 
 ## Getting recordings off your recorder
 
 1. Plug in the recorder and open **OpenEVP** from the Start menu.
-2. Click the recorder on the left. Its folders (A–E) and recordings appear.
-3. Tick the recordings you want, or the box at the top of the list for all of
-   them, and click **Export**.
-   - By default they go to `Documents\OpenEVP`, one subfolder per recorder
-     folder (created by the first export). Click the path to open it, or
-     **Change…** to pick another folder.
-   - A recording is skipped if a file with identical audio is already there.
-   - **Existing files are never overwritten.** A different recording with the
-     same name is saved as `... (2).dvf`.
-4. To get WAV files instead of Sony's `.dvf` files, pick **WAV** as the format
-   before clicking **Export**. For an ICD-ST25 that's 8000 Hz, 16-bit mono,
-   the same file Sony's Digital Voice Editor writes.
+2. Click the recorder on the left. Its folders (A to E) and recordings show up.
+3. Tick the recordings you want, or the box at the top of the list to get all
+   of them, and click **Export**.
+
+By default they go to `Documents\OpenEVP`, with one subfolder per recorder
+folder (made the first time you export). Click the path to open it, or
+**Change…** to pick another folder.
+
+You can export the same folder twice without making a mess. A recording is
+skipped if a file with identical audio is already there, and existing files
+are never overwritten. If a *different* recording has the same name, it's
+saved as `... (2).dvf`.
+
+The files come off as `.dvf`, Sony's own format, which other programs can't
+play. If you want WAV files instead, pick **WAV** as the format before you click
+**Export**. For an ICD-ST25 that's an 8000 Hz, 16-bit mono WAV, the exact file
+Sony's Digital Voice Editor makes.
 
 Click a recording, or a saved `.dvf` or `.wav` file, to play it and see its
 waveform.
 
-Nothing on the recorder is ever changed or deleted: OpenEVP only reads from
-it.
+OpenEVP only reads from the recorder. Nothing on it is ever changed or deleted.
 
 ## Troubleshooting
 
 ### The recorder shows as "needs setup"
 
-This can happen, for example, after its driver was removed. Click **Set up
-recorder** in the app. It runs the same driver step as the installer.
+This can happen if its driver was removed, for example. Click **Set up
+recorder** in the app. It does the same driver step the installer does.
 
 ### It says the recorder may be stuck
 
-If a transfer is interrupted, the recorder gives up on it and keeps answering
-"busy". **Unplug the USB cable, wait a few seconds, plug it back in**, and try
-again. Recordings already saved are skipped.
+If a transfer gets interrupted, the recorder gives up on it and keeps
+answering "busy". **Unplug the USB cable, wait a few seconds, plug it back
+in**, and try again. Anything already saved gets skipped, so you won't end up
+with doubles.
 
 ## Marking EVPs
 
-While a recording is loaded in the player at the bottom of the window:
+With a recording loaded in the player at the bottom of the window:
 
-1. Drag across the waveform to select the part you want to mark.
+1. Drag across the waveform to select the part you want to mark. Tick **Loop**
+   if you want to hear it over and over.
 2. Press **M** (or click **★ Mark EVP**).
-3. Pick a class, type a note on what you hear, and click **Save**:
-   - **A**: clear, anyone hears the words;
-   - **B**: fairly clear, most people agree on the words;
-   - **C**: faint, hard to make out.
+3. Pick a class, type what you hear, and click **Save**.
+   - **A**: clear. Anyone hears the words.
+   - **B**: fairly clear. Most people agree on the words.
+   - **C**: faint and hard to make out.
 
-The mark appears as a coloured band on the waveform and in the list below it.
-From the list you can play it (▶), edit its class or note (✎) or delete it
-(✕), and you can drag its edges to adjust it. Click a note to edit it in
-place. Marks save themselves as you make them.
+The mark shows up as a coloured band on the waveform and in the list below it.
+From the list you can play it (▶), change its class or note (✎) or delete it
+(✕). Drag its edges to adjust where it starts and ends, and click a note to
+edit it right there. Marks save themselves as you go.
 
-Tick **Reviewed** once you've listened all the way through a recording.
+Once you've listened all the way through a recording, tick **Reviewed**. The
+library uses that to show you what's still left to go through.
 
-A mark belongs to the recording's audio, not to one file. If the same audio
-exists as a `.dvf` and a WAV, or has been saved more than once, marking it
-anywhere marks it everywhere.
+A mark belongs to the recording's audio, not to one particular file. If the
+same audio exists as a `.dvf` and a WAV, or you've saved it more than once,
+marking it in one place marks it everywhere.
 
 ## Opening WAV and MP3 files
 
 **Open audio file…** plays a WAV or an MP3 from anywhere on the PC.
 
-MP3 files are full recordings, just like WAVs: they play with the same
-waveform, zoom, loop and speed, they can be marked, and **Export WAV with
-marks** and **Export clips** work on them (Export WAV with marks writes a WAV).
+MP3 files work just like WAVs. They play with the same waveform, zoom, loop
+and speed, you can mark them, and **Export WAV with marks** and **Export
+clips** work on them too (Export WAV with marks writes a WAV).
 
-That includes MP3s saved under another extension, such as the `.mpeg` files
-WhatsApp Web saves voice notes and shared clips as. OpenEVP reads `.mp3`,
-`.mpeg`, `.mpga`, `.mp2` and `.m2a` files, but a file only counts if its first
-bytes really are MPEG audio, so an `.mpeg` video is ignored.
+That includes MP3s saved under another extension, like the `.mpeg` files
+WhatsApp Web uses for voice notes and shared clips. OpenEVP reads `.mp3`,
+`.mpeg`, `.mpga`, `.mp2` and `.m2a` files. It looks at the start of the file
+to check it really is MPEG audio, so an `.mpeg` *video* is ignored.
 
 Marks belong to the audio, so renaming `x.mp3` to `x.mpeg` keeps them. An
-MP3's own tags (title, comment) are never read as marks.
+MP3's own tags (the title and comment some apps add) are never read as marks.
 
 ## The EVP Library
 
-Click **EVP Library** in the sidebar to see every recording saved to disk.
-By default that's your Save-to folder; click the library's folder name to
-point it somewhere else, such as a shared drive.
+Click **EVP Library** in the sidebar to see every recording you've saved. By
+default it shows your Save-to folder. Click the library's folder name to point
+it somewhere else, like a shared drive.
 
 Copies of the same recording (a `.dvf` and its WAV, or a WAV saved twice) are
 grouped into one row. Each row shows:
 
-- its investigation (the subfolder it came from);
+- its investigation (the folder it came from);
 - its type and length;
 - how many class A, B and C EVPs it has;
 - whether it's been reviewed.
 
 Click a row to play it, the triangle to see its marks, or a mark to jump
-straight to it. Filter with the **All / Has EVPs / A / B / C / Not reviewed**
-buttons above the list, or search by file name, investigation (folder) name,
-or note.
+straight to it. The **All / Has EVPs / A / B / C / Not reviewed** buttons
+above the list filter it, and the search box finds a file name, an
+investigation (folder) name or a note.
 
 ### Folders
 
-The library shows folders like File Explorer: a breadcrumb path at the top,
-subfolders first, then that folder's recordings.
+The library works like File Explorer: a breadcrumb path at the top (the trail
+of folders you're in), subfolders first, then that folder's recordings.
 
 - Click a folder row to select it. Double-click it, or press **Enter** while
   it's selected, to open it.
 - Click a step in the breadcrumb to jump back up, or press **Backspace** to go
   up one level.
-- Folders can nest as deep as you like.
-- Turn on **All recordings** to switch to a flat, filterable list of every
-  recording in the library instead, with no folders.
+- Folders can go as deep as you like.
+- Turn on **All recordings** to swap the folders for one flat list of every
+  recording in the library, which you can filter.
 
-**New folder** creates a folder inside the one you're viewing. The name box
-starts empty (the investigation may have been days ago): type a name and click
-**Create**. Select a folder to **Rename** it or **Delete** it.
+**New folder** makes a folder inside the one you're looking at. The name box
+starts empty, since the investigation may have been days ago. Type a name and
+click **Create**.
 
-**Delete** asks first, listing what's inside: how many recordings, and how
-many have EVPs (or that not all have been checked yet); any recorder backups
-that would go with it (those recordings get **Retry backup** afterwards);
-other files such as photos or video; subfolders; and the total size. If it's
-your Save-to folder, the confirmation says so, since exporting there will just
-create it again.
+The **Rename** and **Delete** buttons above the list work on whatever you've
+ticked. With one recording or clip ticked, **Rename** opens the same Rename
+box as the right-click menu; with several ticked it's greyed out ("Tick one
+recording to rename"). **Delete** deletes the ticked recordings you can see
+(see [Deleting recordings and clips](#deleting-recordings-and-clips)). With
+nothing ticked, both buttons act on the selected folder instead. If you've
+ticked recordings *and* selected a folder, the ticks win. Hover a button and
+its tooltip says what it'll act on, or why it's greyed out. They're greyed out
+in a second OpenEVP window, while another job is running and while audio is
+being saved. Both also work in the **All recordings** view, on the ticked
+rows.
 
-The folder goes to the **Recycle Bin**. OpenEVP refuses up front, and says to
-use File Explorer instead, when it can tell Windows wouldn't recycle it:
+Deleting a folder asks first, and tells you what's inside so you don't lose
+anything by accident:
 
-- on a drive with no Recycle Bin (such as some network or external drives);
-- when the Recycle Bin is set to delete files immediately;
-- or, when Windows reports the Recycle Bin's size, when the folder is bigger
-  than that.
+- how many recordings, and how many have EVPs (or that not all have been
+  checked yet);
+- any recorder backups that would go with it (those recordings get **Retry
+  backup** afterwards);
+- other files, like photos or video;
+- subfolders, and the total size.
 
-If Windows still finds it can't recycle something, OpenEVP asks before
-deleting anything for good. If a file in the folder is in use, what could be
-recycled is, the rest stays where it was, and OpenEVP says so.
+If it's your Save-to folder, it says so, because exporting will just make it
+again.
+
+The folder goes to the **Recycle Bin**. OpenEVP refuses up front, and tells you
+to use File Explorer instead, when it can tell Windows wouldn't recycle it:
+
+- on a drive with no Recycle Bin (some network and external drives);
+- when the Recycle Bin is set to delete files straight away;
+- when the folder is bigger than the Recycle Bin, if Windows reports its size.
+
+If Windows still turns out not to be able to recycle something, OpenEVP asks
+before deleting anything for good. If a file in the folder is in use, whatever
+could be recycled is, the rest stays where it was, and OpenEVP tells you.
 
 ### Right-click menu
 
 Right-click in the library for the same tools:
 
 - on an empty part of the list: **New folder**;
-- on a folder: **Open**, **Rename** or **Delete**;
-- on a recording: **Play**, **Rename…**, **Move to…** (all the ticked
-  recordings, if you right-click a ticked one) or **Export clips**.
+- on a folder: **Open**, **Rename** or **Delete…**;
+- on a recording: **Play**, **Copy file**, **Rename…**, **Move to…**,
+  **Export clips** or **Delete…**. If you right-click a ticked recording,
+  **Move to…** and **Delete…** take all the ticked ones.
 
 A folder's **Export clips** does every marked recording in it and in its
 subfolders (see [EVP clips](#evp-clips)).
 
 **Show in File Explorer** (on a recording or clip) opens its folder in File
-Explorer with the file selected: the file the row names, so the `.dvf` when
-there's also a `.wav` copy. **Open in File Explorer** (on a folder, including
-a `Clips` folder) opens that folder.
+Explorer with the file selected. It picks the file the row is named after, so
+the `.dvf` when there's a `.wav` copy too. **Open in File Explorer** (on a
+folder, `Clips` folders included) opens that folder.
 
-**Rename…** (or **F2**) renames a recording: its `.dvf` and `.wav` in that
-folder get the new name, each keeping its extension. A name that's already
-taken is refused, and the marks stay with the recording.
+**Rename…** (or **F2**) renames a recording. Its `.dvf` and `.wav` in that
+folder both get the new name and keep their own extension. A name that's
+already taken is refused, and the marks stay with the recording.
 
 A second OpenEVP window can't create, rename, delete or move anything in the
-library, and can't export; do those in the first window.
+library, and can't export. Do those in the first window.
+
+### Sharing a recording or clip
+
+Drag a row out of the library and drop it on Discord, WhatsApp (the app, or
+WhatsApp Web in a browser), an email, the desktop or a folder. It arrives as a
+file, exactly as if you'd dragged it from File Explorer. Drag a ticked row and
+every ticked recording goes at once.
+
+Or right-click the row and choose **Copy file** (**Copy 2 files** with two
+ticked, and so on), or press **Ctrl+C** on the row. Then paste with **Ctrl+V**
+into the chat or folder.
+
+What arrives depends on the file:
+
+- A WAV, an MP3 or a clip is shared as it is.
+- An MP3 saved as `.mpeg` (how WhatsApp Web saves voice notes), `.mpga`,
+  `.mp2` or `.m2a` is shared as a copy called `<name>.mp3`, because some apps
+  think `.mpeg` means video.
+- A recorder's `.dvf` is shared as the `.wav` beside it if there is one.
+  Otherwise OpenEVP makes an MP3 of the whole recording first. You'll see
+  "Preparing … to share" for a moment. Keep holding the mouse button. If you
+  let go too early, just drag again and it starts straight away.
+
+Those MP3s live in a temporary folder and are cleared out after a few hours.
+Sharing only ever copies. Your original file stays where it is.
+
+### Deleting recordings and clips
+
+Right-click a recording or clip and choose **Delete…**, or select its row and
+press the **Delete** key. It goes to the Recycle Bin along with its copies in
+that folder (the `.dvf` and its `.wav` go together).
+
+If the row is ticked, every ticked recording you can see goes with it. A
+recording hidden by the search, a filter or being in another folder is never
+included.
+
+OpenEVP asks first, listing the files and how many EVP marks they carry. The
+marks are kept, so if you restore a recording from the Recycle Bin, its marks
+are back too. A file that's in use stays where it is, and OpenEVP tells you
+which one. If the player has the recording open, it lets go of it first.
 
 ### Moving recordings
 
-Move recordings between folders by ticking their checkboxes and clicking
-**Move to…**, or by dragging a row onto a folder or a breadcrumb step. Marks
-travel with the audio automatically: nothing about a recording's marks changes
-when it moves. The **Investigation** column always shows the top-level folder
-a recording sits in, however deep it's nested.
+To move recordings to another folder, tick them and click **Move to…**, or drag
+a row onto a folder or a breadcrumb step. (Dropped there, it moves. Dropped
+outside OpenEVP, it's shared as a copy, see
+[Sharing](#sharing-a-recording-or-clip).)
 
-Recorder exports still go to the separate **Save to** folder; folders in the
-library just organise what's already there.
+Marks travel with the audio, so nothing about a recording's marks changes when
+it moves. The **Investigation** column always shows the top-level folder a
+recording sits in, however deep it's tucked away.
+
+Recorder exports still go to the separate **Save to** folder. Folders in the
+library only organise what's already there.
 
 ### Backups
 
 The first time you mark a recording that's still on the recorder, OpenEVP
-saves a copy of it (the `.dvf`, and a WAV if conversion is available) to the
-Save-to folder in the background, so the mark isn't lost if the recorder is
-later wiped.
+quietly saves a copy of it to the Save-to folder (the `.dvf`, plus a WAV if
+it can convert it). That way the mark isn't lost if the recorder gets wiped
+later.
 
-A line under the marks list shows when it's done. If the backup failed, or
-couldn't start because the app was closing or updating, the line says it
-isn't backed up yet and offers **Retry backup**.
+A line under the marks list tells you when it's done. If the backup failed, or
+couldn't start because the app was closing or updating, the line says it isn't
+backed up yet and offers **Retry backup**.
 
 ### Export WAV with marks
 
-**Export WAV with marks** saves a WAV copy of the loaded recording, with its
-marks written in, to the Save-to folder: into the recorder folder's letter, or
-the investigation's folder for a file in the library.
+**Export WAV with marks** saves a WAV copy of the loaded recording with its
+marks written into it. It goes to the Save-to folder: into the recorder
+folder's letter, or the investigation's folder for a file in the library.
 
-The marks are standard RIFF `cue`/`labl`/`ltxt` WAV markers, the marker format
-many audio editors can read. None has been verified with OpenEVP yet.
+The marks are standard WAV markers (RIFF `cue`, `labl` and `ltxt`, if you're
+curious), the kind a lot of audio editors can read. None has been tested with
+OpenEVP yet.
 
 ## The player's settings
 
@@ -245,75 +320,80 @@ To the right of the waveform, three small tabs hold the player's settings:
 - **Speed:** speed, Keep pitch, Exports at …×;
 - **Enhance:** the listening aids, Reduce noise, Exports enhanced.
 
-Click a tab, or use the arrow keys on it (**Home** and **End** for the first
-and last). The last one you picked is shown again next time.
+Click a tab, or use the arrow keys on it (**Home** and **End** jump to the
+first and last). It remembers the last one you picked.
 
-A tab with something changed from its default shows a dot, and its tooltip
-says what, so a setting is never hidden behind another tab:
+A tab with something changed from normal shows a dot, and its tooltip says
+what changed. That way a setting can't hide behind another tab:
 
 - **Speed •** while the speed isn't 1×;
-- **Enhance •** while anything there is on;
+- **Enhance •** while anything on it is turned on;
 - **View •** with the spectrogram off, the height raised or the waveform
   zoomed in past fit-to-width.
 
 The keyboard shortcuts (`[` `]` `\`, **M**, **Space**) work whichever tab is
-shown.
+showing.
 
 ## Playback speed
 
-**Speed**, on the Speed tab, plays at 0.25× to 2×: `[` is slower, `]` is
-faster, and `\` or a double-click goes back to 1×.
+**Speed**, on the Speed tab, goes from 0.25× to 2×. `[` slows down, `]`
+speeds up, and `\` or a double-click puts it back to 1×.
 
-With **Keep pitch** ticked (the default), speech slows down at its normal
-pitch. Untick it to hear it like a tape, deeper when slower. The speed and
-Keep pitch are remembered.
+With **Keep pitch** ticked (the default), slowed-down speech stays at its
+normal pitch. Untick it to hear it like a tape: deeper when it's slower. The
+speed and Keep pitch are remembered.
 
-While the speed isn't 1×, **Exports at 0.5×** (or whatever the speed is)
-makes the player's **Export WAV with marks**, **Export clips** and **Save
-clip** save at that speed, the same way it plays:
+While the speed isn't 1×, the tab shows **Exports at 0.5×** (or whatever the
+speed is). With it ticked, the player's **Export WAV with marks**, **Export
+clips** and **Save clip** save at that speed, the way you're hearing it.
 
-- It's ticked when you move the speed off 1×, but not after a restart, even
-  though the speed itself is remembered. Untick it for normal-speed exports.
+- It ticks itself when you move the speed off 1×, but not after a restart,
+  even though the speed itself is remembered. Untick it if you want
+  normal-speed exports.
 - The file names end in the speed (`…_0.5x.wav`,
   `…_EVP-A_00m12.4s_0.5x.mp3`, or `…_0.5x-tape.wav` with Keep pitch off).
-- The marks are moved to match, and a clip's 0.5 s on each side is slowed down
-  with it.
-- The library's **Export clips** is always at normal speed.
-- Slowing down a whole recording with Keep pitch takes a few seconds (a
-  progress bar shows how far it is).
+- The marks move to match, and the half second either side of a clip is slowed
+  down with it.
+- The library's **Export clips** always saves at normal speed.
+- Slowing down a whole recording with Keep pitch takes a few seconds, and a
+  progress bar shows how far along it is.
 
 ## Enhance
 
 The **Enhance** tab holds the listening aids. They change only what you hear,
-live while it plays; the recording itself and its marks are never touched.
+live while it plays. The recording and its marks are never touched.
 
-- **Boost:** up to +24 dB louder. A soft limiter keeps it from clipping.
-- **Leveler** (Light, Medium, Strong): a compressor that brings quiet parts up
-  and loud ones down.
-- **Voice filter:** keeps the voice band, about 300 to 3400 Hz.
-- **Cut rumble:** lowers everything below about 120 Hz (handling noise, wind).
-- **Cut hiss:** lowers everything above 5 kHz. An ICD-ST25 recording (8 kHz)
-  has nothing up there, so it's greyed out for those.
-- **Hum remover:** notches out 60 Hz (or 50 Hz) mains hum and its next three
-  harmonics.
-- **Reset** turns everything off.
+- **Boost** makes it up to +24 dB louder (a lot). A soft limiter stops it
+  distorting.
+- **Leveler** (Light, Medium or Strong) evens out the volume, bringing quiet
+  parts up and loud parts down. Sound engineers call this a compressor.
+- **Voice filter** keeps only the range voices sit in, about 300 to 3400 Hz.
+- **Cut rumble** turns down everything below about 120 Hz, like handling noise
+  and wind.
+- **Cut hiss** turns down everything above 5 kHz. An ICD-ST25 recording
+  (8 kHz) has nothing up there, so it's greyed out for those.
+- **Hum remover** cuts out the buzz from mains electricity at 60 Hz (or 50 Hz,
+  the mains frequency in Europe), plus the same buzz repeated at its next
+  three harmonics.
+- **Reset** turns it all off.
 
 The settings are remembered. While any of them is on, the tab reads
-**Enhance •** and an **Enhanced** tag sits above the waveform, so it's never
-left on unnoticed.
+**Enhance •** and an **Enhanced** tag sits above the waveform, so you can't
+forget it's on.
 
-**Exports enhanced** then shows on the tab. Like **Exports at 0.5×**, it's
-ticked only when you turn enhancement on in this session. It makes the
-player's **Export WAV with marks**, **Export clips** and **Save clip** save
-what you hear, named `…_enhanced` (`…_0.5x_enhanced.wav` with a speed: the
-speed is applied first, then the enhancements, as the player does). The
-library's **Export clips** always saves as recorded. Saving the same thing
-again gives identical files, so it says "already saved".
+Turning any of it on also shows **Exports enhanced** on the tab. Like
+**Exports at 0.5×**, it's only ticked when you turn enhancement on in this
+session. With it ticked, the player's **Export WAV with marks**, **Export
+clips** and **Save clip** save what you hear, named `…_enhanced`
+(`…_0.5x_enhanced.wav` with a speed too: the speed goes first, then the
+enhancements, same as in the player). The library's **Export clips** always
+saves the recording as it was recorded. Saving the same thing twice gives
+identical files, so the second time it says "already saved".
 
-An enhanced export matches what you hear to within rounding. It can differ
-very slightly, because the player works at your sound card's rate and its
-Leveler delays the sound by 6 ms, while an export keeps every position so its
-marks stay put. The details are in the
+An enhanced export matches what you hear to within rounding. It can be a tiny
+bit different, because the player works at your sound card's rate and its
+Leveler delays the sound by 6 ms, while an export keeps every position exactly
+so its marks stay put. The details are in the
 [technical documentation](technical.md#enhance-player-and-export).
 
 ## Noise reduction
@@ -321,59 +401,62 @@ marks stay put. The details are in the
 To take steady background noise down (hiss, fans, air conditioning,
 traffic):
 
-1. Drag across a stretch with **only** that noise in it: no voices, at least a
-   quarter of a second (a second or two is better).
+1. Drag across a stretch with **only** that noise in it, no voices. It needs
+   at least a quarter of a second, and a second or two is better.
 2. Click **Learn noise** under the waveform.
 3. Tick **Reduce noise** on the **Enhance** tab. Hover it to see where the
    noise was learnt from.
 
-OpenEVP makes a noise-reduced copy of the recording's audio (a progress bar
-with **Cancel** shows while it does; a 30-minute ICD-ST25 recording takes about
-5 seconds), and the player switches to it where it was, playing on. Its
-**amount** sets how far the noise goes down: 40% (the default) lowers it by
-12 dB, 100% by 30 dB.
+OpenEVP then makes a noise-reduced copy of the recording's audio, with a
+progress bar and **Cancel** while it works. A 30-minute ICD-ST25 recording
+takes about 5 seconds. The player switches over to the copy at the same spot
+and keeps playing. The **amount** sets how far the noise goes down: 40% (the
+default) lowers it by 12 dB, 100% by 30 dB.
 
-**Keep it low.** Strong noise reduction leaves watery, warbling artefacts, and
-those can sound like whispers or voices. An "EVP" heard only with Reduce noise
-on should be checked with it off.
+**Keep it low.** Strong noise reduction leaves watery, warbling sounds behind,
+and those can sound like whispers or voices. If you only hear an "EVP" with
+Reduce noise on, check it again with it off.
 
-The copy has exactly the recording's length and sample rate, so marks,
-selections, loops, the speed and the other enhancements all work on it as
-usual, and marks stay the recording's own. The copy is never fingerprinted,
-never listed in the EVP Library, and lives only in OpenEVP's temporary cache.
+The copy is exactly the same length and sample rate as the recording, so
+marks, selections, loops, the speed and the other enhancements all work on it
+as usual, and the marks still belong to the recording. OpenEVP never treats
+the copy as a recording of its own: it never shows in the EVP Library, and it
+only lives in OpenEVP's temporary cache.
 
-The noise profile is kept per recording until OpenEVP closes; loading another
-recording turns Reduce noise off. **Exports enhanced** includes it (named
-`…_enhanced`): noise reduction is applied first, then the speed, then the other
-enhancements, as the player does.
+The learnt noise is kept per recording until you close OpenEVP. Loading
+another recording turns Reduce noise off. **Exports enhanced** includes it
+(named `…_enhanced`): noise reduction goes first, then the speed, then the
+other enhancements, same as in the player.
 
-How the noise reduction works is in the
+How it works is in the
 [technical documentation](technical.md#noise-reduction).
 
 ## Spectrogram
 
-**Spectrogram** (on the **View** tab) is on unless you untick it. It shows
-under the waveform: time across, pitch up (0 Hz at the bottom, labelled in
-kHz), and loudness as colour, from black through purple and red to pale
-yellow.
+The **Spectrogram** (on the **View** tab) is on unless you untick it. It sits
+under the waveform: time runs across, pitch goes up (0 Hz at the bottom,
+labelled in kHz), and loudness is colour, from black through purple and red to
+pale yellow.
 
-A voice shows as stacked bright bands (its harmonics) shaped by its formants,
-which is often easier to spot than in the waveform, even under noise.
+A voice shows up as a stack of bright bands (its harmonics) that bend with the
+sounds being made. That's often easier to spot than in the waveform, even under
+noise.
 
-- It scrolls and zooms with the waveform, and the cursor, the marks and a drag
+- It scrolls and zooms with the waveform, and the cursor, the marks and your
   selection cover it too.
-- Untick it and it stays off (remembered); tick it again any time.
-- Opening a recording is never slowed down by it: the waveform comes first,
-  and the spectrogram fills in a moment later.
-- A 30-minute ICD-ST25 recording takes under 2 seconds and about 60 MB.
+- Untick it and it stays off until you tick it again.
+- It never slows down opening a recording. The waveform comes first and the
+  spectrogram fills in a moment later.
+- A 30-minute ICD-ST25 recording takes under 2 seconds and about 60 MB of
+  memory.
 - MP3 recordings and clips get one too.
 
-How it's computed is in the [technical documentation](technical.md#spectrogram).
+How it's worked out is in the [technical documentation](technical.md#spectrogram).
 
 ## EVP clips
 
-**Export clips** (next to Export WAV with marks) saves every mark of the
-loaded recording as its own short clip; **Save clip** in a mark's row saves
+**Export clips** (next to Export WAV with marks) saves every mark in the
+loaded recording as its own short clip. **Save clip** in a mark's row saves
 just that one.
 
 The **Clip format** menu next to Export clips picks **MP3 (for sharing)**, the
@@ -383,125 +466,137 @@ clips uses it too.
 In the library, right-click a recording, or a folder (every marked recording
 in it and its subfolders), and choose **Export clips**. A folder runs in the
 background with a progress bar and **Cancel**. Recordings that can't be
-decoded (no decoder, an ICD-ST10 mode this build can't play, or damaged) are
-skipped and listed with the reason. When it's done, the banner says how many
-clips were saved (and how many were already there), with **Open folder**.
+decoded are skipped and listed with the reason: no decoder, an ICD-ST10 mode
+this version can't play, or a damaged file. When it's finished, a banner says
+how many clips were saved (and how many were already there), with **Open
+folder**.
 
-**What a clip contains**
+To share a clip, see [Sharing a recording or clip](#sharing-a-recording-or-clip).
 
-- Each clip is the mark plus **0.5 s** on each side (less at the very start or
-  end of the recording), cut from the decoded audio in its own format: an
-  ICD-ST25 recording stays 8 kHz mono, an ICD-ST10 one 44.1 kHz stereo (ST) or
-  16 kHz mono (SP). Nothing is resampled.
-- MP3 clips are 128 kbps CBR at the recording's own sample rate. (LAME allows
-  at most 64 kbps at 8 kHz, so ICD-ST25 clips are 64 kbps.) The mark (class,
-  time and note) is the ID3 title and the note is the comment. A WAV from
-  elsewhere at a rate MP3 doesn't have (say 96 kHz) is resampled by the
-  encoder to the nearest MP3 rate; mono and stereo only.
-- In a WAV clip, the mark's class and note are written in as a WAV marker, as
-  in a WAV with marks.
+**What's in a clip**
+
+- Each clip is the mark plus **half a second** either side (less at the very
+  start or end of the recording). It's cut from the audio in its own format:
+  an ICD-ST25 recording stays 8 kHz mono, an ICD-ST10 one 44.1 kHz stereo (ST)
+  or 16 kHz mono (SP). Nothing is resampled.
+- MP3 clips are 128 kbps constant bitrate, at the recording's own sample rate.
+  The LAME encoder can't go above 64 kbps at 8 kHz, so ICD-ST25 clips are
+  64 kbps. The mark (class, time and note) is the clip's ID3 title, the name a
+  music player shows, and the note is also its comment. A WAV from somewhere
+  else at a rate MP3 doesn't support (say 96 kHz) is converted by the encoder
+  to the nearest MP3 rate. Mono and stereo only.
+- In a WAV clip, the mark's class and note are written in as a WAV marker,
+  like in a WAV with marks.
 
 **Where clips go**
 
 - Clips go into a **`Clips`** folder inside the folder Export WAV with marks
   uses (for example `Save to\A\Clips` or `Save to\Old Mill\Clips`).
 - They're named `<recording>_EVP-<class>_<MMmSS.s>s[_<note>].mp3` (or `.wav`),
-  for example `001_A_003_EVP-A_00m12.4s.mp3`. The note is shortened, and
+  for example `001_A_003_EVP-A_00m12.4s.mp3`. The note gets shortened, and any
   characters Windows doesn't allow in file names are left out.
-- Nothing is overwritten: a clip already saved with the same bytes counts as
-  "already there"; a different one gets a numbered name ("… (2).wav").
+- Nothing is overwritten. A clip already saved with exactly the same contents
+  counts as "already there", and a different one gets a numbered name
+  ("… (2).wav").
 
 **Clips in the library**
 
-- The EVP Library lists the `Clips` folders OpenEVP creates, with a film icon
-  and a **Clips** tag. Open one to see its clips; click a clip to play it.
-- A clip is an EVP already, so it never counts as one: its marker isn't read
+- The EVP Library lists the `Clips` folders OpenEVP makes, with a film icon
+  and a **Clips** tag. Open one to see its clips, and click a clip to play it.
+- A clip is already an EVP, so it never counts as one. Its marker isn't read
   as a mark, and clips are left out of **Has EVPs** (and the other filters),
   the folder counts, the library total and the EVP chips. **All recordings**
-  leaves them out too (they're copies of parts of recordings).
-- You can still mark a clip in the player; the mark is kept, but it doesn't
+  leaves them out too, since they're copies of parts of recordings.
+- You can still mark a clip in the player. The mark is kept, but it doesn't
   count either.
-- MP3 clips are clips exactly like WAV clips: listed, played and markable,
-  never counted.
+- MP3 clips behave exactly like WAV clips: listed, played and markable, never
+  counted.
 
 **Clips from a clip**
 
 Load a clip (WAV or MP3), mark the part you want and use **Export clips** or
 **Save clip**, or right-click the clip in the library and choose **Export
-clips**. The new clips go into the same `Clips` folder as the clip they were
-cut from (never a `Clips` folder inside it), named after it, for example
+clips**. The new clips go into the same `Clips` folder as the clip they came
+from (never a `Clips` folder inside it), named after it, for example
 `001_A_003_EVP-A_00m12.4s_EVP-A_00m00.8s.mp3`. A folder's Export clips (and
 Export clips on a `Clips` folder itself) never cuts clips from clips.
 
 **Managing `Clips` folders**
 
-- Rename or delete a `Clips` folder like any other folder (delete goes to the
-  Recycle Bin). Renaming, moving or deleting a folder takes its `Clips` folder
-  along.
-- Recordings can't be moved into a `Clips` folder: it's for clips only.
+- Rename or delete a `Clips` folder like any other folder (deleting sends it
+  to the Recycle Bin). Renaming, moving or deleting a folder takes its `Clips`
+  folder with it.
+- Recordings can't be moved into a `Clips` folder. It's for clips only.
 - Clips (WAV or MP3) can be moved out of it, and then they're ordinary
   recordings. An MP3 anywhere else in the library is a recording.
-- OpenEVP recognises its own `Clips` folders by a small hidden file inside,
+- OpenEVP knows its own `Clips` folders by a small hidden file inside them,
   `.openevp-clips`. Delete that file and its clips (WAV or MP3) count as
-  ordinary recordings. A folder you named `Clips` yourself is an ordinary
-  folder.
+  ordinary recordings. A folder you named `Clips` yourself is just a folder.
 
 ## Where your marks live
 
-Marks and settings (including the library folder) are stored on this PC in
-`%APPDATA%\OpenEVP\`:
+Marks and settings (including which folder the library shows) are stored on
+this PC in `%APPDATA%\OpenEVP\`. Paste that into File Explorer's address bar to
+get there.
 
 - `marks.json`: your EVP marks;
 - `settings.json`: your settings;
-- `index.json`: an internal cache of files already checked.
+- `index.json`: OpenEVP's own list of files it has already checked.
 
-Only one OpenEVP window writes at a time. A second one open at the same time
-can still browse and play, but can't add, edit or delete marks (it says so)
-until the first is closed.
+Only one OpenEVP window can write at a time. A second window open at the same
+time can still browse and play, but can't add, change or delete marks (it says
+so) until the first one is closed.
 
 ## Known limits
 
-- **What's been verified:** natively on Linux against one ICD-ST25, with 20
-  LP-mode recordings in folder A (owner set, dated and undated) and folders
-  B–E empty. On Windows 11 the installer set up the driver on its own and the
-  app listed all 20 recordings from the same recorder (2026-09-25).
-- **Folders B–E:** up to v0.8.2 the download command always named folder A, so
-  recordings in B–E were reported and not saved (never saved wrong). It now
-  names the folder, as Digital Voice Editor does. This has been checked on an
-  ICD-ST10 (folders B and C), not yet on an ICD-ST25.
-- **ICD-ST25: LP mode only.** Only LP recordings have been checked. The folder
-  table names each recording's mode; a mode OpenEVP doesn't know is reported
-  and not saved. SP would be caught this way if SP uses a different mode byte
-  (unverified), so **record in LP**.
-- **ICD-ST10:** verified on one recorder with three recordings (2026-09-29).
+Most of this only matters if something looks wrong. It's here so nobody has
+to guess what has and hasn't been tested.
+
+- **What's been tested:** on Linux, against one ICD-ST25 with 20 LP-mode
+  recordings in folder A (with an owner name set, some dated and some not) and
+  folders B to E empty. On Windows 11 the installer set up the driver by itself
+  and the app listed all 20 recordings from the same recorder (2026-09-25).
+- **Folders B to E:** up to v0.8.2, the download command always asked for
+  folder A, so recordings in B to E were reported and not saved (never saved
+  wrong). It now asks for the right folder, the way Digital Voice Editor does.
+  That's been checked on an ICD-ST10 (folders B and C), not yet on an
+  ICD-ST25.
+- **ICD-ST25: LP mode only.** Only LP recordings have been checked. The
+  recorder's folder list says which mode each recording is in, and a mode
+  OpenEVP doesn't know is reported and not saved. SP would be caught this way
+  if SP is marked differently (not confirmed), so **record in LP**.
+- **ICD-ST10:** tested on one recorder with three recordings (2026-09-29).
   - Its recordings have no owner name, and no date while its clock isn't set,
     so their files are named like `001_A_001_Unknown.dvf`.
-  - The length listed before a recording is decoded counts its frames: it's
-    exact for a recording made in one go, and each restart inside a recording
-    adds about 0.09 s. The decoded length, shown in the library, is exact.
-  - Its flash size isn't known; a recording longer than 32 MB (about an hour
-    and a half of LPEC ST) would be reported, not saved.
-  - Recordings made with its clock set are untested.
-  - Its SP mode's `.dvf` header is OpenEVP's own guess (the LP header with SP's
-    codec, channel and rate fields) until a DVE-saved SP file can be compared.
-  - An SP recording's length before it's downloaded is its size over 2000
-    bytes a second, which can be off by a few hundredths of a second. Once
-    saved, its length is counted from its frames and is exact.
+  - The length shown before a recording is decoded is worked out from its
+    audio frames (small chunks of audio). It's exact for a recording made in
+    one go, and each restart inside a recording adds about 0.09 s. The decoded length, shown in the library, is exact.
+  - Its memory size isn't known. A recording longer than 32 MB (about an hour
+    and a half in ST mode) would be reported, not saved.
+  - Recordings made with its clock set haven't been tested.
+  - The header of its SP-mode `.dvf` files is OpenEVP's own best guess (the LP
+    header with SP's codec, channel and rate fields) until it can be compared
+    with an SP file saved by Digital Voice Editor.
+  - An SP recording's length before it's downloaded is its size divided by
+    2000 bytes a second, which can be off by a few hundredths of a second.
+    Once saved, its length is counted from its frames and is exact.
 - **Long ICD-ST10 recordings are big:** 92 minutes of 44.1 kHz stereo is
   about 930 MB of WAV.
-  - Playback decodes straight into a disk cache (2 GB; the oldest recordings
-    are dropped first, room is made before a decode and again if the disk
-    fills up; a cache left behind by a crash is deleted at the next start).
-  - The library fingerprints recordings without holding their audio, but a
-    WAV export or a marked backup holds one decoded recording in memory while
-    it's saved.
+  - Playback decodes straight into a cache on disk (2 GB). The oldest
+    recordings are dropped first, room is made before decoding and again if
+    the disk fills up, and a cache left behind by a crash is deleted at the
+    next start.
+  - The library identifies recordings by their audio (a "fingerprint") without
+    holding the audio in memory, but a WAV export or a marked backup holds one
+    decoded recording in memory while it's saved.
   - The player draws the waveform from the audio itself only for the first
-    2.7 minutes' worth of stereo samples (30 minutes of ICD-ST25 audio);
-    longer recordings are drawn from 400 peaks per second.
-  - Decoding takes about 1.4 s of CPU per minute of audio (about two minutes
-    for the longest recording).
-- An ICD-ST10 shows as an ICD-ST25 until you open it, and uses the same
+    2.7 minutes of stereo audio (30 minutes of ICD-ST25 audio). Longer
+    recordings are drawn from 400 peaks per second.
+  - Decoding takes about 1.4 s of processor time per minute of audio, so about
+    two minutes for the longest recording.
+- An ICD-ST10 shows up as an ICD-ST25 until you open it, and it uses the same
   driver.
-- Messages in table slots 64 and above rely on an assumed layout. Each message
-  is cross-checked against its downloaded data, so a wrong assumption stops
-  the download rather than writing a bad file.
+- Recordings in slot 64 and up of a recorder folder's list rely on a guess
+  about how the recorder lays that list out. Each one is checked against its
+  downloaded data, so if the guess is wrong the download stops rather than
+  saving a bad file.
