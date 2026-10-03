@@ -155,10 +155,10 @@ class LinkTests(unittest.TestCase):
 class RecycleBinTests(unittest.TestCase):
     @unittest.skipUnless(ctypes.sizeof(ctypes.c_void_p) == 8, "64-bit layout")
     def test_struct_layout(self):
-        self.assertEqual(ctypes.sizeof(folders.SHFILEOPSTRUCTW), 56)
         self.assertEqual(ctypes.sizeof(folders.SHQUERYRBINFO), 24)
-        self.assertEqual(folders.SHFILEOPSTRUCTW.fFlags.offset, 32)
-        self.assertEqual(folders.RECYCLE_FLAGS, 0x40 | 0x10 | 0x400 | 0x4 | 0x4000 | 0x8000)
+        # Recycle (FOF_ALLOWUNDO + FOFX_RECYCLEONDELETE), no prompts, stop at the first
+        # failure -- and no FOF_WANTNUKEWARNING: a delete for good is vetoed, never asked.
+        self.assertEqual(folders.RECYCLE_FLAGS, 0x40 | 0x10 | 0x400 | 0x4 | 0x8000 | 0x80000 | 0x100000)
 
     @unittest.skipIf(WINDOWS, "off Windows only")
     def test_off_windows_nothing_is_deleted(self):
@@ -173,6 +173,34 @@ class RecycleBinTests(unittest.TestCase):
             folders.recycle("\\\\server\\share\\folder")
         with self.assertRaises(folders.RecycleError):
             folders.recycle("C:\\" + "x" * 300)
+
+    @unittest.skipUnless(WINDOWS and os.environ.get("OPENEVP_TEST_RECYCLE") == "1",
+                         "set OPENEVP_TEST_RECYCLE=1 to try a delete for good on a subst drive (only test files)")
+    def test_real_shell_delete_for_good_is_vetoed(self):
+        # A subst drive has no Recycle Bin: the shell would delete for good there. The
+        # checks in recycle() refuse it up front, so the shell layer is asked directly.
+        base = tempfile.mkdtemp(prefix="openevp-recycle-test-")
+        self.addCleanup(shutil.rmtree, base, True)
+        letter = next((c for c in "QRSTUVWXYZ" if not os.path.exists(c + ":\\")), None)
+        if letter is None:
+            self.skipTest("no free drive letter")
+        subprocess.run(["subst", letter + ":", base], check=True, capture_output=True)
+        self.addCleanup(subprocess.run, ["subst", letter + ":", "/d"], capture_output=True)
+        one = os.path.join(letter + ":\\", "a.wav")
+        with open(one, "wb") as f:
+            f.write(b"x")
+        folder = os.path.join(letter + ":\\", "Old Mill")
+        os.makedirs(os.path.join(folder, "sub"))
+        inner = os.path.join(folder, "sub", "b.wav")
+        with open(inner, "wb") as f:
+            f.write(b"x")
+        for target in (one, folder):
+            decide = folders.RecycleOnly(target)
+            hr, aborted = folders.shell_recycle(target, None, None, decide)
+            self.assertEqual(decide.vetoed, "nuke")
+            self.assertFalse(decide.succeeded(hr, aborted))
+        self.assertTrue(os.path.isfile(one))
+        self.assertTrue(os.path.isfile(inner))
 
     @unittest.skipUnless(WINDOWS and os.environ.get("OPENEVP_TEST_RECYCLE") == "1",
                          "set OPENEVP_TEST_RECYCLE=1 to put a test folder in the real Recycle Bin")
@@ -211,6 +239,119 @@ class RecycleBinTests(unittest.TestCase):
         folders.recycle(one)
         self.assertFalse(os.path.lexists(one))
         self.assertGreater(items(), before)
+
+
+@unittest.skipUnless(WINDOWS, "Windows only")
+class RecycleVetoTests(unittest.TestCase):
+    """The shell is faked: what recycle() does with what IFileOperation reports."""
+    RECYCLE, NUKE = 0x282, 0x202             # PreDeleteItem flags seen on Windows 11
+    DONT_PROCESS_CHILDREN = 0x00270008       # PostDeleteItem's hr for a recycle
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = os.path.join(tmp.name, "a.wav")
+        with open(self.path, "wb") as f:
+            f.write(b"x")
+        for name, value in (("bin_refuses", False), ("_bin_exists", True), ("drive_type", folders.DRIVE_FIXED)):
+            patcher = mock.patch.object(folders, name, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def recycle(self, shell):
+        try:
+            folders.recycle(self.path, shell=shell)
+        except folders.RecycleError as e:
+            return str(e)
+        return None
+
+    def test_a_delete_for_good_is_vetoed_and_the_file_stays(self):
+        asked = []
+
+        def shell(path, owner, before, decide):     # the shell found no room: it would nuke
+            answer = decide.pre_delete(self.NUKE, path)
+            asked.append(answer)
+            if answer != folders.S_OK:
+                decide.post_delete(self.NUKE, path, answer, False)
+                return answer, False
+            os.remove(path)
+            return folders.S_OK, False
+        self.assertEqual(self.recycle(shell), folders.NO_ROOM.replace("This folder", "This file"))
+        self.assertEqual(asked, [folders.HR_CANCELLED])
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_a_part_deleted_on_its_own_is_vetoed(self):
+        def shell(path, owner, before, decide):
+            self.assertEqual(decide.pre_delete(self.RECYCLE, os.path.join(path, "child.wav")), folders.HR_CANCELLED)
+            self.assertEqual(decide.pre_delete(self.RECYCLE, path), folders.HR_CANCELLED)   # stays refused
+            return folders.HR_CANCELLED, True
+        self.assertIsNotNone(self.recycle(shell))
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_nothing_but_a_delete_is_allowed(self):
+        decide = folders.RecycleOnly(self.path)
+        self.assertEqual(decide.pre_other(), folders.HR_CANCELLED)
+        self.assertEqual(decide.pre_delete(self.RECYCLE, self.path), folders.HR_CANCELLED)
+
+    def test_success_is_what_post_delete_reports_never_a_missing_path(self):
+        def gone_without_word(path, owner, before, decide):
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            return folders.S_OK, False
+        self.assertIsNotNone(self.recycle(gone_without_word))
+
+        with open(self.path, "wb") as f:
+            f.write(b"x")
+
+        def deleted_not_recycled(path, owner, before, decide):     # S_OK but no item in the bin
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, folders.S_OK, False)
+            return folders.S_OK, False
+        self.assertIsNotNone(self.recycle(deleted_not_recycled))
+
+    def test_a_recycle_reported_by_post_delete_succeeds(self):
+        calls = []
+
+        def shell(path, owner, before, decide):
+            self.assertEqual(decide.pre_delete(self.RECYCLE, path), folders.S_OK)
+            before()
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, self.DONT_PROCESS_CHILDREN, True)
+            return folders.S_OK, False
+        folders.recycle(self.path, before=lambda: calls.append("before"), shell=shell)
+        self.assertEqual(calls, ["before"])
+
+    def test_in_use_says_so(self):
+        def shell(path, owner, before, decide):
+            decide.pre_delete(self.RECYCLE, path)
+            decide.post_delete(self.RECYCLE, path, folders.COPYENGINE_E_SHARING_VIOLATION_SRC, False)
+            return folders.COPYENGINE_E_SHARING_VIOLATION_SRC, False
+        self.assertEqual(self.recycle(shell), folders.FILE_IN_USE.format("a.wav"))
+        self.assertTrue(os.path.isfile(self.path))
+
+    def test_the_com_sink_refuses_through_its_vtable(self):
+        decide = folders.RecycleOnly(self.path)
+        sink = folders.ProgressSink(decide)
+        vtbl = ctypes.cast(sink.pointer, ctypes.POINTER(ctypes.POINTER(ctypes.c_void_p)))[0]
+
+        def call(index, *types_and_args):
+            argtypes, args = types_and_args[0::2], types_and_args[1::2]
+            fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, *argtypes)(vtbl[index])
+            return fn(sink.pointer, *args) & 0xFFFFFFFF
+        out = ctypes.c_void_p()
+        iid = folders._guid(folders.IID_IFileOperationProgressSink)
+        self.assertEqual(call(0, ctypes.POINTER(folders._GUID), ctypes.byref(iid),
+                              ctypes.POINTER(ctypes.c_void_p), ctypes.byref(out)), folders.S_OK)
+        self.assertEqual(out.value, sink.pointer)
+        other = folders._guid(folders.IID_IShellItem)
+        self.assertEqual(call(0, ctypes.POINTER(folders._GUID), ctypes.byref(other),
+                              ctypes.POINTER(ctypes.c_void_p), ctypes.byref(out)), folders.E_NOINTERFACE)
+        self.assertEqual(call(11, ctypes.c_uint32, self.RECYCLE, ctypes.c_void_p, None),
+                         folders.HR_CANCELLED)                       # PreDeleteItem with no item
+        self.assertEqual(call(5, ctypes.c_uint32, 0, ctypes.c_void_p, None, ctypes.c_wchar_p, "x"),
+                         folders.HR_CANCELLED)                       # PreRenameItem
+        self.assertEqual(decide.vetoed, "other")
 
 
 class FolderApiBase(unittest.TestCase):
@@ -523,7 +664,7 @@ class DeleteTests(FolderApiBase):
             self.store.add_mark(fps[name], 0.1, 0.5, "A", "")
             self.store.set_backup(fps[name], "saved", "Saved")
 
-        def shell(path, before=None):         # what SHFileOperationW does with a file in use
+        def shell(path, before=None):         # what the shell does with a file in use
             self.recycled.append(path)
             os.remove(os.path.join(path, "gone.wav"))
             os.remove(os.path.join(path, "A", "photo.jpg"))
@@ -979,7 +1120,7 @@ class RecycleBinSettingsTests(unittest.TestCase):
         self.assertEqual(folders.IN_USE.format("Old Mill"),
                          "Old Mill was not (completely) moved to the Recycle Bin: a file is in use, "
                          "or deleting was cancelled.")
-        self.assertEqual(folders.RECYCLE_FLAGS & folders.FOF_WANTNUKEWARNING, folders.FOF_WANTNUKEWARNING)
+        self.assertEqual(folders.RECYCLE_FLAGS & 0x4000, 0)      # FOF_WANTNUKEWARNING: a Yes would delete for good
 
 
 @unittest.skipUnless(WINDOWS, "Windows only")
