@@ -141,10 +141,15 @@ after Stop (an import with a silence gap set): it opens in the player with
 - The backend finishes a session that gets no chunk or mark for 60 s (the page
   is gone or stuck), so its file is not left open until the app closes.
 - **Events never wait for the page.** `evaluate_js` has no time limit, so no
-  worker calls it: `Api`'s emit posts to `app/events.py`'s dispatcher (a queue,
-  bounded, progress dropped first) and one daemon thread delivers events in
-  order. Closing tells the import jobs to stop and waits for them at most 10 s
-  in all; the dispatcher is closed with a 1 s bound.
+  worker calls it: `Api`'s emit posts to `app/events.py`'s dispatcher and one
+  daemon thread delivers events in order. Only progress is ever given up: when
+  the queue is full, incoming progress replaces the queued progress of its kind
+  (same event and job or scan) or is dropped, other events push out the oldest
+  progress, and with no progress queued the queue grows rather than lose a row
+  or a "done". Closing tells the import jobs to stop and waits for them at most
+  10 s in all (a job is registered and started in one step under
+  `_workers_lock`, so none is ever joined unstarted, and nothing from that wait
+  escapes `shutdown()`); the dispatcher is closed with a 1 s bound.
 
 Drawing runs on animation frames at most 30 times a second and only scrolls
 what is already drawn (`globalCompositeOperation = "copy"` for the shift: a
@@ -266,6 +271,8 @@ candidates take milliseconds), cancellable throughout:
 - While cuts are being looked for in an import, or it is being split, Record,
   the library's folder operations and updates wait (`_live_busy`), and the
   split holds the folders (`folders.Pins`) and checks them again before each part.
+  A split is admitted like a recording: under `_workers_lock`, refused while a
+  folder operation (`_fs_done`) or an update (`_update_claim`) is admitted.
 - One session at a time; it needs the writable store (a second window cannot
   record).
 - The folders from the library folder down to the destination are held open

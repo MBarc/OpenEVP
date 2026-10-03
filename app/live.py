@@ -572,7 +572,7 @@ class LiveOps:
             # An import: the cuts are suggested in the background ("import-suggest-*"), shown on
             # the waveform for the user to confirm (split_import) or not.
             job = self._start_job(self._suggest_job, s.saved[0]["path"], s.saved[0]["fp"], s.split)
-            if job is not None:
+            if isinstance(job, str):
                 out["suggest"] = {"job": job, "fp": s.saved[0]["fp"]}
         if (s.mode == "live" or s.split) and s.saved and open_player and not self._stop.is_set():
             # Saved either way; if it cannot be opened in the player, the page says why.
@@ -671,24 +671,31 @@ class LiveOps:
             self._live_lock.release()
 
     # ---- splitting an import: suggested cuts, confirmed by the user, then the split ----
-    def _start_job(self, target, *args):
-        """Run target(job, cancel, *args) on a thread of its own; its id, or None when the
-        app is closing. The id is registered before the thread starts (cancel works at
-        once); the page buffers events of a job it does not know yet (live.js), so an
-        event that comes before the id reaches the page is never lost."""
+    def _start_job(self, target, *args, exclusive=False):
+        """Run target(job, cancel, *args) on a thread of its own: its id, or a _fail()
+        saying why not (closing; with exclusive, a library folder operation or an update
+        admitted already, which in turn refuse while a job runs: _live_busy). Admission,
+        registration and start are one step under _workers_lock, so shutdown's snapshot
+        never holds a job whose thread has not started. The page buffers events of a job
+        it does not know yet (live.js), so an event that comes before the id reaches the
+        page is never lost."""
         job = secrets.token_hex(6)
         cancel = threading.Event()
         thread = threading.Thread(target=self._run_job, args=(job, target, cancel) + args, name="import-job",
                                   daemon=True)
         with self._workers_lock:
             if self._stop.is_set():
-                return None
+                return _fail(CLOSING)
+            if exclusive and self._fs_done is not None:
+                return _fail("Wait for the library to finish renaming, moving or deleting files.")
+            if exclusive and self._update_claim:
+                return _fail(UPDATING)
             self._splits[job] = (cancel, thread)
-        try:
-            thread.start()
-        except Exception:
-            self._splits.pop(job, None)
-            return None
+            try:
+                thread.start()
+            except Exception as e:
+                self._splits.pop(job, None)
+                return _fail(f"Could not start: {_plain(e)}")
         return job
 
     def _run_job(self, job, target, cancel, *args):
@@ -713,12 +720,18 @@ class LiveOps:
         """Closing: every import job is told to stop, then waited for, at most timeout
         seconds in all (a job never blocks on the page: events are posted, not sent)."""
         timeout = JOB_JOIN if timeout is None else timeout
-        jobs = list(self._splits.values())
+        with self._workers_lock:                 # registered and started together (_start_job)
+            jobs = list(self._splits.values())
         for cancel, _ in jobs:
             cancel.set()
         deadline = time.monotonic() + timeout
         for _, thread in jobs:
-            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.ident is None:             # never started: nothing to wait for
+                continue
+            try:
+                thread.join(max(0.0, deadline - time.monotonic()))
+            except RuntimeError:
+                pass
 
     def _suggest_job(self, job, cancel, path, fp, gap):
         """Look for the gaps between recordings in a finished import (openevp.silence, one
@@ -774,9 +787,11 @@ class LiveOps:
             if isinstance(got, dict):
                 return got
             folder = os.path.dirname(path)
-            job = self._start_job(self._split_job, root, folder, path, entry["fp"], cuts)
-        if job is None:
-            return _fail(CLOSING)
+            # The same exclusions as recording: a folder operation or an update admitted
+            # already refuses it (and they refuse while it runs).
+            job = self._start_job(self._split_job, root, folder, path, entry["fp"], cuts, exclusive=True)
+        if isinstance(job, dict):
+            return job
         return {"ok": True, "job": job}
 
     def _split_job(self, job, cancel, root, folder, path, fp, cut_seconds):

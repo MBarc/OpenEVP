@@ -7,14 +7,30 @@ window.evaluate_js, which waits for the page with no time limit: a hung page
 would hang the worker, and closing (which waits for the workers) with it.
 
 So emit() only puts the event on a queue and returns; one dispatcher thread (a
-daemon: it never keeps the process alive) sends them to the page in order. The
-queue is bounded: when the page stops taking events, the oldest are dropped
-(progress first), never the caller held up.
+daemon: it never keeps the process alive) sends them to the page in order.
+
+Only progress is ever given up, never another event (a row, a "done", a
+"failed": the page would wait for it for ever). When the queue is full, an
+incoming progress event replaces the queued one of the same kind (the same
+event and job or scan), else it is dropped; an incoming other event makes room
+by dropping the oldest queued progress, and if there is none the queue grows
+beyond its size rather than lose it.
 """
 import collections
 import threading
 
 MAX_QUEUED = 10000
+
+
+def _progress(event):
+    return event.endswith("-progress")
+
+
+def _kind(event, payload):
+    """Progress events of one kind: the same event for the same job (or library scan)."""
+    if isinstance(payload, dict):
+        return event, payload.get("job"), payload.get("scan_id")
+    return event, None, None
 
 
 class Dispatcher:
@@ -34,18 +50,24 @@ class Dispatcher:
             if self._closed:
                 return
             if len(self._queue) >= self._max:
-                self._drop_one()
+                if _progress(event):
+                    key = _kind(event, payload)
+                    for i, (e, p) in enumerate(self._queue):
+                        if _progress(e) and _kind(e, p) == key:
+                            self._queue[i] = (event, payload)     # the latest progress of its kind, in its place
+                            return
+                    self.dropped += 1                            # no room: this progress is given up
+                    return
+                self._drop_progress()                            # room for it, if progress can give it
             self._queue.append((event, payload))
             self._cond.notify()
 
-    def _drop_one(self):
+    def _drop_progress(self):
         for i, (event, _) in enumerate(self._queue):
-            if event.endswith("-progress"):
+            if _progress(event):
                 del self._queue[i]
-                break
-        else:
-            self._queue.popleft()
-        self.dropped += 1
+                self.dropped += 1
+                return
 
     def _run(self):
         while True:

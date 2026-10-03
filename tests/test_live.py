@@ -548,6 +548,34 @@ class LiveApiTests(Tmp):
         self.assertFalse(s["ok"])
         self.assertEqual([n for n in os.listdir(self.lib) if n.endswith(".wav")], ["Import 2026-10-03 09-00-00 (full).wav"])
 
+    def test_shutdown_never_joins_a_job_that_has_not_started(self):
+        # Registration and start are one step: shutdown's snapshot never holds an unstarted job;
+        # and a join that raises still leaves the workers and the store to close.
+        import threading
+        a = backend.Api(None, self.events, lambda s: None, self.lib, self.server, store=self.store)
+        unstarted = threading.Thread(target=lambda: None)
+        a._splits["ghost"] = (threading.Event(), unstarted)
+        a.shutdown()                                      # no RuntimeError: cannot join thread before it is started
+        with mock.patch.object(type(a), "_stop_jobs", side_effect=RuntimeError("boom")):
+            b = backend.Api(None, self.events, lambda s: None, self.lib, self.server, store=self.store)
+            b.shutdown()                                  # never escapes
+
+    def test_a_split_waits_for_a_folder_operation_or_an_update(self):
+        import threading
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream())
+        self.wait_idle(a)
+        rec = stop["player"]["rec"]
+        a._fs_done = threading.Event()                    # a rename, move or delete admitted already
+        self.assertIn("renaming, moving or deleting", a.split_import(rec, got["cuts"])["error"])
+        a._fs_done = None
+        a._update_claim = True                            # an update admitted already
+        self.assertEqual(a.split_import(rec, got["cuts"])["error"], live.UPDATING)
+        a._update_claim = False
+        self.assertTrue(a.split_import(rec, got["cuts"])["ok"])
+        self.wait_event({"import-split-done"})
+        self.wait_idle(a)
+
     def test_shutdown_never_waits_on_a_blocked_page(self):
         # The page stopped taking events (evaluate_js would wait for ever): workers post events
         # through the dispatcher and never wait; closing tells the import jobs to stop and waits
@@ -985,6 +1013,52 @@ class DispatcherTests(unittest.TestCase):
         rows = [p for e, p in got if e == "x-row"]
         self.assertEqual(rows, sorted(rows))
         self.assertIn(6, rows, "the newest events are kept; progress is dropped first")
+
+    def test_a_full_queue_never_drops_a_done_event_for_progress(self):
+        # Astra's fifth pass: delivery blocked, a "done" queued, 9,999 rows behind it (the queue is
+        # full), then progress: the progress is given up, never the "done" or a row; another row
+        # makes the queue grow rather than lose anything.
+        import threading
+        from app import events
+        gate, got = threading.Event(), []
+
+        def send(event, payload):
+            gate.wait()
+            got.append(event)
+        d = events.Dispatcher(send)
+        d.emit("first", {})                               # taken by the dispatcher, which then waits
+        import time as clock
+        for _ in range(100):
+            if not d._queue:
+                break
+            clock.sleep(0.01)
+        d.emit("import-split-done", {"job": "j1"})
+        for i in range(events.MAX_QUEUED - 1):
+            d.emit("library-row", {"scan_id": 1, "id": i})
+        d.emit("library-progress", {"scan_id": 1, "done": 1})
+        d.emit("library-row", {"scan_id": 1, "id": "one more"})
+        gate.set()
+        d.close(timeout=10)
+        self.assertEqual(got[:2], ["first", "import-split-done"])
+        self.assertEqual(got.count("library-row"), events.MAX_QUEUED)
+        self.assertNotIn("library-progress", got)
+
+    def test_full_queue_keeps_the_latest_progress_of_each_kind(self):
+        import threading
+        from app import events
+        gate, got = threading.Event(), []
+        d = events.Dispatcher(lambda e, p: (gate.wait(), got.append((e, p))), max_queued=3)
+        d.emit("x-progress", {"job": "a", "percent": 1})
+        d.emit("x-progress", {"job": "b", "percent": 1})
+        d.emit("x-row", {})
+        d.emit("x-row", {})                               # full: the oldest progress makes room
+        d.emit("x-progress", {"job": "b", "percent": 50})   # replaces b's
+        d.emit("x-progress", {"job": "c", "percent": 1})    # no room, no c queued: given up
+        gate.set()
+        d.close(timeout=5)
+        events_seen = [(e, p.get("job"), p.get("percent")) for e, p in got]
+        self.assertNotIn(("x-progress", "c", 1), events_seen)
+        self.assertEqual([e for e, *_ in events_seen].count("x-row"), 2)
 
     def test_close_is_bounded_whatever_the_page_does(self):
         import threading

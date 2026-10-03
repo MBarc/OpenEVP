@@ -2615,7 +2615,10 @@ class Api(ShareOps, LibraryOps, LiveOps):
             pass
         with self._lib_lock:                    # nor a library indexer
             pass
-        self._stop_jobs()                       # an import's suggest or split job: told to stop, waited for (bounded)
+        try:
+            self._stop_jobs()                   # an import's suggest or split job: told to stop, waited for (bounded)
+        except Exception:
+            pass                                # never keeps the workers and the store from closing
         with self._workers_lock:                # nor an export, export_marked() or folder operation
             workers = list(self._workers)
             marked = self._marked_done
