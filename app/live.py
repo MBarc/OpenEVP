@@ -66,6 +66,11 @@ NO_SPACE = ("There is not enough free space on that drive to record (OpenEVP kee
 STOPPED_DISK = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free)."
 STOPPED_SIZE = "Recording stopped because the file reached 4 GB, the most a WAV file can hold."
 NO_MOMENT = "No recording was running at that moment (OpenEVP was waiting for sound)."
+UNRECOVERED = " (unrecovered).raw"
+
+
+class _Kept(Exception):
+    """live_recover(): a leftover could not be read as audio and was kept under another name."""
 
 
 def _stamp(now):
@@ -611,22 +616,36 @@ class LiveOps:
         if not os.path.isfile(part):
             _remove(sidecar)
             return None
-        rate, channels = meta.get("rate"), meta.get("channels")
-        try:
-            rate, channels, frames = livewav.recover(part, rate if isinstance(rate, int) else None,
-                                                     channels if channels in (1, 2) else None)
-        except ValueError:
-            frames = 0
-        if not frames:
-            _remove(part)
-            _remove(sidecar)
-            return None
-        fp = wavinfo.wav_fingerprint(part)
         folder = os.path.dirname(part)
         name = meta.get("name")
         base = os.path.basename(part)[:-len(livewav.PART)]
         if not isinstance(name, str) or os.path.basename(name) != name or not name.lower().endswith(".wav"):
             name = base if base.lower().endswith(".wav") else base + ".wav"
+        rate, channels = meta.get("rate"), meta.get("channels")
+        try:
+            rate, channels, frames = livewav.recover(part, rate if isinstance(rate, int) else None,
+                                                     channels if channels in (1, 2) else None)
+        except livewav.Unreadable:
+            # Neither the header nor the sidecar says what the bytes are: never deleted
+            # (unless there are no bytes after where a header would be), kept under a
+            # name that says so.
+            if os.path.getsize(part) <= livewav.HEADER_BYTES:
+                _remove(part)
+                _remove(sidecar)
+                return None
+            kept = livewav.publish(part, folder, os.path.splitext(name)[0] + UNRECOVERED)
+            if os.path.exists(sidecar):
+                try:
+                    livewav.publish(sidecar, folder, os.path.basename(kept) + ".json")
+                except OSError:
+                    pass
+            raise _Kept(f"it could not be read as audio, so it was kept as {os.path.basename(kept)} "
+                        "in the same folder (nothing was deleted)") from None
+        if not frames:                           # a readable header and no audio after it
+            _remove(part)
+            _remove(sidecar)
+            return None
+        fp = wavinfo.wav_fingerprint(part)
         path = livewav.publish(part, folder, name)
         seconds = frames / rate
         marks = [m for m in meta.get("marks", []) if isinstance(m, dict) and all(

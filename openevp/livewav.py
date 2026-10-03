@@ -29,6 +29,11 @@ class Full(Exception):
     """The file would pass MAX_DATA."""
 
 
+class Unreadable(ValueError):
+    """recover(): the file has no readable header and its format is not known, so
+    what it holds cannot be told apart from noise. The file is left untouched."""
+
+
 def header(rate, channels, data_bytes):
     """The 44-byte header of a 16-bit PCM WAV holding data_bytes of audio."""
     align = channels * WIDTH
@@ -158,13 +163,15 @@ def recover(part_path, rate=None, channels=None):
     """Fix the header of a .part left by a crash: the audio is what the file holds,
     cut to whole frames. rate/channels are used when the header is unreadable
     (a file cut off before its first header was written). Returns (rate, channels,
-    frames); raises ValueError when there is nothing to recover."""
+    frames): frames 0 only for a file proven to hold no audio (a readable header
+    and less than one frame after it). Raises Unreadable, without changing the
+    file, when the header is unreadable and no format is given."""
     with open(part_path, "r+b") as f:
         head = f.read(HEADER_BYTES)
         fmt = parse_header(head)
         if fmt is None:
             if rate is None or channels is None:
-                raise ValueError("the file has no readable WAV header")
+                raise Unreadable("the file has no readable WAV header")
             fmt = (int(rate), int(channels))
         rate, channels = fmt
         align = channels * WIDTH

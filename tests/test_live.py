@@ -488,6 +488,36 @@ class LiveApiTests(Tmp):
         self.assertFalse(os.path.exists(empty))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
+    def test_an_unreadable_part_is_kept_never_deleted(self):
+        # The header is damaged and there is no sidecar: the bytes cannot be read as audio,
+        # but they may be recoverable by hand, so the file is kept under a name that says so.
+        a = self.api()
+        os.makedirs(self.lib)
+        part = os.path.join(self.lib, "Live 2026-01-01 00-00-00.wav.part")
+        audio = pcm(tone(1.0))
+        with open(part, "wb") as f:
+            f.write(b"garbage-not-a-header".ljust(44, bytes(1)) + audio)
+        self.store.set_setting(live.PARTS_SETTING, [part])
+        r = a.live_recover()
+        self.assertEqual(r["recovered"], [])
+        self.assertEqual(len(r["failed"]), 1)
+        self.assertIn("kept as Live 2026-01-01 00-00-00 (unrecovered).raw", r["failed"][0])
+        kept = os.path.join(self.lib, "Live 2026-01-01 00-00-00 (unrecovered).raw")
+        with open(kept, "rb") as f:
+            self.assertEqual(f.read()[44:], audio)                     # every byte kept
+        self.assertFalse(os.path.exists(part))
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+
+    def test_an_unreadable_part_with_no_bytes_after_the_header_is_dropped(self):
+        a = self.api()
+        os.makedirs(self.lib)
+        part = os.path.join(self.lib, "Live z.wav.part")
+        with open(part, "wb") as f:
+            f.write(b"x" * 44)
+        self.store.set_setting(live.PARTS_SETTING, [part])
+        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": []})
+        self.assertEqual(os.listdir(self.lib), [])
+
     def test_settings_are_remembered(self):
         a = self.api()
         self.assertEqual((a.live_settings()["split"], a.live_settings()["input"]), (3.0, None))
