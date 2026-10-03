@@ -153,44 +153,55 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
     return None
 
 
-CLOSE_DRAIN_TIMEOUT = 60           # seconds closing waits for the page to save a recording (its own steps are bounded too)
+CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
+CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
 _DRAIN_START_JS = "liveDrainForClose(); true"
 _DRAIN_DONE_JS = "window.__liveDrained === true"
 
 
 def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
-                       clock=time.monotonic, sleep=time.sleep):
+                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE):
     """Closing during a recording, on a worker thread: the page stops and saves it
     as Stop does (the worklet's last samples, every queued chunk, then the backend
-    finishes the file: live.js liveDrainForClose), and the window waits for that,
-    at most timeout seconds. The page is asked on a thread of its own: pywebview's
-    evaluate_js waits for the page without a time limit, so a hung page cannot hold
-    the close past the deadline. If the page did not finish in time (or is gone),
-    finalize() finishes the recording with what the backend has. Then
-    before_close() and the window closes."""
+    finishes the file: live.js liveDrainForClose). The whole close takes at most
+    timeout seconds, whatever hangs:
+    - the page is asked on a thread of its own (pywebview's evaluate_js waits for
+      the page without a time limit) and gets all but the last finalize_share of
+      the time;
+    - if it did not finish, finalize() (the backend finishing the file with what
+      has arrived) runs on a thread of its own too, until the deadline: it may wait
+      on the recording's lock or on the disk;
+    then before_close() and the window closes, finished or not. A file left
+    unfinished is a .part that the next start recovers."""
+    start = time.monotonic()
     drained = threading.Event()
-    deadline = clock() + timeout
+    page_deadline = clock() + timeout * (1 - finalize_share)
 
     def ask_page():
         try:
             window.evaluate_js(_DRAIN_START_JS)
-            while clock() < deadline:
+            while clock() < page_deadline:
                 if window.evaluate_js(_DRAIN_DONE_JS):
                     drained.set()
                     return
                 sleep(poll)
         except Exception:
             pass                                  # the page is gone
-    asker = threading.Thread(target=ask_page, name="close-drain-page", daemon=True)
+
+    def run_finalize():
+        try:
+            finalize()
+        except Exception:
+            pass
     try:
+        asker = threading.Thread(target=ask_page, name="close-drain-page", daemon=True)
         asker.start()
-        asker.join(timeout)                       # never longer, whatever the page does
-    finally:
+        asker.join(timeout * (1 - finalize_share))
         if not drained.is_set() and finalize is not None:
-            try:
-                finalize()
-            except Exception:
-                pass
+            finisher = threading.Thread(target=run_finalize, name="close-finalize", daemon=True)
+            finisher.start()
+            finisher.join(max(0.0, timeout - (time.monotonic() - start)))
+    finally:
         before_close()
         window.destroy()
 

@@ -2247,6 +2247,7 @@ window.onBackendEvent = (event, p) => {
   }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
+  if (event.startsWith("import-split-")) { liveSplitEvent(event, p); return; }                    // live.js
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;

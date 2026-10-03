@@ -20,6 +20,7 @@ const LV = {
   wave: { cols: [], min: 32768, max: -32769, n: 0, perCol: 0 },
   spec: { bins: null, last: 0, lut: null, img: null },
   raf: 0, lastStatus: 0, drawn: 0, color: "",
+  split: null,                           // an import being split after Stop: {job, text}
 };
 const LIVE_COLS_PER_SEC = 40;            // waveform and spectrogram: the same time scale, 25 ms a column
 const LIVE_CHUNK_SEC = 0.5;              // audio sent to the backend per call
@@ -323,7 +324,7 @@ function liveAudio(m) {
     rec.frames += n;
     if (rec.pendingFrames >= LV.rate * LIVE_CHUNK_SEC) queueChunk(rec);
     // Audio the backend has not taken yet, bounded: a bridge that stalls must not fill memory.
-    if (!rec.overflow && rec.queuedFrames + rec.pendingFrames > LV.rate * LIVE_MAX_QUEUE_SEC) {
+    if (!rec.overflow && rec.inflightFrames + rec.queuedFrames + rec.pendingFrames > LV.rate * LIVE_MAX_QUEUE_SEC) {
       rec.overflow = true;
       stopRecording({ reason: QUEUE_FULL, drain: false });
     }
@@ -357,7 +358,13 @@ function callWithTimeout(call, ms) {
 function liveDelay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 // The audio held so far becomes the next numbered chunk; one sender sends them in order, one at a time.
+// Once sending has ended unsuccessfully, what would be queued is counted as missing instead.
 function queueChunk(rec) {
+  if (rec.dead || rec.abandoned || rec.ended) {
+    lose(rec, rec.pendingFrames, rec.dead ? "OpenEVP stopped answering" : "");
+    rec.pending = []; rec.pendingFrames = 0;
+    return rec.sending || Promise.resolve();
+  }
   if (rec.pending.length) {
     rec.queue.push({ seq: rec.seq++, data: toBase64(rec.pending), frames: rec.pendingFrames });
     rec.queuedFrames += rec.pendingFrames;
@@ -370,18 +377,20 @@ function queueChunk(rec) {
 async function pump(rec) {
   try {
     while (rec.queue.length && !rec.ended && !rec.dead && !rec.abandoned) {
-      const c = rec.queue[0];
-      const r = await callWithTimeout(() => api().live_chunk(rec.session, c.seq, c.data), LIVE_CALL_MS);
-      rec.queue.shift();
+      const c = rec.queue.shift();                      // in flight now: no longer counted as queued
       rec.queuedFrames -= c.frames;
+      rec.inflightFrames = c.frames;
+      const r = await callWithTimeout(() => api().live_chunk(rec.session, c.seq, c.data), LIVE_CALL_MS);
+      rec.inflightFrames = 0;
       if (r.timeout) {                                  // it may or may not have arrived: counted as missing
         rec.dead = true; rec.failed = NOT_ANSWERING;
         lose(rec, c.frames, "OpenEVP stopped answering");
+        loseBacklog(rec, "OpenEVP stopped answering");
         break;
       }
-      if (!r.ok) { rec.failed = r.error; lose(rec, c.frames, r.error); break; }
+      if (!r.ok) { rec.failed = r.error; lose(rec, c.frames, r.error); loseBacklog(rec, r.error); break; }
       rec.status = r;
-      if (r.stopped) { rec.ended = true; rec.stoppedBy = r; break; }
+      if (r.stopped) { rec.ended = true; rec.stoppedBy = r; loseBacklog(rec, "the recording had stopped"); break; }
       afterChunk(rec);
     }
   } finally {
@@ -411,10 +420,6 @@ function afterChunk(rec) {
   if (rec.stoppedBy && !rec.closing) { recordingDone(rec, rec.stoppedBy.result, rec.stoppedBy.stopped); return; }
   const r = rec.status;
   if (!r) return;
-  if (LV.mode === "import") {
-    $("live-file").textContent = r.file ? `Recording ${r.file}` : "Waiting for sound…";
-    if (r.saved) $("live-file").textContent += ` · ${plural(r.saved, "file")} saved`;
-  }
   liveStatus(r.warning || "", r.warning ? "warn" : "");
 }
 
@@ -444,10 +449,10 @@ async function startRecording() {
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
-             stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false };
+             stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
-  $("live-file").textContent = r.file ? `Recording ${r.file}` : "Waiting for sound…";
+  $("live-file").textContent = `Recording ${r.file}`;
   renderLive();
   return r;
 }
@@ -477,8 +482,15 @@ async function liveMark() {
 // closes (or, after a crash, when it starts again).
 // Audio that may be missing from the end of the saved file: counted, with why, for the final message.
 function lose(rec, frames, why) {
+  if (!frames) return;
   rec.lostFrames += frames;
   if (why && !rec.losses.includes(why)) rec.losses.push(why);
+}
+
+// Sending ended unsuccessfully: every chunk still queued is missing too.
+function loseBacklog(rec, why) {
+  lose(rec, rec.queuedFrames, why);
+  rec.queue = []; rec.queuedFrames = 0;
 }
 
 // One Stop per recording: asked again (Stop clicked twice, the window closing during "Saving…"),
@@ -558,11 +570,17 @@ async function recordingDone(rec, r, reason, opts = {}) {
   let msg;
   if (!files.length) msg = LV.mode === "import" ? "Nothing was saved: no sound arrived." : "Nothing was saved.";
   else if (files.length === 1) msg = `Saved ${files[0].name} in ${r.folder}`;
-  else msg = `Saved ${plural(files.length, "recording")} in ${r.folder}` +
-             (r.whole ? `, and the whole import as ${r.whole.name}` : "");
+  else msg = `Saved ${plural(files.length, "recording")} in ${r.folder}`;
   if (files.length) msg = truncated ? `${msg}, but ${missingText} (${why}).` : `✓ ${msg}.`;
+  if (r.split) {                           // an import: split into one file per recording in the background
+    LV.split = { job: r.split.job, text: [reason, msg, ...notes].filter(Boolean).join(" ") };
+    notes.push("Splitting it into separate recordings…");
+  }
   const text = [reason, msg, ...notes].filter(Boolean).join(" ");
-  banner(text, reason || notes.length || !files.length || truncated ? "warn" : "ok");
+  if (r.split) {
+    banner(text, reason || truncated ? "warn" : "ok", { label: "Cancel splitting", run: cancelSplit });
+    progress(0, 100);
+  } else banner(text, reason || notes.length || !files.length || truncated ? "warn" : "ok");
   if (opts.open === false) return r;
   await loadLibrary();
   if (r.player && files.length) {
@@ -577,6 +595,31 @@ async function recordingDone(rec, r, reason, opts = {}) {
     banner(text, reason || notes.length || truncated ? "warn" : "ok");     // loading clears nothing, but say it last
   }
   return r;
+}
+
+// ---- an import split into one file per recording, after Stop (app/live.py _split_job) ----
+async function cancelSplit() {
+  if (!LV.split) return;
+  const r = await api().cancel_import_split(LV.split.job);
+  if (!r.ok) banner(r.error);
+}
+
+function liveSplitEvent(event, p) {
+  if (!LV.split || p.job !== LV.split.job) return;
+  if (event === "import-split-progress") {
+    progress(p.percent, 100);
+    status(`Splitting the import into separate recordings… ${p.percent}%`);
+    return;
+  }
+  LV.split = null;
+  progress(0, null);
+  status("");
+  if (event === "import-split-done") {
+    banner(p.files.length
+      ? `✓ Split ${p.full} into ${plural(p.files.length, "recording")} in ${p.folder}. The whole import is kept too.`
+      : `No gaps between recordings were found in ${p.full}, so it stays one file.`, "ok");
+  } else banner(p.error, "warn");
+  loadLibrary();
 }
 
 // ---- drawing: meter, waveform, spectrogram (animation frames only) ----

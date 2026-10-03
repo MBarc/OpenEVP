@@ -2482,7 +2482,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   Object.assign(api, {
     live_settings: async () => { lv.push(["settings"]); return liveSettings; },
     set_live_settings: async (c) => { lv.push(["set", c]); liveSettings = { ...liveSettings, ...c }; return liveSettings; },
-    live_start: async (o) => { lv.push(["start", o]); return { ok: true, session: "s1", file: o.mode === "live" ? "Live 2026-10-03 21-05-09.wav" : null, folder: "Old Mill" }; },
+    live_start: async (o) => { lv.push(["start", o]); return { ok: true, session: "s1", file: o.mode === "live" ? "Live 2026-10-03 21-05-09.wav" : "Import 2026-10-03 21-05-09 (full).wav", folder: "Old Mill" }; },
     live_chunk: async (sid, seq, data) => { lv.push(["chunk", sid, seq, data]); return chunkAnswer(seq); },
     live_mark: async (sid, at) => { lv.push(["mark", sid, at]); return { ok: true, mark: { at, file: "Live 2026-10-03 21-05-09.wav", start: Math.max(0, at - 2), end: at, cls: "C" } }; },
     live_stop: async (sid) => { lv.push(["stop", sid]); return stopAnswer; },
@@ -2626,27 +2626,67 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok($("live-gap").disabled);
   $("live-split").checked = true; $("live-split").onchange();
   $("live-folder").value = "root";
-  const FULL = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free).";
-  chunkAnswer = (seq) => (seq === 0 ? { ok: true, seconds: 0.5, piece: null, file: null, saved: 0, stopped: null }
-    : { ok: true, seconds: 1, piece: null, file: null, saved: 2, stopped: FULL,
-        result: { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0,
-                  files: [{ id: "i1", name: "Import 2026-10-03 21-05-09 (1).wav", seconds: 40, marks: 0 },
-                          { id: "i2", name: "Import 2026-10-03 21-05-09 (2).wav", seconds: 31, marks: 0 }],
-                  whole: { id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 0 } } });
+  // An import records one file; after Stop it is split in the background (progress, Cancel), and
+  // the pieces are listed when that is done.
+  chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Import 2026-10-03 21-05-09 (full).wav", stopped: null });
   const stopsBefore = lv.filter((c) => c[0] === "stop").length;
   await $("live-record").onclick();
   sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "import", folder: "root", rate: 48000, channels: 2, split: 5 });
-  assert.strictEqual($("live-file").textContent, "Waiting for sound…");
+  assert.strictEqual($("live-file").textContent, "Recording Import 2026-10-03 21-05-09 (full).wav");
   const tap3 = worklets[worklets.length - 1];
   const feed = () => { const pcm = new Int16Array(24000 * 2); tap3.port.onmessage({ data: { pcm: pcm.buffer, frames: 24000, peak: 0, sumsq: 0 } }); };
   feed(); await settle();
-  assert.strictEqual($("live-file").textContent, "Waiting for sound…");
-  feed(); await settle();                                  // the backend stopped it: a nearly full disk
-  assert.ok(!vm.runInContext("liveRecording()", context));
+  stopAnswer = { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0, split: { job: "j1" },
+                 files: [{ id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 1 }] };
+  const cancels = [];
+  api.cancel_import_split = async (job) => { cancels.push(job); return { ok: true }; };
+  await $("live-record").onclick();
+  await settle();
+  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsBefore + 1);
   assert.strictEqual($("banner-text").textContent,
-                     `${FULL} ✓ Saved 2 recordings in OpenEVP, and the whole import as Import 2026-10-03 21-05-09 (full).wav.`);
+                     "✓ Saved Import 2026-10-03 21-05-09 (full).wav in OpenEVP. Splitting it into separate recordings…");
+  assert.strictEqual($("banner-action").textContent, "Cancel splitting");
   assert.strictEqual(vm.runInContext("S.view", context), "live", "an import stays in the view");
-  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsBefore, "already finished by the backend");
+  window.onBackendEvent("import-split-progress", { job: "other", percent: 50 });     // not this import's
+  assert.notStrictEqual($("status").textContent, "Splitting the import into separate recordings… 50%");
+  window.onBackendEvent("import-split-progress", { job: "j1", percent: 40 });
+  assert.strictEqual($("status").textContent, "Splitting the import into separate recordings… 40%");
+  assert.strictEqual($("progress-fill").style.width, "40%");
+  await $("banner-action").onclick();
+  sameJSON(cancels, ["j1"]);
+  window.onBackendEvent("import-split-done", { job: "j1", folder: "OpenEVP", full: "Import 2026-10-03 21-05-09 (full).wav",
+                                               files: [{ id: "p1", name: "Import 2026-10-03 21-05-09 (1).wav" },
+                                                       { id: "p2", name: "Import 2026-10-03 21-05-09 (2).wav" }] });
+  assert.strictEqual($("banner-text").textContent,
+                     "✓ Split Import 2026-10-03 21-05-09 (full).wav into 2 recordings in OpenEVP. The whole import is kept too.");
+  assert.ok($("progress").hidden && $("status").textContent === "");
+  // No gaps found; or the split failed (cancelled): the whole file stays, and that is said.
+  for (const [event, p, text] of [
+    ["import-split-done", { files: [] }, "No gaps between recordings were found in Import x (full).wav, so it stays one file."],
+    ["import-split-failed", { cancelled: true, error: "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file." },
+     "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file."]]) {
+    vm.runInContext(`LV.split = { job: "j2", text: "" };`, context);
+    window.onBackendEvent(event, { job: "j2", folder: "OpenEVP", full: "Import x (full).wav", ...p });
+    assert.strictEqual($("banner-text").textContent, text);
+  }
+  // A backend that stops the import by itself (a nearly full disk): said, and what was saved.
+  await context.openLive();
+  await settle();
+  const FULL = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free).";
+  chunkAnswer = (seq) => (seq === 0 ? { ok: true, seconds: 0.5, file: "Import 2026-10-03 21-05-09.wav", stopped: null }
+    : { ok: true, seconds: 1, file: null, stopped: FULL,
+        result: { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                  files: [{ id: "i9", name: "Import 2026-10-03 21-05-09.wav", seconds: 1, marks: 0 }] } });
+  $("live-split").checked = false; $("live-split").onchange();
+  await $("live-record").onclick();
+  const tap4 = worklets[worklets.length - 1];
+  const feed4 = () => { const pcm = new Int16Array(24000 * 2); tap4.port.onmessage({ data: { pcm: pcm.buffer, frames: 24000, peak: 0, sumsq: 0 } }); };
+  const stopsMid = lv.filter((c) => c[0] === "stop").length;
+  feed4(); await settle();
+  feed4(); await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, `${FULL} ✓ Saved Import 2026-10-03 21-05-09.wav in OpenEVP.`);
+  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsMid, "already finished by the backend");
   // Windows blocking the microphone: said plainly, with a way to the setting.
   mics.fail = "NotAllowedError";
   await context.openInput(null);
@@ -2665,6 +2705,12 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const liveTimers = [];
   context.setTimeout = (fn, ms) => { liveTimers.push({ fn, ms }); return liveTimers.length; };
   const fireLiveTimers = async () => { const now = liveTimers.splice(0); for (const t of now) t.fn(); await settle(); };
+  const fireLiveTimersAt = async (ms) => {                 // only the timers of this length; the others stay pending
+    const now = liveTimers.filter((t) => t.ms === ms);
+    for (const t of now) liveTimers.splice(liveTimers.indexOf(t), 1);
+    for (const t of now) t.fn();
+    await settle();
+  };
   const stalled = [];                                     // chunk calls that never answer
   const stallingChunks = async (sid, seq) => { stalled.push(seq); return new Promise(() => {}); };
   // 1. The backend never answers a chunk: after 10 s of audio waiting, recording stops with a clear
@@ -2695,7 +2741,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(stops, 1);
   assert.ok(!vm.runInContext("liveRecording()", context));
   assert.strictEqual($("banner-text").textContent, `${vm.runInContext("QUEUE_FULL", context)} Saved Live 2026-10-03 21-07-00.wav ` +
-                     "in OpenEVP, but the last 11 seconds may be missing (it could not be saved fast enough; OpenEVP stopped answering).");
+                     "in OpenEVP, but the last 10.5 seconds may be missing (it could not be saved fast enough; OpenEVP stopped answering).");
   assert.strictEqual($("banner").className, "", "a warning, never a green tick");
   // 2. The backend stops answering: a call that takes too long ends the recording; Stop itself
   //    is bounded too, and says the file is finished when OpenEVP closes or starts again.
@@ -2752,13 +2798,16 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   const stoppingV = $("live-record").onclick();
   await settle();
-  await fireLiveTimers();                                  // the call in flight times out, and the drain's wait too
-  await fireLiveTimers();
+  // Only the call in flight times out (15 s); the drain's own 30 s limit is not reached. 2 s were
+  // never saved (the chunk in flight and three queued): the warning says 2 s, not 0.5 s.
+  await fireLiveTimersAt(vm.runInContext("LIVE_CALL_MS", context));
   await stoppingV;
   await settle();
+  assert.ok(liveTimers.some((t) => t.ms === vm.runInContext("LIVE_DRAIN_MS", context)), "the drain limit never fired");
   assert.ok(!vm.runInContext("liveRecording()", context));
-  assert.ok(/^Saved Live 2026-10-03 21-09-00\.wav in OpenEVP, but the last 2 seconds may be missing \(OpenEVP stopped answering/
-            .test($("banner-text").textContent), $("banner-text").textContent);
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-09-00.wav in OpenEVP, but the last 2 seconds " +
+                     "may be missing (OpenEVP stopped answering).");
+  liveTimers.length = 0;
   // 5. Stop pressed twice, and the window closing during "Saving…": one Stop, and closing waits for it.
   await context.openLive();
   await settle();
