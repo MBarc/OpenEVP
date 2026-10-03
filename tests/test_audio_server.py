@@ -500,6 +500,27 @@ class SameFileTests(unittest.TestCase):
         with self.s.open_audio(info["url"]) as f:
             self.assertEqual(f.read(), original)
 
+    def test_loading_a_replaced_file_without_identity_again_plays_the_new_audio(self):
+        """Same path, size and time but other audio, loaded again on purpose: a new
+        copy of what is there now, never the earlier copy; the earlier one goes."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with mock.patch.object(audio_server, "_ident_of", return_value=None):
+            first = self.s.prepare_file(path)
+            other = os.path.join(self.mine, "other.wav")
+            self.same_size_and_time(other, path)
+            with open(other, "rb") as f:
+                replaced = f.read()
+            os.replace(other, path)
+            again = self.s.prepare_file(path)
+        self.assertNotEqual(again["url"], first["url"])
+        self.assertNotEqual(again["fp"], first["fp"])
+        with urllib.request.urlopen(again["url"], timeout=5) as r:
+            self.assertEqual(r.read(), replaced)
+        with self.assertRaises(ValueError):
+            self.s.open_audio(first["url"])                  # the earlier copy is gone
+        self.assertEqual(len(os.listdir(self.cache)), 1)
+
     def test_without_usable_identity_means_no_file_id_or_no_volume_serial(self):
         import types
         self.assertIsNone(audio_server._ident_of(types.SimpleNamespace(st_dev=7, st_ino=0)))

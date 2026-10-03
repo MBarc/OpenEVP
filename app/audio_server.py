@@ -403,13 +403,20 @@ class AudioServer:
         """prepare_file() for a file with no usable identity (f: it, open; stat:
         its (size, mtime_ns)): a private copy of it in the cache, made from the
         open file and served like a decode, so nothing put at its path later can
-        be served in its place. ValueError when it changed while being copied."""
+        be served in its place. ValueError when it changed while being copied.
+        Every load makes a copy of its own (a fresh key): with no identity, the
+        same path, size and time say nothing about the audio, so an earlier copy
+        is never reused. Earlier copies of the same path go at once, except one
+        pinned (still playing until the player moves on), which the usual
+        eviction takes later."""
         def write(out):
             f.seek(0)
             shutil.copyfileobj(f, out, 1 << 20)
             if _stat_of(os.fstat(f.fileno())) != stat:
                 raise ValueError("the file changed while it was being read; try again")
-        info = self.prepare(("copy", os.path.normcase(path), *stat), write=write, expected=stat[0])
+        prefix = ("copy", os.path.normcase(path))
+        info = self.prepare((*prefix, *stat, secrets.token_hex(8)), write=write, expected=stat[0])
+        self.drop_versions(prefix, [info["url"]])
         return {**info, "stat": stat}
 
     def _info(self, e):
