@@ -53,7 +53,7 @@ class WavPart:
     """One WAV being written. write() takes whole frames of 16-bit little-endian
     PCM (interleaved when stereo); close() returns (frames, fingerprint)."""
 
-    def __init__(self, path, rate, channels, header_every=HEADER_EVERY, max_data=MAX_DATA):
+    def __init__(self, path, rate, channels, header_every=HEADER_EVERY, max_data=None):
         if channels not in (1, 2) or not 1000 <= rate <= 384000:
             raise ValueError("unsupported audio format")
         self.path = path
@@ -61,6 +61,7 @@ class WavPart:
         self.channels = channels
         self.align = channels * WIDTH
         self.data_bytes = 0
+        max_data = MAX_DATA if max_data is None else max_data
         self._max = max_data - max_data % self.align
         self._every = max(self.align, int(header_every * rate) * self.align)
         self._synced = 0

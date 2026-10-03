@@ -156,6 +156,7 @@ class _Session:
         self.problems = []
         self.dropped_marks = 0
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
+        self.full = False                        # the file being written reached livewav.MAX_DATA
         self.done = False
         self.splitter = None
         if mode == "import" and split:
@@ -177,7 +178,12 @@ class _Session:
         self.piece = piece
 
     def write(self, data):
-        self.piece.writer.write(data)
+        if self.full:
+            return
+        try:
+            self.piece.writer.write(data)
+        except livewav.Full:                     # 4 GB: the rest is dropped and the recording stops
+            self.full = True
 
     def end(self):
         piece, self.piece = self.piece, None
@@ -409,10 +415,10 @@ class LiveOps:
                 return self._live_end(s, STOPPED_DISK)
             try:
                 s.feed(pcm)
-            except livewav.Full:
-                return self._live_end(s, STOPPED_SIZE)
             except OSError as e:
                 return self._live_end(s, f"Recording stopped: the file could not be written ({_plain(e)}).")
+            if s.full:
+                return self._live_end(s, STOPPED_SIZE)
             out = s.status()
             left = None
             if free is not None:

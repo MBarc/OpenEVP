@@ -378,6 +378,17 @@ class LiveApiTests(Tmp):
             r = a.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 1})
         self.assertEqual(r["error"], live.NO_SPACE)
 
+    def test_a_file_reaching_4_gb_stops_and_is_saved(self):
+        a = self.api()
+        with mock.patch.object(livewav, "MAX_DATA", 3 * RATE * 2):        # 3 s of 8 kHz mono stands in for 4 GB
+            sid = self.start(a)["session"]
+            self.send(a, sid, tone(2.0), 0)
+            r = a.live_chunk(sid, 1, base64.b64encode(pcm(tone(2.0))).decode())
+        self.assertEqual(r["stopped"], live.STOPPED_SIZE)
+        f = r["result"]["files"][0]
+        self.assertEqual(f["seconds"], 2.0)                               # the chunk that did not fit is left out
+        self.assertFalse(a.recording())
+
     def test_a_second_window_cannot_record_and_bad_settings_are_refused(self):
         a = self.api()
         for bad in ({"mode": "x", "rate": RATE, "channels": 1}, {"mode": "live", "rate": 100, "channels": 1},
