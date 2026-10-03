@@ -230,27 +230,35 @@ get their recordings onto the PC by playing them into it.
 5. Click **● Record** first, then press Play on the recorder, and let it play
    through. Click **■ Stop** when it's done.
 
-With **Split into separate recordings at 3 seconds of silence** ticked (the
-default), the import is recorded as one file, `Import 2026-10-03 21-05-09 (full).wav`.
-Shortly after you press Stop, OpenEVP goes through it and saves one file per
-recording beside it, wherever the recorder went quiet for 3 seconds:
-`Import 2026-10-03 21-05-09 (1).wav`, `(2)` and so on. The banner shows how far
-it has got, with a button to cancel. The whole import is always kept, so if it
-ever splits in the wrong place, nothing is lost. Nothing is cut out either: the
-quiet between two recordings stays at the end of the first file, and the next
-one starts half a second before its sound. If it finds no gaps, it says so and
-the import stays one file. You can change the 3 seconds, or untick it to keep
-the import as one plain file.
+With **Suggest cuts at 3 seconds of silence** ticked (the default), the import
+is recorded as one file, `Import 2026-10-03 21-05-09 (full).wav`, and when you
+press Stop it opens in the player. A moment later, OpenEVP shows where it
+thinks one recording ends and the next begins: red ✂ marks on the waveform,
+and a bar under it listing them.
 
-How it tells a gap from a pause: it looks at the whole import at once and finds
-the quietest level the input settles at, which is the cable's hiss while the
+- Click ✕ on a cut in the bar (or click its mark on the waveform) to remove it.
+- To add a cut, click the waveform where you want it, so the play cursor is
+  there, then click **✂ Add cut here**.
+- When the cuts look right, click **Split into N recordings**. OpenEVP saves one
+  file per part beside the import: `Import 2026-10-03 21-05-09 (1).wav`, `(2)`
+  and so on. The banner shows how far it has got, with a button to cancel.
+- Or click **Keep as one** to leave it as it is.
+
+Nothing is ever split until you say so, and the whole import is always kept,
+so a cut in the wrong place costs nothing. Nothing is cut out either: put the
+parts back to back and you have exactly the import. You can change the 3
+seconds, or untick it to keep the import as one plain file with no
+suggestions.
+
+How it finds the gaps: it looks at the whole import at once and finds the
+quietest level the input settles at, which is the cable's hiss while the
 recorder plays nothing. Only quiet at that level, between two recordings, is a
 gap. A recording's own background (room noise, hiss) is louder than that, so
-pauses inside a recording never split it. When it can't tell, it doesn't
-split. A short click when you press a button doesn't get a file of its own.
+pauses inside a recording aren't suggested. When it can't tell, it suggests
+nothing, and you can add cuts yourself.
 
 Marks work here too: press **M** and the mark goes into the import, and into
-whichever recording's file it falls in once it's split.
+whichever part it falls in once it's split.
 
 ## Opening WAV and MP3 files
 

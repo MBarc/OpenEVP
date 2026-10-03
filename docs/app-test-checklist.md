@@ -313,13 +313,15 @@ test opens a real input):
     3.5 mm adapter) or any recorder, into a USB adapter's line or mic input.
     **Import from a recorder**, the guide is shown; volume at about the middle,
     meter out of the red. Record first, then play three recordings back to
-    back, then Stop: `Import <date> <time> (full).wav` is saved at once, and a
-    few seconds later (the banner shows progress) three files
-    `Import <date> <time> (1).wav`, `(2)`, `(3)`, each starting just before its
-    sound, each gap at the end of the file before it, none split in the middle of
-    a pause inside a recording. Untick the split: one file. Set 10 s: recordings
-    with shorter gaps stay together. Start another import and click **Cancel
-    splitting** while it splits: only the full file remains, and the banner says so.
+    back, then Stop: `Import <date> <time> (full).wav` opens in the player and,
+    a moment later, red ✂ marks appear between the recordings, half a second
+    before each one's sound, none in the middle of a pause inside a recording.
+    Remove one (✕), add one at the play cursor (**✂ Add cut here**), click a mark
+    to remove it, then **Split into N recordings**: the parts appear in the
+    library, each starting where its cut was. Another import: **Keep as one**
+    leaves only the full file. Another: click **Cancel splitting** while it
+    splits: only the full file remains, and the banner says so. Untick
+    **Suggest cuts**: one plain file, no suggestions.
 51. **An hour-long session.** Record live for 60+ minutes at 48 kHz: the
     waveform and spectrogram keep scrolling smoothly to the end; Task Manager
     shows OpenEVP's (and its WebView2 processes') CPU low and memory flat after
@@ -343,8 +345,12 @@ test opens a real input):
     seconds and the saved file ends with what you said (nothing cut off). Try
     renaming the recording's folder in File Explorer during a recording: Windows
     refuses; after Stop it works.
-56. **Import, whole input.** After an import split on silence, the full file is
-    as long as the three together and has the marks made while importing; each
-    piece has the marks that fall in it; playing the three back to back sounds
-    exactly like the full one. Import an hour from a recorder: the pieces appear
-    within a minute or so of Stop.
+56. **Import, whole input.** After a split, the full file is as long as the
+    parts together and has the marks made while importing; each part has the
+    marks that fall in it; playing the parts back to back sounds exactly like the
+    full one. Import an hour from a recorder: the suggestions appear within a few
+    seconds of Stop, and the split within a minute or so.
+57. **Closing during a split.** Start a split of a long import and close
+    OpenEVP: it closes within a few seconds; the full file is there, no
+    half-written parts are left (after the next start), and nothing hangs in
+    Task Manager.

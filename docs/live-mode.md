@@ -104,8 +104,9 @@ page:  batches -> meter + waveform columns; while recording, ~0.5 s of PCM ->
        base64 -> a queue -> one sender: Api.live_chunk(session, seq, data)
 backend (app/live.py): seq checked, base64 decoded, disk space checked,
        -> WavPart (.part): one file, for Live and Import alike
-after Stop (an import with a silence gap set): a background job splits the file
-       (openevp.silence, one pass over the whole file) into one WAV per recording
+after Stop (an import with a silence gap set): it opens in the player with
+       suggested cuts (openevp.silence, one pass over the whole file, in the
+       background); the user edits and confirms them; a job writes one WAV per part
 ```
 
 **Bounds on the page** (`live.js`):
@@ -139,6 +140,11 @@ after Stop (an import with a silence gap set): a background job splits the file
   the next start recovers.
 - The backend finishes a session that gets no chunk or mark for 60 s (the page
   is gone or stuck), so its file is not left open until the app closes.
+- **Events never wait for the page.** `evaluate_js` has no time limit, so no
+  worker calls it: `Api`'s emit posts to `app/events.py`'s dispatcher (a queue,
+  bounded, progress dropped first) and one daemon thread delivers events in
+  order. Closing tells the import jobs to stop and waits for them at most 10 s
+  in all; the dispatcher is closed with a 1 s bound.
 
 Drawing runs on animation frames at most 30 times a second and only scrolls
 what is already drawn (`globalCompositeOperation = "copy"` for the shift: a
@@ -198,56 +204,68 @@ the millisecond: the store refuses a mark past the end). When an import is
 split, each piece gets the marks of the whole file that end in it, at its own
 times (a mark starting before the piece is cut at its start).
 
-## Splitting an import on silence (`openevp/silence.py`, `LiveOps._split_job`)
+## Splitting an import: suggested cuts, confirmed by the user
 
-An import is recorded as one file, exactly as Live mode records. After Stop,
-with a silence gap set, a background job (registered with the workers, so
-closing waits for it to stop) splits it. Splitting while recording was dropped
-after three reviews: a streaming splitter could not know the true floor in
-advance (a later quiet stretch redefined it), and its evidence checks grew
-quadratic over a long import. Looking at the whole file at once fixes both.
+An import is recorded as one file, exactly as Live mode records. After four
+review rounds on automatic splitting (a streaming splitter, then an automatic
+offline one, each with corner cases), the ruling was to put the user in the
+loop: OpenEVP **suggests** cuts and never splits without confirmation.
+
+**After Stop** (`LiveOps._suggest_job`, in the background): the import opens in
+the player at once; `openevp.silence.plan` looks for the gaps and the page
+draws each suggested cut as a marker on the waveform (`live.js` showCuts), with
+a bar under it: each cut as a chip (✕ removes it; clicking the marker removes it
+too), **✂ Add cut here** (at the play cursor; at least 0.5 s from the ends and
+from other cuts), **Split into N recordings** and **Keep as one**.
+
+**The split** (`Api.split_import(rec, cuts)`, then `LiveOps._split_job`): the
+confirmed cut list, checked (sorted, inside the file, parts at least 0.5 s, at
+most 500 cuts), for the recording in the player (a WAV inside the library; its
+fingerprint is checked again before reading). Each part is written to a `.part`
+listed in `live_parts` with a `"derived": true` sidecar (a crash leaves nothing
+to finish: the next start deletes them); only when all are written does each
+get its name (`<stem without " (full)"> (n).wav`), the marks that end in it (at
+its own times; a mark starting before the part is cut at its start) and its
+fingerprint in the index. The parts put together are the whole file, sample for
+sample, and **the whole file is always kept**. Cancelled (**Cancel splitting**),
+failed, or the app closing: the parts written so far are deleted and the page
+is told. Progress comes as `import-split-progress`, the result as
+`import-split-done` / `import-split-failed`.
+
+**Job ids and events.** A job is registered before its thread starts. Its id
+reaches the page with the answer (Stop's `suggest`, `split_import`'s `job`),
+which can come after the job's first events: the page keeps events of jobs it
+does not know yet (`LV.jobEvents`, the last 20 jobs) and replays them when the
+job is registered, so a fast job never leaves a stale "Splitting…".
+
+**Suggestions** (`openevp/silence.py`), simple and conservative, linear in the
+length of the file (prefix counts, no percentile per candidate; thousands of
+candidates take milliseconds), cancellable throughout:
 
 1. **Levels:** one pass reads the file in chunks and computes the RMS (dBFS) of
-   every 50 ms block (`file_levels`).
-2. **Floor:** every whole second whose block levels are steady (10th-90th
-   percentile within 6 dB) gives its median; the floor is the 10th percentile of
-   those medians over the entire file, fixed before any decision (-100 dBFS at
-   the lowest).
-3. **Gaps:** runs of blocks at the floor (within 4 dB) lasting at least the gap
-   setting (default 3 s, 0.5-60), with sound (more than 8 dB above the floor)
-   before and after them. Quiet at the start and the end is never a gap. A click
-   between two stretches at the floor (under 1 s of sound) does not break the
-   gap; it stays at the end of the piece before.
-4. **Cuts:** each new piece starts 0.5 s before its first sound (never before
-   its gap starts), so the gap stays at the end of the piece before it.
-5. **Evidence per piece:** a piece (its content, from its first sound up to its
-   gap) is kept only with at least 1 s of sound and its own quiet level (20th
-   percentile) at least 8 dB above the floor. A recording whose pauses sit at
-   the floor (no line hiss between recordings to tell them apart) is never cut
-   at those pauses; a piece without the evidence joins the next one. When in
-   doubt, no cut.
-
-All of this is linear in the length of the file (an hour of 8 kHz audio is
-planned in about a second here).
-
-The pieces are written from the whole file to `.part` files, listed in
-`live_parts` with a `"derived": true` sidecar (a crash leaves nothing to finish:
-the next start deletes them), and only when all are written does each get its
-name, its marks and its fingerprint in the index. The pieces put together are
-the whole file, sample for sample, and **the whole file is always kept**, so a
-bad split costs nothing. Cancelled (the banner's **Cancel splitting**), failed,
-or the app closing: the pieces written so far are deleted and the page is told
-(`import-split-failed`); no gaps found: the page is told the import stays one
-file. Progress comes as `import-split-progress` (reading the levels is the first
-half, writing the pieces the second), the result as `import-split-done`.
-
-While an import is being split, Record, the library's folder operations and
-updates wait (`_live_busy`), the destination folders are held (`folders.Pins`)
-and checked again before each piece, and splitting needs free space for the
-pieces plus the 500 MB reserve.
+   every 50 ms block.
+2. **Floor:** every steady second (10th-90th percentile within 6 dB) gives its
+   median; the floor is the 10th percentile of those medians over the file.
+3. **Background:** the most common median (to the dB) of the steady seconds
+   more than 8 dB above the floor: the level the recordings sit at between their
+   sounds. No background, or no content more than 8 dB above it: no suggestion.
+4. **Gaps:** runs of blocks at the floor (within 4 dB), at least the gap
+   setting long (default 3 s), with sound (more than 8 dB above the floor) before
+   and after. Two runs are one gap only when what is between them is under
+   0.5 s in all, under 20% of the merged span, and under 1 s of sound (a click
+   or a dip; eight seconds just above the floor never are). Quiet at the start
+   and the end is never a gap.
+5. **Cuts:** 0.5 s before the next sound (never before the gap starts).
+6. **Evidence per piece:** its content (from its first sound up to its gap) must
+   have at least 1 s of sound, at least 20% at the background, and under 20% at
+   the floor; otherwise it joins the next piece. A recording whose pauses sit at
+   the floor, or that is all loud with no background of its own, gets no cut.
 
 ## While recording
 
+- While cuts are being looked for in an import, or it is being split, Record,
+  the library's folder operations and updates wait (`_live_busy`), and the
+  split holds the folders (`folders.Pins`) and checks them again before each part.
 - One session at a time; it needs the writable store (a second window cannot
   record).
 - The folders from the library folder down to the destination are held open
@@ -294,17 +312,21 @@ report without a good `live` section.
 - `tests/test_live.py`:
   - the writer: incremental writes, header rewrites, never overwriting, the
     size limit, recovery of a cut-off `.part`, an unreadable one kept;
-  - the splitter on synthetic signals: recordings with gaps, a gap of exactly
+  - the suggestions on synthetic signals: recordings with gaps, a gap of exactly
     the setting (its pre-roll), hiss only and quiet at the ends, pauses shorter
-    than the gap, a recording whose pauses sit at the floor, Astra's third case
-    (a split only at the true floor), quiet that is not the floor, a click in a
-    gap, a longer gap setting, stereo, digital silence, and an hour-long file
-    planned in seconds;
+    than the gap, a recording whose pauses sit at the floor, Astra's third and
+    fourth-pass cases (a first long floor-level pause between loud passages,
+    dips around a long near-floor passage), quiet that is not the floor, a click
+    in a gap, a longer gap setting, stereo, digital silence, an hour-long file
+    planned in seconds, thousands of rejected candidates in well under a
+    second, and cancellation;
   - the backend: placement, names, marks after finishing (also at the last
-    sample), the player result and its failure, Clips refused, an import split
-    after Stop (pieces put together equal the whole file, marks in the right
-    piece, no gaps, cancelled, folder moved, half-written pieces deleted at the
-    next start), the disk-space and 4 GB stops, a second
+    sample), the player result and its failure, Clips refused, an import with
+    suggested cuts and a split only when confirmed (parts put together equal the
+    whole file, marks in the right part, the user's own cuts, bad cut lists, keep
+    as one, no gaps, cancelled, folder moved, half-written parts deleted at the
+    next start, the job id registered before its thread, shutdown with a blocked
+    page and with a job stuck in its emit), the disk-space and 4 GB stops, a second
     window, folder operations and updates waiting (both directions), the
     destination held and re-checked, closing saves, an idle session finished,
     crash recovery (a cut-off `.part`, a crash between rename and marks, a
@@ -315,8 +337,9 @@ report without a good `live` section.
 - `tests/ui_check.js`: the view, the input found again by name, raw-input
   constraints, folder choice, Listen with Enhance, record / stop states, the
   chunk bytes, the flushed tail saved on Stop, M, the player opening and its
-  failure, Import with its settings, guide, the split's progress, Cancel and
-  results, a
+  failure, Import with its settings and guide, the suggested cuts (markers,
+  remove, add, refuse one too close, confirm, keep as one, events before the job
+  is known), the split's progress, Cancel and results, Astra's drain case, a
   backend-initiated stop, a stalled bridge (bounded queue, timeouts, Stop
   bounded), a worklet that never answers its flush, Windows blocking the
   microphone, recovery messages.
