@@ -2694,7 +2694,9 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   assert.strictEqual(stops, 1);
   assert.ok(!vm.runInContext("liveRecording()", context));
-  assert.strictEqual($("banner-text").textContent, `${vm.runInContext("QUEUE_FULL", context)} ✓ Saved Live 2026-10-03 21-07-00.wav in OpenEVP.`);
+  assert.strictEqual($("banner-text").textContent, `${vm.runInContext("QUEUE_FULL", context)} Saved Live 2026-10-03 21-07-00.wav ` +
+                     "in OpenEVP, but the last 11 seconds may be missing (it could not be saved fast enough; OpenEVP stopped answering).");
+  assert.strictEqual($("banner").className, "", "a warning, never a green tick");
   // 2. The backend stops answering: a call that takes too long ends the recording; Stop itself
   //    is bounded too, and says the file is finished when OpenEVP closes or starts again.
   await context.openLive();
@@ -2719,7 +2721,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   const sentNow = [];
   api.live_chunk = async (sid, seq, data) => { sentNow.push(seq); return { ok: true, seconds: 1, file: "x", saved: 0, stopped: null }; };
-  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] });
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "u1", name: "Live 2026-10-03 21-08-00.wav", seconds: 0.1, marks: 0 }] });
   await $("live-record").onclick();
   const tapU = worklets[worklets.length - 1];
   tapU.port.manual = true;
@@ -2733,6 +2736,54 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await settle();
   assert.ok(!vm.runInContext("liveRecording()", context));
   assert.deepStrictEqual(sentNow, [0], "what was held was still sent");
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-08-00.wav in OpenEVP, but the last moment " +
+                     "(under a tenth of a second) may be missing (the capture did not hand over its last samples).");
+  // 4. A chunk call times out while a manual Stop drains: the saved file may lack its end, and
+  //    the message says so (never "✓ Saved").
+  await context.openLive();
+  await settle();
+  stalled.length = 0;
+  api.live_chunk = stallingChunks;
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "v1", name: "Live 2026-10-03 21-09-00.wav", seconds: 0.5, marks: 0 }] });
+  await $("live-record").onclick();
+  const tapV = worklets[worklets.length - 1];
+  for (let i = 0; i < 4; i++) tapV.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  const stoppingV = $("live-record").onclick();
+  await settle();
+  await fireLiveTimers();                                  // the call in flight times out, and the drain's wait too
+  await fireLiveTimers();
+  await stoppingV;
+  await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.ok(/^Saved Live 2026-10-03 21-09-00\.wav in OpenEVP, but the last 2 seconds may be missing \(OpenEVP stopped answering/
+            .test($("banner-text").textContent), $("banner-text").textContent);
+  // 5. Stop pressed twice, and the window closing during "Saving…": one Stop, and closing waits for it.
+  await context.openLive();
+  await settle();
+  let stopCalls = 0;
+  api.live_chunk = async () => ({ ok: true, seconds: 1, file: "x", saved: 0, stopped: null });
+  api.live_stop = async () => { stopCalls++; return { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                                      files: [{ id: "w1", name: "Live 2026-10-03 21-10-00.wav", seconds: 0.1, marks: 0 }] }; };
+  await $("live-record").onclick();
+  const tapW = worklets[worklets.length - 1];
+  tapW.port.manual = true;
+  tapW.port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  const stopA = context.stopRecording();
+  const stopB = context.stopRecording();
+  const closing = context.liveDrainForClose();
+  await settle();
+  assert.strictEqual(stopA, stopB, "the same Stop");
+  assert.strictEqual(window.__liveDrained, false, "closing waits while Stop is still saving");
+  const flushId = tapW.port.posted.filter((m) => m.flush !== undefined).pop().flush;
+  tapW.port.onmessage({ data: { pcm: new Int16Array(200).fill(5).buffer, frames: 100, peak: 0, sumsq: 0 } });   // its tail
+  tapW.port.onmessage({ data: { flushed: flushId } });
+  await closing;
+  await settle();
+  assert.strictEqual(window.__liveDrained, true);
+  assert.strictEqual(stopCalls, 1);
+  assert.strictEqual(tapW.port.posted.filter((m) => m.flush !== undefined).length, 1, "one flush");
   context.setTimeout = () => 0;
   $("live-close").onclick();
   await settle();

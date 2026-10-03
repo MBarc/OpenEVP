@@ -374,8 +374,12 @@ async function pump(rec) {
       const r = await callWithTimeout(() => api().live_chunk(rec.session, c.seq, c.data), LIVE_CALL_MS);
       rec.queue.shift();
       rec.queuedFrames -= c.frames;
-      if (r.timeout) { rec.dead = true; rec.failed = NOT_ANSWERING; break; }
-      if (!r.ok) { rec.failed = r.error; break; }
+      if (r.timeout) {                                  // it may or may not have arrived: counted as missing
+        rec.dead = true; rec.failed = NOT_ANSWERING;
+        lose(rec, c.frames, "OpenEVP stopped answering");
+        break;
+      }
+      if (!r.ok) { rec.failed = r.error; lose(rec, c.frames, r.error); break; }
       rec.status = r;
       if (r.stopped) { rec.ended = true; rec.stoppedBy = r; break; }
       afterChunk(rec);
@@ -439,7 +443,8 @@ async function startRecording() {
   if (!r.ok) { liveStatus([r.error, r.advice].filter(Boolean).join(" "), "warn"); return r; }
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
-             overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null };
+             overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
+             stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
   $("live-file").textContent = r.file ? `Recording ${r.file}` : "Waiting for sound…";
@@ -470,20 +475,39 @@ async function liveMark() {
 // queue overflowed or the bridge stopped answering): what is queued is dropped and the backend
 // finishes what it has. If the backend does not answer at all, its file is finished when OpenEVP
 // closes (or, after a crash, when it starts again).
-async function stopRecording(opts = {}) {
+// Audio that may be missing from the end of the saved file: counted, with why, for the final message.
+function lose(rec, frames, why) {
+  rec.lostFrames += frames;
+  if (why && !rec.losses.includes(why)) rec.losses.push(why);
+}
+
+// One Stop per recording: asked again (Stop clicked twice, the window closing during "Saving…"),
+// it is the same Stop, and whoever asks waits for it to finish.
+function stopRecording(opts = {}) {
   const rec = LV.rec;
-  if (!rec || rec.closing) return null;
+  if (!rec) return Promise.resolve(null);
+  if (!rec.stopPromise) rec.stopPromise = runStop(rec, opts);
+  return rec.stopPromise;
+}
+
+async function runStop(rec, opts) {
   rec.closing = true;
   renderLive();
   liveStatus("Saving…");
   const drain = opts.drain !== false && !rec.dead;
-  if (drain && !rec.ended) await flushWorklet(LIVE_FLUSH_MS);   // batches still arrive until its answer
+  if (drain && !rec.ended && !await flushWorklet(LIVE_FLUSH_MS)) {  // batches still arrive until its answer
+    rec.tailUnknown = true;                                       // the worklet's last samples never came
+  }
   rec.stopping = true;                                            // from here on nothing more is taken
   if (drain && !rec.ended) {
     queueChunk(rec);
-    if (!await drained(rec, LIVE_DRAIN_MS)) rec.abandoned = true;
+    if (!await drained(rec, LIVE_DRAIN_MS)) {
+      rec.abandoned = true;
+      lose(rec, rec.queuedFrames + rec.pendingFrames, "saving the last of it took too long");
+    }
   } else {
     rec.abandoned = true;
+    lose(rec, rec.queuedFrames + rec.pendingFrames, rec.overflow ? "it could not be saved fast enough" : "");
     rec.queue = []; rec.queuedFrames = 0; rec.pending = []; rec.pendingFrames = 0;
     if (rec.sending) await Promise.race([rec.sending, liveDelay(LIVE_CALL_MS)]);
   }
@@ -514,18 +538,31 @@ async function recordingDone(rec, r, reason, opts = {}) {
   renderLive();
   liveStatus("");
   $("live-file").textContent = "";
-  if (!r || !r.ok) { banner(`The recording could not be saved: ${(r && r.error) || "unknown error"}`); return r; }
+  const missing = rec.lostFrames / LV.rate + (rec.tailUnknown ? 2048 / LV.rate : 0);
+  const truncated = missing > 0 ? { seconds: Math.round(missing * 10) / 10, reasons: rec.losses.slice(),
+                                    tail: !!rec.tailUnknown } : null;
+  const missingText = !truncated ? "" : rec.lostFrames
+    ? `the last ${Math.max(0.1, Math.ceil(missing * 10) / 10)} seconds may be missing` : "the last moment (under a tenth of a second) may be missing";
+  const why = truncated ? [...rec.losses, ...(rec.tailUnknown ? ["the capture did not hand over its last samples"] : [])]
+    .filter(Boolean).join("; ") : "";
+  if (!r || !r.ok) {
+    banner(`The recording could not be saved: ${(r && r.error) || "unknown error"}` +
+           (truncated ? ` Also, ${missingText} (${why}).` : ""));
+    return r && { ...r, truncated };
+  }
+  r = { ...r, truncated };
   const files = r.files || [];
   const notes = [...(r.problems || [])];
   if (r.dropped_marks) notes.push(`${plural(r.dropped_marks, "mark")} fell outside the saved audio and were left out.`);
   if (r.player_error) notes.push(`It could not be opened in the player (${r.player_error.replace(/[.\s]+$/, "")}); find it in the EVP Library.`);
   let msg;
   if (!files.length) msg = LV.mode === "import" ? "Nothing was saved: no sound arrived." : "Nothing was saved.";
-  else if (files.length === 1) msg = `✓ Saved ${files[0].name} in ${r.folder}.`;
-  else msg = `✓ Saved ${plural(files.length, "recording")} in ${r.folder}` +
-             (r.whole ? `, and the whole import as ${r.whole.name}.` : ".");
+  else if (files.length === 1) msg = `Saved ${files[0].name} in ${r.folder}`;
+  else msg = `Saved ${plural(files.length, "recording")} in ${r.folder}` +
+             (r.whole ? `, and the whole import as ${r.whole.name}` : "");
+  if (files.length) msg = truncated ? `${msg}, but ${missingText} (${why}).` : `✓ ${msg}.`;
   const text = [reason, msg, ...notes].filter(Boolean).join(" ");
-  banner(text, reason || notes.length || !files.length ? "warn" : "ok");
+  banner(text, reason || notes.length || !files.length || truncated ? "warn" : "ok");
   if (opts.open === false) return r;
   await loadLibrary();
   if (r.player && files.length) {
@@ -537,7 +574,7 @@ async function recordingDone(rec, r, reason, opts = {}) {
     S.playing = `lib|${files[0].id}`;
     scheduleLibraryRender();
     await loadIntoPlayer(seq, files[0].name, r.player, false);
-    banner(text, reason || notes.length ? "warn" : "ok");     // loading clears nothing, but say it last
+    banner(text, reason || notes.length || truncated ? "warn" : "ok");     // loading clears nothing, but say it last
   }
   return r;
 }
