@@ -2601,7 +2601,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     : { ok: true, seconds: 1, piece: null, file: null, saved: 2, stopped: FULL,
         result: { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0,
                   files: [{ id: "i1", name: "Import 2026-10-03 21-05-09 (1).wav", seconds: 40, marks: 0 },
-                          { id: "i2", name: "Import 2026-10-03 21-05-09 (2).wav", seconds: 31, marks: 0 }] } });
+                          { id: "i2", name: "Import 2026-10-03 21-05-09 (2).wav", seconds: 31, marks: 0 }],
+                  whole: { id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 0 } } });
   const stopsBefore = lv.filter((c) => c[0] === "stop").length;
   await $("live-record").onclick();
   sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "import", folder: "root", rate: 48000, channels: 2, split: 5 });
@@ -2612,7 +2613,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("live-file").textContent, "Waiting for sound…");
   feed(); await settle();                                  // the backend stopped it: a nearly full disk
   assert.ok(!vm.runInContext("liveRecording()", context));
-  assert.strictEqual($("banner-text").textContent, `${FULL} ✓ Saved 2 recordings in OpenEVP.`);
+  assert.strictEqual($("banner-text").textContent,
+                     `${FULL} ✓ Saved 2 recordings in OpenEVP, and the whole import as Import 2026-10-03 21-05-09 (full).wav.`);
   assert.strictEqual(vm.runInContext("S.view", context), "live", "an import stays in the view");
   assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsBefore, "already finished by the backend");
   // Windows blocking the microphone: said plainly, with a way to the setting.

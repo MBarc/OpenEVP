@@ -427,7 +427,8 @@ async function recordingDone(rec, r, reason, opts = {}) {
   let msg;
   if (!files.length) msg = LV.mode === "import" ? "Nothing was saved: no sound arrived." : "Nothing was saved.";
   else if (files.length === 1) msg = `✓ Saved ${files[0].name} in ${r.folder}.`;
-  else msg = `✓ Saved ${plural(files.length, "recording")} in ${r.folder}.`;
+  else msg = `✓ Saved ${plural(files.length, "recording")} in ${r.folder}` +
+             (r.whole ? `, and the whole import as ${r.whole.name}.` : ".");
   const text = [reason, msg, ...notes].filter(Boolean).join(" ");
   banner(text, reason || notes.length || !files.length ? "warn" : "ok");
   if (opts.open === false) return r;

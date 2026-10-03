@@ -124,9 +124,9 @@ class WavPartTests(Tmp):
 class Sink:
     def __init__(self):
         self.pieces = []                                  # [start frame, bytes, how it ended]
-        self.discarded = 0
 
     def start(self, at):
+        assert not self.pieces or self.pieces[-1][2] == "end", "a piece started before the last one ended"
         self.pieces.append([at, bytearray(), None])
 
     def write(self, data):
@@ -135,12 +135,11 @@ class Sink:
     def end(self):
         self.pieces[-1][2] = "end"
 
-    def discard(self):
-        self.pieces.pop()
-        self.discarded += 1
+    def seconds(self, channels=1):
+        return [round(len(p[1]) / 2 / channels / RATE, 2) for p in self.pieces]
 
-    def seconds(self):
-        return [round(len(p[1]) / 2 / RATE, 2) for p in self.pieces]
+    def joined(self):
+        return b"".join(bytes(p[1]) for p in self.pieces)
 
 
 def run_split(parts, gap=3.0, chunk=0.37):
@@ -152,7 +151,7 @@ def run_split(parts, gap=3.0, chunk=0.37):
     for i in range(0, len(data), step):
         sp.feed(data[i:i + step])
     sp.finish()
-    return sink, sp
+    return sink, sp, data
 
 
 class SplitterTests(unittest.TestCase):
@@ -165,33 +164,36 @@ class SplitterTests(unittest.TestCase):
         x[a:b] += tone(s, db=-15)[:b - a]
         return x
 
-    def test_tones_with_gaps_become_one_file_each(self):
-        sink, sp = run_split([self.line(2, 1), self.recording(5, 2), self.line(4, 3), self.recording(6, 4),
-                              self.line(5, 5), self.recording(4, 6), self.line(1, 7)])
-        self.assertEqual(len(sink.pieces), 3)
+    def split(self, parts, gap=3.0):
+        sink, sp, data = run_split(parts, gap)
+        self.assertEqual(sink.joined(), data, "the pieces put back together are the input exactly")
         self.assertTrue(all(p[2] == "end" for p in sink.pieces))
-        # each holds its recording, with at most half a second of quiet before and after
-        for got, want in zip(sink.seconds(), (5, 6, 4)):
-            self.assertGreaterEqual(got, want - 0.06)
-            self.assertLessEqual(got, want + 1.06)
-        # the second starts where it is in the stream (pre-roll before it)
-        self.assertAlmostEqual(sink.pieces[1][0] / RATE, 2 + 5 + 4 - 0.5, delta=0.11)
+        starts = [p[0] for p in sink.pieces]
+        self.assertEqual(starts, [sum(len(q[1]) for q in sink.pieces[:i]) // 2 for i in range(len(starts))])
+        return sink, sp
 
-    def test_hiss_never_starts_a_file(self):
-        sink, sp = run_split([self.line(20, 1)])
-        self.assertEqual((sink.pieces, sink.discarded), ([], 0))
+    def test_tones_with_gaps_become_one_file_each(self):
+        sink, sp = self.split([self.line(2, 1), self.recording(5, 2), self.line(4, 3), self.recording(6, 4),
+                               self.line(5, 5), self.recording(4, 6), self.line(1, 7)])
+        self.assertEqual(len(sink.pieces), 3)
+        # each new one starts half a second before its sound; the gap stays at the end of the one before
+        self.assertAlmostEqual(sink.pieces[1][0] / RATE, 2 + 5 + 4 - 0.5, delta=0.06)
+        self.assertAlmostEqual(sink.pieces[2][0] / RATE, 2 + 5 + 4 + 6 + 5 - 0.5, delta=0.06)
+
+    def test_hiss_alone_is_one_file(self):
+        sink, sp = self.split([self.line(20, 1)])
+        self.assertEqual(len(sink.pieces), 1)
 
     def test_brief_pauses_never_split_a_recording(self):
         voice = lambda s, seed: noise(s, db=-50, seed=seed) + tone(s, db=-15)
         pause = lambda s, seed: noise(s, db=-50, seed=seed)          # the recording's own background
-        sink, sp = run_split([self.line(2, 1), voice(2, 2), pause(2.5, 3), voice(1, 4), pause(2.9, 5),
-                              voice(2, 6), self.line(4, 7)])
+        sink, sp = self.split([self.line(2, 1), voice(2, 2), pause(2.5, 3), voice(1, 4), pause(2.9, 5),
+                               voice(2, 6), self.line(4, 7)])
         self.assertEqual(len(sink.pieces), 1)
-        self.assertGreaterEqual(sink.seconds()[0], 2 + 2.5 + 1 + 2.9 + 2 - 0.06)
 
     def test_silent_pauses_shorter_than_the_gap_never_split(self):
         voice = lambda s: tone(s, db=-15) + noise(s, db=-50)
-        sink, sp = run_split([self.line(2, 1), voice(2), self.line(2.5, 2), voice(2), self.line(5, 3)])
+        sink, sp = self.split([self.line(2, 1), voice(2), self.line(2.5, 2), voice(2), self.line(5, 3)])
         self.assertEqual(len(sink.pieces), 1)
 
     def test_a_recording_no_louder_than_the_floor_is_never_split(self):
@@ -199,26 +201,39 @@ class SplitterTests(unittest.TestCase):
         # so its pauses cannot be told from a gap; the piece stays whole.
         voice = lambda s: tone(s, db=-15) + noise(s, db=-50, seed=9)
         quiet = lambda s, seed: noise(s, db=-50, seed=seed)
-        sink, sp = run_split([quiet(2, 1), voice(1.5), quiet(5, 2), voice(1.5), quiet(5, 3), voice(1.5)])
+        sink, sp = self.split([quiet(2, 1), voice(1.5), quiet(5, 2), voice(1.5), quiet(5, 3), voice(1.5)])
+        self.assertEqual(len(sink.pieces), 1)
+
+    def test_astras_case_steady_sound_then_the_same_room_tone_is_not_split(self):
+        # 2 s of room tone, 4 s of steady sound, 4 s of that room tone again, more sound: the
+        # piece shows no background of its own, so nothing says the pause is a gap.
+        room = lambda s, seed: noise(s, db=-50, seed=seed)
+        sound = lambda s: tone(s, db=-15)
+        sink, sp = self.split([room(2, 1), sound(4), room(4, 2), sound(4), room(1, 3)])
         self.assertEqual(len(sink.pieces), 1)
 
     def test_play_before_record_splits_once_a_real_gap_was_heard(self):
         # The first recording's background was the floor at first; the gap after it is quieter
         # (the cable's hiss), so from there on the recordings split as usual.
-        sink, sp = run_split([self.recording(6, 1), self.line(5, 2), self.recording(6, 3), self.line(5, 4),
-                              self.recording(5, 5)])
+        sink, sp = self.split([self.recording(6, 1), self.line(5, 2), self.recording(6, 3), self.line(5, 4),
+                               self.recording(5, 5)])
         self.assertEqual(len(sink.pieces), 3)
         self.assertLess(sp.threshold(), -70)
 
-    def test_a_click_is_not_kept_as_a_file(self):
+    def test_a_click_is_not_a_file_of_its_own(self):
         click = tone(0.2, db=-10)
-        sink, sp = run_split([self.line(2, 1), click, self.line(5, 2)])
-        self.assertEqual((sink.pieces, sink.discarded), ([], 1))
+        sink, sp = self.split([self.line(2, 1), self.recording(5, 2), self.line(4, 3), click, self.line(4, 4),
+                               self.recording(5, 5), self.line(1, 6)])
+        self.assertEqual(len(sink.pieces), 2)                       # the click goes with the recording after it
+        self.assertAlmostEqual(sink.pieces[1][0] / RATE, 2 + 5 + 4 - 0.5, delta=0.06)
 
-    def test_stop_ends_the_piece_and_a_longer_gap_setting_keeps_it_whole(self):
-        sink, _ = run_split([self.line(2, 1), self.recording(4, 2), self.line(4, 3), self.recording(4, 4)], gap=5.0)
+    def test_stop_during_a_gap_keeps_it_in_the_last_piece(self):
+        sink, sp = self.split([self.line(2, 1), self.recording(5, 2), self.line(6, 3)])
         self.assertEqual(len(sink.pieces), 1)
-        self.assertEqual(sink.pieces[0][2], "end")
+
+    def test_a_longer_gap_setting_keeps_it_whole(self):
+        sink, _ = self.split([self.line(2, 1), self.recording(4, 2), self.line(4, 3), self.recording(4, 4)], gap=5.0)
+        self.assertEqual(len(sink.pieces), 1)
 
     def test_stereo_and_the_floor_threshold(self):
         sink = Sink()
@@ -226,19 +241,19 @@ class SplitterTests(unittest.TestCase):
         self.assertIsNone(sp.threshold())
         sp.feed(pcm(noise(2, db=-85, channels=2)))
         self.assertAlmostEqual(sp.threshold(), -85 - 1 + silence.MARGIN_DB, delta=2.5)
-        sp.feed(pcm(tone(2, db=-12, channels=2)))
+        sp.feed(pcm(noise(4, db=-50, channels=2) + np.vstack([np.zeros((3 * RATE, 2)), tone(1, db=-12, channels=2)])))
         sp.feed(pcm(noise(2, db=-85, channels=2)))
-        self.assertEqual(len(sink.pieces), 1)
-        self.assertEqual(len(sink.pieces[0][1]) % 4, 0)
+        sp.feed(pcm(tone(2, db=-12, channels=2)))
+        sp.feed(b"\1\0\2\0")                               # one frame short of a block: kept at Stop
         sp.finish()
+        self.assertEqual(len(sink.pieces), 2)
+        self.assertEqual(len(sink.joined()), (2 + 4 + 2 + 2) * RATE * 4 + 4)
 
     def test_digital_silence_is_not_taken_as_the_floor(self):
         sink = Sink()
         sp = silence.Splitter(RATE, 1, sink)
         sp.feed(bytes(2 * 2 * RATE))
         self.assertEqual(sp.threshold(), silence.MIN_FLOOR_DB + silence.MARGIN_DB)
-        sp.feed(pcm(noise(2, db=-95)))                     # adapter hiss: still quiet
-        self.assertEqual(sink.pieces, [])
 
 
 # ---- the backend: recording into the library -----------------------------------------
@@ -351,7 +366,11 @@ class LiveApiTests(Tmp):
             dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 3, 9, 0, 0)
             sid = self.start(a, mode="import", split=3.0)["session"]
         line = lambda s, seed: noise(s, db=-85, seed=seed)
-        rec = lambda s, seed: noise(s, db=-50, seed=seed) + tone(s, db=-15)
+
+        def rec(s, seed):                                 # room tone with a voice in the middle
+            x = noise(s, db=-50, seed=seed)
+            x[len(x) // 3:2 * len(x) // 3] += tone(s, db=-15)[:2 * len(x) // 3 - len(x) // 3]
+            return x
         stream = np.concatenate([line(2, 1), rec(4, 2), line(5, 3), rec(3, 4), line(1, 5)])
         step = RATE // 2
         seq = 0
@@ -362,18 +381,38 @@ class LiveApiTests(Tmp):
                 self.assertEqual(r["file"], "Import 2026-10-03 09-00-00 (1).wav")
                 m = a.live_mark(sid, 4.5)
                 self.assertEqual(m["mark"]["file"], "Import 2026-10-03 09-00-00 (1).wav")
-            if i == 9 * RATE:                             # in the gap, 3 s after the recording ended
-                self.assertIsNone(r["file"])
-                self.assertFalse(a.live_mark(sid, 9.5)["ok"])
+            if i == 9 * RATE:                             # in the gap: still the first file (the gap ends it)
+                self.assertEqual(r["file"], "Import 2026-10-03 09-00-00 (1).wav")
+                self.assertEqual(a.live_mark(sid, 9.5)["mark"]["file"], "Import 2026-10-03 09-00-00 (1).wav")
         r = a.live_stop(sid)
         names = [f["name"] for f in r["files"]]
         self.assertEqual(names, ["Import 2026-10-03 09-00-00 (1).wav", "Import 2026-10-03 09-00-00 (2).wav"])
-        self.assertEqual([f["marks"] for f in r["files"]], [1, 0])
+        self.assertEqual([f["marks"] for f in r["files"]], [2, 0])
+        self.assertEqual((r["whole"]["name"], r["whole"]["marks"]), ("Import 2026-10-03 09-00-00 (full).wav", 2))
         self.assertNotIn("player", r)                     # an import does not open the player
+        # Nothing is lost: the pieces put together are the whole input, which is saved too.
+        audio = []
+        for n in names + [r["whole"]["name"]]:
+            with wave.open(os.path.join(self.lib, n)) as w:
+                audio.append(w.readframes(w.getnframes()))
+        self.assertEqual(audio[0] + audio[1], audio[2])
+        self.assertEqual(audio[2], pcm(stream))
+        self.assertAlmostEqual(len(audio[0]) / 2 / RATE, 2 + 4 + 5 - 0.5, delta=0.06)
         first = os.path.join(self.lib, names[0])
         marks = self.store.marks(wavinfo.wav_fingerprint(first))
-        self.assertEqual(len(marks), 1)
-        self.assertAlmostEqual(marks[0]["end"], 4.5 - 1.5, delta=0.06)   # the file starts 0.5 s before the sound
+        self.assertEqual([m["end"] for m in marks], [4.5, 9.5])     # the first file starts with the input
+        whole = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, r["whole"]["name"])))
+        self.assertEqual([m["end"] for m in whole], [4.5, 9.5])
+
+    def test_an_import_that_never_splits_is_one_file_without_a_full_copy(self):
+        a = self.api()
+        sid = self.start(a, mode="import", split=3.0)["session"]
+        self.send(a, sid, noise(4, db=-85), 0)
+        r = a.live_stop(sid)
+        self.assertEqual(len(r["files"]), 1)
+        self.assertIsNone(r["whole"])
+        self.assertEqual(len([n for n in os.listdir(self.lib) if n.endswith(".wav")]), 1)
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
     def test_the_disk_filling_up_stops_and_saves(self):
         a = self.api()

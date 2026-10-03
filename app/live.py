@@ -177,21 +177,23 @@ class _Session:
         self.piece = None
         self.count = 0                           # pieces started
         self.saved = []                          # finished files: {"path", "fp", "frames", "start_frame", "name"}
+        self.wholes = []                         # the whole input of an import (at most one), finished
         self.problems = []
         self.dropped_marks = 0
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
         self.full = False                        # the file being written reached livewav.MAX_DATA
         self.done = False
         self.splitter = None
+        self.whole = None                        # an import split on silence: the whole input as one file too
         if mode == "import" and split:
+            self.byte_rate *= 2                  # two files are written: the pieces and the whole
+            self.whole = self._open(f"Import {self.stamp} (full).wav", 0)
             self.splitter = silence.Splitter(rate, channels, self, gap=split)
         else:
             self.start(0)
 
     # ---- the sink: openevp.silence.Splitter (or Live mode itself) drives these ----
-    def start(self, stream_frame):
-        self.count += 1
-        name = (f"Live {self.stamp}.wav" if self.mode == "live" else f"Import {self.stamp} ({self.count}).wav")
+    def _open(self, name, stream_frame):
         piece = _Piece(self.folder, name, self.rate, self.channels, stream_frame, self.mode)
         try:
             self.ops._register_part(piece.part)
@@ -199,15 +201,23 @@ class _Session:
             piece.writer.abort()
             _remove(piece.sidecar)
             raise
-        self.piece = piece
+        return piece
 
-    def write(self, data):
+    def start(self, stream_frame):
+        self.count += 1
+        name = (f"Live {self.stamp}.wav" if self.mode == "live" else f"Import {self.stamp} ({self.count}).wav")
+        self.piece = self._open(name, stream_frame)
+
+    def _put(self, piece, data):
         if self.full:
             return
         try:
-            self.piece.writer.write(data)
+            piece.writer.write(data)
         except livewav.Full:                     # 4 GB: the rest is dropped and the recording stops
             self.full = True
+
+    def write(self, data):
+        self._put(self.piece, data)
 
     def end(self):
         piece, self.piece = self.piece, None
@@ -224,14 +234,17 @@ class _Session:
     # ---- the stream -------------------------------------------------------------
     def feed(self, data):
         self.frames += len(data) // self.align
+        if self.whole is not None:
+            self._put(self.whole, data)
         if self.splitter is not None:
             self.splitter.feed(data)
         else:
             self.write(data)
 
     def finish(self):
-        """Stop: finish the file being written (an import's piece may be discarded
-        as too short). Never raises; problems are kept in self.problems."""
+        """Stop: finish the files being written. The whole input of an import is kept
+        only when it was split into more than one piece (one piece is the same audio).
+        Never raises; problems are kept in self.problems."""
         if self.done:
             return
         self.done = True
@@ -243,6 +256,14 @@ class _Session:
                     self.discard()
                 else:
                     self.end()
+            whole, self.whole = self.whole, None
+            if whole is not None:
+                if self.count > 1 and whole.writer.frames:
+                    self.ops._finish_piece(self, whole, whole=True)
+                else:
+                    whole.writer.abort()
+                    _remove(whole.sidecar)
+                    self.ops._unregister_part(whole.part)
         except Exception as e:
             self.problems.append(f"The recording could not be finished: {_plain(e)}. It is saved as "
                                  "a .part file and will be finished when OpenEVP starts again.")
@@ -388,7 +409,7 @@ class LiveOps:
                 free = shutil.disk_usage(folder).free
             except OSError as e:
                 return _fail(f"Could not check the free space: {_plain(e)}")
-            if free < RESERVE_BYTES + 60 * rate * channels * livewav.WIDTH:
+            if free < RESERVE_BYTES + 60 * rate * channels * livewav.WIDTH * (2 if mode == "import" and split else 1):
                 return _fail(NO_SPACE)
             # Admitted against folder operations in one step: _fs_begin() checks for a
             # recording under _workers_lock (never take _lib_lock inside it: see _list_library).
@@ -447,8 +468,9 @@ class LiveOps:
             left = None
             if free is not None:
                 left = (free - RESERVE_BYTES) / s.byte_rate
-            if s.piece is not None:
-                room = s.piece.writer.room() / s.byte_rate
+            biggest = s.whole or s.piece          # the file nearest 4 GB (an import's whole input)
+            if biggest is not None:
+                room = biggest.writer.room() / (s.rate * s.align)
                 left = room if left is None else min(left, room)
             if left is not None and left < WARN_SECONDS:
                 minutes = max(1, int(left // 60))
@@ -486,6 +508,12 @@ class LiveOps:
                     piece.save_marks()
                 except OSError:
                     pass                         # kept in memory: stored when the file is finished
+                if s.whole is not None:          # the whole input has it at its own time (it starts at 0)
+                    s.whole.marks.append({**mark, "start": round(max(0.0, at - MARK_SECONDS), 3), "end": round(at, 3)})
+                    try:
+                        s.whole.save_marks()
+                    except OSError:
+                        pass
                 return {"ok": True, "mark": {"at": at, "file": piece.name, **mark}}
             last = s.saved[-1] if s.saved else None
             if last is not None:
@@ -519,10 +547,13 @@ class LiveOps:
         s.finish()
         if self._live is s:
             self._live = None
-        files = [{"id": _file_id(f["path"]), "name": os.path.basename(f["path"]),
-                  "seconds": round(f["frames"] / s.rate, 1), "marks": f["marks"]} for f in s.saved]
+        def row(f):
+            return {"id": _file_id(f["path"]), "name": os.path.basename(f["path"]),
+                    "seconds": round(f["frames"] / s.rate, 1), "marks": f["marks"]}
+        files = [row(f) for f in s.saved]
         out = {"ok": True, "files": files, "folder": os.path.basename(os.path.normpath(s.folder)),
-               "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode}
+               "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode,
+               "whole": row(s.wholes[0]) if s.wholes else None}
         if s.mode == "live" and s.saved and not self._stop.is_set():
             try:
                 loaded = self._play_file(s.saved[-1]["path"], root=s.root, library=True)
@@ -532,8 +563,9 @@ class LiveOps:
                 pass                             # saved all the same; the library lists it
         return out
 
-    def _finish_piece(self, s, piece):
-        """A file is complete: rename it, store its marks and its fingerprint (never raises)."""
+    def _finish_piece(self, s, piece, whole=False):
+        """A file is complete: rename it, store its marks and its fingerprint (never raises).
+        whole: an import's whole input (listed in "whole", not among the pieces)."""
         try:
             frames, fp = piece.writer.close()
         except OSError as e:
@@ -557,8 +589,8 @@ class LiveOps:
         _remove(piece.sidecar)
         self._unregister_part(piece.part)
         self._index_live(path, fp, seconds)
-        s.saved.append({"path": path, "fp": fp, "frames": frames, "start_frame": piece.start_frame,
-                        "marks": stored})
+        (s.wholes if whole else s.saved).append({"path": path, "fp": fp, "frames": frames,
+                                                 "start_frame": piece.start_frame, "marks": stored})
 
     def _store_live_marks(self, fp, path, seconds, marks, s=None):
         """Store marks made while recording against the finished file. A mark already
@@ -609,8 +641,10 @@ class LiveOps:
             return out
         with self._live_lock:
             active = set()
-            if self._live is not None and self._live.piece is not None:
-                active.add(os.path.normcase(self._live.piece.part))
+            if self._live is not None:
+                for piece in (self._live.piece, self._live.whole):
+                    if piece is not None:
+                        active.add(os.path.normcase(piece.part))
             for part in self._parts():
                 if os.path.normcase(part) in active:
                     continue
