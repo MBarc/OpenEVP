@@ -14,7 +14,7 @@ it never names a recording by fingerprint: every loaded recording gets an
 opaque "rec" handle, and the marks calls take that handle (the fingerprint
 itself does reach the page, only to group copies of one recording). For a
 recording on a recorder the handle also holds its provenance: the exact native
-bytes that were decoded for playback (a .dvf for the ST25), their file name,
+bytes that were decoded for playback (a .dvf for a Sony ICD recorder), their file name,
 their format and where they came from (recorder, folder, number), so the
 backup made when the recording is first marked saves exactly the audio that
 was marked. Backups run
@@ -941,7 +941,7 @@ class Api(ShareOps, LibraryOps):
         return dl.data, dl.filename, wav
 
     def _backup(self, fp, rec, entry):
-        """Save the recording's native file (a .dvf for the ST25) into
+        """Save the recording's native file (a .dvf for a Sony ICD recorder) into
         <Save to>/<folder safe name>/, then (with the decoder) a WAV copy with the
         marks. "saved" once the native file is there; a failed WAV copy is
         reported in the detail, not as a failed backup."""
@@ -1027,7 +1027,7 @@ class Api(ShareOps, LibraryOps):
 
     def export_marked(self, rec, speed=1, keep_pitch=True, heard=None):
         """Save a WAV with the current marks of the loaded recording into the Save-to
-        folder: <folder safe name>/ (the ST25's A..E) for a recorder recording; for a file in the library, the
+        folder: <folder safe name>/ (A..E on a Sony ICD recorder) for a recorder recording; for a file in the library, the
         folder named like its investigation (the first folder under the library);
         any other file goes into the Save-to folder itself. Never replaces a file: identical bytes
         count as already saved, anything else gets a numbered name.

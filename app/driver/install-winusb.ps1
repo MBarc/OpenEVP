@@ -1,5 +1,5 @@
-# Bind the recorders that need it (the Sony ICD-ST25, USB 054C:0103, today) to Windows'
-# built-in WinUSB driver.
+# Bind the recorders that need it (today USB 054C:0103: the Sony ICD-ST25, and the
+# ICD-ST10, which shares its USB id) to Windows' built-in WinUSB driver.
 #
 # Which recorders: models.json next to this script, the driver manifest written at build
 # time from the recorder registry (tools/make_driver_manifest.py): the models, their USB

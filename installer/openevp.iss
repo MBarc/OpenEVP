@@ -3,7 +3,7 @@
 ; One setup file, one admin prompt, nothing else to install:
 ;   - the desktop app and the command-line downloader
 ;   - the recorder driver (WinUSB for every recorder model in the driver manifest,
-;     _internal\driver\models.json: today the ICD-ST25, USB 054C:0103), whether or
+;     _internal\driver\models.json: today USB 054C:0103, the ICD-ST25 and ICD-ST10), whether or
 ;     not the recorder is plugged in; Windows applies it when it is (any USB port)
 ;   - Microsoft's WebView2 runtime, only if this PC does not have it yet
 ;     (Windows 11 and updated Windows 10 already do; this step needs internet)
