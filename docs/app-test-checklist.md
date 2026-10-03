@@ -314,8 +314,8 @@ test opens a real input):
     **Import from a recorder**, the guide is shown; volume at about the middle,
     meter out of the red. Record first, then play three recordings back to
     back: three files `Import <date> <time> (1).wav`, `(2)`, `(3)`, each starting
-    just before its sound, the gaps left out, none split in the middle of a
-    pause inside a recording. Untick the split: one file. Set 10 s: recordings
+    just before its sound, each gap at the end of the file before it, none split
+    in the middle of a pause inside a recording. Untick the split: one file. Set 10 s: recordings
     with shorter gaps stay together.
 51. **An hour-long session.** Record live for 60+ minutes at 48 kHz: the
     waveform and spectrogram keep scrolling smoothly to the end; Task Manager
@@ -335,3 +335,12 @@ test opens a real input):
 54. **While recording**, the sidebar is greyed out, closing the window asks
     first (and saves the recording if you close), Check for updates won't
     install, and a second OpenEVP window cannot record (it says why).
+55. **Closing mid-recording.** Record live for a minute, speak right before
+    closing the window, answer the prompt: the window closes within a few
+    seconds and the saved file ends with what you said (nothing cut off). Try
+    renaming the recording's folder in File Explorer during a recording: Windows
+    refuses; after Stop it works.
+56. **Import, whole input.** Import three recordings split on silence: besides
+    `(1)`, `(2)`, `(3)` there is `Import <date> <time> (full).wav`, as long as the
+    three together, with the marks made while importing; playing the three back
+    to back sounds exactly like the full one.

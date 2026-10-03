@@ -170,7 +170,13 @@ or stereo depending on the input, 16-bit. An hour of 48 kHz stereo is about
 690 MB. If you want an MP3 to share, record first and convert it later.
 
 While recording, the rest of the app waits: the sidebar is greyed out, and
-renaming, moving or deleting library folders waits until you stop.
+renaming, moving or deleting library folders waits until you stop. The folder
+you're recording into (and the library folder above it) can't be renamed in
+File Explorer either until you stop, so the recording always lands where you
+chose.
+
+If you close OpenEVP while recording, it asks first, then saves the recording
+the same way Stop does before the window closes.
 
 ### Listening while you record
 
@@ -188,7 +194,9 @@ OpenEVP writes the recording to disk as it goes, and every few seconds makes
 sure what's on disk is a playable file. If the PC loses power or the app
 crashes, you lose at most the last few seconds. While recording, the file is
 called `<name>.wav.part`. The next time OpenEVP starts, it finishes any such
-file, gives it its proper name, adds the marks you made, and tells you.
+file, gives it its proper name, adds the marks you made, and tells you. If a
+file is too damaged to read as audio, it's never deleted: OpenEVP keeps it as
+`<name> (unrecovered).raw` and tells you.
 
 ### When the disk gets full
 
