@@ -10,6 +10,8 @@ here when you want to know what a button does or why something happened.
 - [Getting recordings off your recorder](#getting-recordings-off-your-recorder)
 - [Troubleshooting](#troubleshooting)
 - [Marking EVPs](#marking-evps)
+- [Recording live](#recording-live)
+- [Importing from a recorder with only a headphone jack](#importing-from-a-recorder-with-only-a-headphone-jack)
 - [Opening WAV and MP3 files](#opening-wav-and-mp3-files)
 - [The EVP Library](#the-evp-library)
   - [Folders](#folders)
@@ -123,6 +125,118 @@ library uses that to show you what's still left to go through.
 A mark belongs to the recording's audio, not to one particular file. If the
 same audio exists as a `.dvf` and a WAV, or you've saved it more than once,
 marking it in one place marks it everywhere.
+
+## Recording live
+
+Click **Record live** in the sidebar (under On this PC), or **Record live…**
+next to Open audio file. The recording view takes over the window until you
+close it.
+
+### Choosing an input
+
+Pick the input under **Input**: the PC's built-in microphone, a USB
+microphone, a line-in socket or a USB audio adapter. The meter next to it
+shows the level, so you can see sound is coming in before you record. Keep
+the loud parts out of the red, because that's where the sound clips and gets
+distorted.
+
+OpenEVP remembers the input you picked last time. If it isn't plugged in, it
+uses Windows' default input and says so.
+
+The recording is the input exactly as it comes in. Windows' and the
+browser's "improvements" (echo cancelling, noise suppression, automatic
+volume) are turned off, because they can wipe out the very sounds you're
+looking for.
+
+### Recording and marking
+
+1. Under **Save into**, pick the library folder for the recording. It starts
+   on the folder the EVP Library was showing.
+2. Click **● Record**. The waveform and spectrogram scroll by as it records,
+   and the time counts up.
+3. When you hear something, press **M** (or click **★ Mark**). OpenEVP marks
+   the two seconds just before that moment, class C, with the note "Marked
+   while recording". You can change the class and note afterwards, like any
+   other mark.
+4. Click **■ Stop**. The recording is saved and opens in the player, with its
+   marks, and the EVP Library shows the folder it's in.
+
+Recordings are named after the moment you pressed Record, for example
+`Live 2026-10-03 21-05-09.wav`. OpenEVP never overwrites a file: if that
+name is taken, the new one gets a number, like `Live 2026-10-03 21-05-09 (2).wav`.
+
+They're saved as WAV, at the rate the input works at (often 48 kHz), in mono
+or stereo depending on the input, 16-bit. An hour of 48 kHz stereo is about
+690 MB. If you want an MP3 to share, record first and convert it later.
+
+While recording, the rest of the app waits: the sidebar is greyed out, and
+renaming, moving or deleting library folders waits until you stop.
+
+### Listening while you record
+
+Tick **Listen** to hear the input through your speakers or headphones. It's
+off every time you open the view, and it's best used with headphones: a
+microphone near speakers picks up its own sound and squeals.
+
+**Enhance what I hear** applies the player's Enhance settings (Boost, filters,
+Leveler, hum) to what you hear. The saved recording is never enhanced. It's
+always the input as it came in.
+
+### If the power goes or the app crashes
+
+OpenEVP writes the recording to disk as it goes, and every few seconds makes
+sure what's on disk is a playable file. If the PC loses power or the app
+crashes, you lose at most the last few seconds. While recording, the file is
+called `<name>.wav.part`. The next time OpenEVP starts, it finishes any such
+file, gives it its proper name, adds the marks you made, and tells you.
+
+### When the disk gets full
+
+OpenEVP always keeps at least 500 MB free on the drive. When there's less than
+15 minutes of recording left before that, it warns you, and at the limit it
+stops by itself and saves the recording. It also stops at 4 GB, the most a WAV
+file can hold (about 6 hours of 48 kHz stereo).
+
+### If the input won't open
+
+If Windows is blocking the microphone, OpenEVP says so and offers **Open
+microphone settings**. In Settings, under Privacy & security, Microphone, turn
+on **Microphone access** and **Let desktop apps access your microphone**.
+If another program is using the input, close it and pick the input again.
+
+## Importing from a recorder with only a headphone jack
+
+Some recorders, like the Panasonic RR-DR60, have no USB at all. You can still
+get their recordings onto the PC by playing them into it.
+
+1. Run a cable from the recorder's headphone jack to your PC's line-in, or to a
+   USB audio adapter. Many recorders have a 3.5 mm jack; some, like the RR-DR60,
+   have a smaller 2.5 mm one, so you may need a 2.5 mm to 3.5 mm adapter. A
+   line-in works better than a microphone input, which is much more sensitive.
+2. Open **Record live** and click **Import from a recorder**. A short version of
+   these steps is shown there too.
+3. Choose the input the cable goes into. Play a little and set the recorder's
+   volume to about the middle: the meter should move well, but stay out of the
+   red.
+4. Set the recorder's playback speed to normal, and turn voice activation off.
+5. Click **● Record** first, then press Play on the recorder, and let it play
+   through. Click **■ Stop** when it's done.
+
+With **Start a new file after 3 seconds of silence** ticked (the default),
+OpenEVP starts a new file each time the recorder goes quiet between
+recordings, and leaves the quiet gaps out. Each file is named after when you
+started, with a number: `Import 2026-10-03 21-05-09 (1).wav`, `(2)` and so on.
+You can change the 3 seconds, or untick it to get everything in one file.
+
+How it tells a gap from a pause: in the first moments it learns how quiet the
+cable is when nothing plays. A recording's own background (room noise, hiss)
+is louder than that, so pauses inside a recording never split it. That's why
+it helps to press Record before Play. If you press Play first, the first
+recording may stay joined to the next one until OpenEVP has heard a real gap.
+A short click when you press a button isn't kept as a file.
+
+Marks work here too: press **M** and the mark goes into the file being
+recorded at that moment.
 
 ## Opening WAV and MP3 files
 
@@ -554,6 +668,11 @@ so) until the first one is closed.
 
 Most of this only matters if something looks wrong. It's here so nobody has
 to guess what has and hasn't been tested.
+
+- **Record live and Import:** tested with Chromium's built-in test input and
+  generated audio, not yet with a real microphone, a USB audio adapter or a
+  real RR-DR60. Recordings stop at 4 GB, the most a WAV file can hold (about
+  6 hours of 48 kHz stereo).
 
 - **What's been tested:** on Linux, against one ICD-ST25 with 20 LP-mode
   recordings in folder A (with an owner name set, some dated and some not) and

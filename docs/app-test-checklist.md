@@ -288,3 +288,50 @@ Deleting recordings and clips:
     recording: OpenEVP says the `.dvf` went and the `.wav` is still there, and
     why. In a second OpenEVP window, Delete… is greyed out and the key says why;
     during an export or a backup it is refused.
+
+Record live and Import from a recorder (by hand, in the built app: no automated
+test opens a real input):
+
+47. **Real microphone.** Click **Record live**. The first time, no permission
+    prompt appears (OpenEVP grants its own page the microphone). The Input list
+    names the PC's inputs; the meter moves when you speak. Pick another input,
+    close and reopen OpenEVP: the same input is chosen. Record 30 s, speaking
+    now and then, press **M** twice: Stop opens `Live <date> <time>.wav` in the
+    player with two class C marks "Marked while recording", each ending about
+    where M was pressed; the library lists it in the folder that was picked.
+    The file plays in another program (Audacity, VLC) and its sample rate and
+    channels match the input (Windows Sound settings, the input's Advanced tab).
+48. **Listen.** Listen is off on opening the view. With headphones on, tick it:
+    you hear yourself, with a small delay. Set Boost +12 dB in the player's
+    Enhance tab, tick **Enhance what I hear**: louder in the headphones; the
+    saved file is not louder (compare its waveform with one recorded without).
+49. **Windows blocking the microphone.** In Settings, Privacy & security,
+    Microphone, turn off "Let desktop apps access your microphone"; open Record
+    live: OpenEVP says Windows is blocking it and **Open microphone settings**
+    opens that page. Turn it back on, pick the input again: it works.
+50. **USB audio adapter with a recorder's headphone output.** RR-DR60 (2.5 mm to
+    3.5 mm adapter) or any recorder, into a USB adapter's line or mic input.
+    **Import from a recorder**, the guide is shown; volume at about the middle,
+    meter out of the red. Record first, then play three recordings back to
+    back: three files `Import <date> <time> (1).wav`, `(2)`, `(3)`, each starting
+    just before its sound, the gaps left out, none split in the middle of a
+    pause inside a recording. Untick the split: one file. Set 10 s: recordings
+    with shorter gaps stay together.
+51. **An hour-long session.** Record live for 60+ minutes at 48 kHz: the
+    waveform and spectrogram keep scrolling smoothly to the end; Task Manager
+    shows OpenEVP's (and its WebView2 processes') CPU low and memory flat after
+    the first minutes. Marks made near the end land in the right place. Stop:
+    the file opens within a few seconds and is about 690 MB (stereo).
+52. **Pulling the plug.** Record live for a few minutes, press M once, then cut
+    the power (or end OpenEVP.exe and msedgewebview2.exe in Task Manager). The
+    folder holds `Live <…>.wav.part`, which already plays in VLC. Start
+    OpenEVP: it says it saved the cut-off recording; the `.part` is now
+    `Live <…>.wav`, missing at most the last ~5 seconds, with its mark. Unplug
+    the USB adapter in the middle of a recording: it stops, says the input
+    stopped, and the recording is saved.
+53. **Disk nearly full.** On a USB stick with a little over 500 MB free,
+    record into a library folder on it: a warning appears when less than 15
+    minutes fit, then it stops by itself and saves; at least 500 MB stay free.
+54. **While recording**, the sidebar is greyed out, closing the window asks
+    first (and saves the recording if you close), Check for updates won't
+    install, and a second OpenEVP window cannot record (it says why).
