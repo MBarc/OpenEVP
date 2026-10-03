@@ -10,6 +10,7 @@ import ctypes
 import os
 import stat
 import sys
+import threading
 
 MAX_NAME = 120              # characters in one folder name
 MAX_PATH_CHARS = 240        # a resulting full path must stay below this (Windows MAX_PATH is 260)
@@ -494,7 +495,16 @@ def item_path(item):
         ole32.CoTaskMemFree(out.value)
 
 
-_LINGERING = []                             # sinks the shell kept a reference to: never freed
+_LINGERING = []                             # sinks the shell still held a reference to after teardown
+_LINGERING_LOCK = threading.Lock()
+
+
+def _prune_lingering():
+    """Let go of the kept sinks the shell has released since (their reference
+    count back at 0): no call can reach them any more. Done before each recycle,
+    when no operation of this process is using an earlier sink."""
+    with _LINGERING_LOCK:
+        _LINGERING[:] = [sink for sink in _LINGERING if sink.refs > 0]
 
 
 class ProgressSink:
@@ -644,7 +654,8 @@ def shell_recycle(path, owner, before, decide):
         _release(item.value)
         _release(op.value)
         if sink is not None and sink.refs > 0:
-            _LINGERING.append(sink)                      # the shell still holds it: keep its code alive
+            with _LINGERING_LOCK:
+                _LINGERING.append(sink)                  # the shell still holds it: keep its code alive
         if init >= 0:                                    # S_OK or S_FALSE
             ole32.CoUninitialize()
 
@@ -704,6 +715,7 @@ def recycle(path, owner=None, before=None, shell=None):
         raise RecycleError(said(NO_ROOM))
     if not _bin_exists(root):
         raise RecycleError(said(NO_RECYCLE_BIN))
+    _prune_lingering()
     decide = RecycleOnly(path)
     hr, aborted = (shell or shell_recycle)(path, owner or None, before, decide)
     if decide.succeeded(hr, aborted):

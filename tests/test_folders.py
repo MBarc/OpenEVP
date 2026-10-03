@@ -331,6 +331,23 @@ class RecycleVetoTests(unittest.TestCase):
         self.assertEqual(self.recycle(shell), folders.FILE_IN_USE.format("a.wav"))
         self.assertTrue(os.path.isfile(self.path))
 
+    def test_sinks_the_shell_let_go_of_are_dropped_at_the_next_recycle(self):
+        done, held = types.SimpleNamespace(refs=0), types.SimpleNamespace(refs=1)
+        saved = list(folders._LINGERING)
+        self.addCleanup(lambda: folders._LINGERING.__setitem__(slice(None), saved))
+        folders._LINGERING[:] = [done, held]
+
+        def shell(path, owner, before, decide):
+            self.assertEqual(folders._LINGERING, [held], "pruned before the shell is asked")
+            decide.pre_delete(self.RECYCLE, path)
+            os.remove(path)
+            decide.post_delete(self.RECYCLE, path, self.DONT_PROCESS_CHILDREN, True)
+            return folders.S_OK, False
+        folders.recycle(self.path, shell=shell)
+        held.refs = 0
+        folders._prune_lingering()
+        self.assertEqual(folders._LINGERING, [])
+
     def test_the_com_sink_refuses_through_its_vtable(self):
         decide = folders.RecycleOnly(self.path)
         sink = folders.ProgressSink(decide)
