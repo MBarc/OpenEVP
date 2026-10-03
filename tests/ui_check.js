@@ -2577,6 +2577,19 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(tap2.ctx.state, "closed", "the input is let go of");
   assert.strictEqual(vm.runInContext("S.lib.folderId", context), "f1");
 
+  // A recording that could not be opened in the player: saved, and said so.
+  await context.openLive();
+  await settle();
+  stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, player_error: "Could not play x: no space.",
+                 files: [{ id: "lf2", name: "Live 2026-10-03 21-06-00.wav", seconds: 0.1, marks: 0 }] };
+  await $("live-record").onclick();
+  worklets[worklets.length - 1].port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  await $("live-record").onclick();
+  await settle();
+  assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-06-00.wav in Old Mill. " +
+                     "It could not be opened in the player (Could not play x: no space); find it in the EVP Library.");
+  assert.strictEqual($("banner").className, "");                    // a warning, not a plain success
+
   // Import: the toggle, the silence setting, the guide; pieces come and go as the backend says.
   await context.openLive();
   await settle();

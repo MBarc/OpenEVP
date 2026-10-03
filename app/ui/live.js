@@ -424,6 +424,7 @@ async function recordingDone(rec, r, reason, opts = {}) {
   const files = r.files || [];
   const notes = [...(r.problems || [])];
   if (r.dropped_marks) notes.push(`${plural(r.dropped_marks, "mark")} fell outside the saved audio and were left out.`);
+  if (r.player_error) notes.push(`It could not be opened in the player (${r.player_error.replace(/[.\s]+$/, "")}); find it in the EVP Library.`);
   let msg;
   if (!files.length) msg = LV.mode === "import" ? "Nothing was saved: no sound arrived." : "Nothing was saved.";
   else if (files.length === 1) msg = `✓ Saved ${files[0].name} in ${r.folder}.`;

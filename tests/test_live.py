@@ -343,6 +343,17 @@ class LiveApiTests(Tmp):
         self.assertEqual(os.path.getsize(os.path.join(self.lib, "Live 2026-01-02 03-04-05.wav")), 0)
         self.assertFalse(a.live_stop(sid)["ok"])
 
+    def test_a_recording_that_cannot_be_opened_in_the_player_says_so(self):
+        a = self.api()
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(1.0), 0)
+        with mock.patch.object(self.server, "prepare_file", side_effect=OSError(28, "No space left on device")):
+            r = a.live_stop(sid)
+        self.assertNotIn("player", r)
+        self.assertIn("No space left on device", r["player_error"])
+        self.assertEqual(len(r["files"]), 1)                              # saved all the same
+        self.assertTrue(os.path.isfile(os.path.join(self.lib, r["files"][0]["name"])))
+
     def test_into_a_library_folder_and_never_into_clips(self):
         a = self.api()
         os.makedirs(os.path.join(self.lib, "Old Mill", "Clips"))

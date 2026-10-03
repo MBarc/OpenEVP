@@ -619,12 +619,16 @@ class LiveOps:
                "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode,
                "whole": row(s.wholes[0]) if s.wholes else None}
         if s.mode == "live" and s.saved and not self._stop.is_set():
+            # Saved either way; if it cannot be opened in the player, the page says why.
             try:
                 loaded = self._play_file(s.saved[-1]["path"], root=s.root, library=True)
-                if loaded.get("ok"):
-                    out["player"] = loaded
-            except Exception:
-                pass                             # saved all the same; the library lists it
+            except Exception as e:
+                loaded = _fail(f"{type(e).__name__}: {e}")
+            if loaded.get("ok"):
+                out["player"] = loaded
+            else:
+                out["player_error"] = loaded.get("error") or "it could not be opened"
+
         return out
 
     def _finish_piece(self, s, piece, whole=False):
