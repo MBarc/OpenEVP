@@ -21,7 +21,10 @@ folder swapped for a junction since it was loaded, even with the same size and
 time. (The file is reopened by path for each request rather than held open for
 as long as it is loaded: an open file, even one shared for deleting, stops
 Windows renaming, moving or recycling the folder it is in, and the library does
-those with a recording loaded.)
+those with a recording loaded.) A file whose file system gives no usable
+identity (FAT/exFAT USB sticks, some network shares) is not served in place at
+all: a private copy of it goes into the cache at load time, like a decode, and
+that copy is served (within the same budget and eviction rules).
 The file is not copied to snapshot it: WAVs can be gigabytes. Files are opened
 so that they can still be moved, renamed or recycled while they are being read
 (Windows FILE_SHARE_DELETE); retarget_prefix() then points a served file at its
@@ -40,6 +43,7 @@ import hashlib
 import os
 import re
 import secrets
+import shutil
 import sys
 import threading
 import wave
@@ -158,8 +162,8 @@ def _stat_of(st):
 def _ident_of(st):
     """(volume serial number, file id) of an open file: which file it is, the
     same across renames and moves on its volume. None where the file system
-    gives no file id."""
-    return (st.st_dev, st.st_ino) if st.st_ino else None
+    gives no usable one (no file id or no volume serial number)."""
+    return (st.st_dev, st.st_ino) if st.st_ino and st.st_dev else None
 
 
 def _not_as_loaded(e, st):
@@ -372,6 +376,8 @@ class AudioServer:
         with _open_shared(path) as f:
             st = os.fstat(f.fileno())
             stat, ident = _stat_of(st), _ident_of(st)
+            if ident is None:
+                return self._prepare_copy(path, f, stat)
             key = ("file", os.path.normcase(path), *stat, ident)
             with self._lock:
                 e = self._entries.get(key)
@@ -392,6 +398,19 @@ class AudioServer:
             self._by_file[file_id] = key
             e = self._entries[key]
         return {**self._info(e), "stat": stat}
+
+    def _prepare_copy(self, path, f, stat):
+        """prepare_file() for a file with no usable identity (f: it, open; stat:
+        its (size, mtime_ns)): a private copy of it in the cache, made from the
+        open file and served like a decode, so nothing put at its path later can
+        be served in its place. ValueError when it changed while being copied."""
+        def write(out):
+            f.seek(0)
+            shutil.copyfileobj(f, out, 1 << 20)
+            if _stat_of(os.fstat(f.fileno())) != stat:
+                raise ValueError("the file changed while it was being read; try again")
+        info = self.prepare(("copy", os.path.normcase(path), *stat), write=write, expected=stat[0])
+        return {**info, "stat": stat}
 
     def _info(self, e):
         """What the player needs: the URL, peaks for a quick first drawing, the

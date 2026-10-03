@@ -9,6 +9,8 @@ import urllib.request
 import wave
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from unittest import mock  # noqa: E402
+from app import audio_server  # noqa: E402
 from app.audio_server import AudioServer  # noqa: E402
 from openevp import wavinfo  # noqa: E402
 sys.path.insert(0, os.path.dirname(__file__))
@@ -423,6 +425,7 @@ class SameFileTests(unittest.TestCase):
     def setUp(self):
         cache = tempfile.TemporaryDirectory()
         self.addCleanup(cache.cleanup)
+        self.cache = cache.name
         mine = tempfile.TemporaryDirectory()
         self.addCleanup(mine.cleanup)
         self.mine = mine.name
@@ -470,6 +473,38 @@ class SameFileTests(unittest.TestCase):
         _winapi.CreateJunction(outside, self.folder)
         self.addCleanup(os.rmdir, self.folder)
         self.refused()
+
+    def test_a_normal_file_is_served_in_place(self):
+        self.assertEqual(os.listdir(self.cache), [], "nothing copied")
+        st = os.stat(self.path)
+        self.assertIsNotNone(audio_server._ident_of(st))
+
+    def test_a_file_without_identity_is_served_from_a_private_copy(self):
+        """FAT/exFAT and some shares give no file id: such a file is copied into the
+        cache when loaded, and the copy is what plays -- a file put at its path later,
+        even with the same size and time, changes nothing."""
+        path = os.path.join(self.folder, "stick.wav")
+        pcm_wav(path, 2, 1, 4800)
+        with open(path, "rb") as f:
+            original = f.read()
+        with mock.patch.object(audio_server, "_ident_of", return_value=None):
+            info = self.s.prepare_file(path)
+        st = os.stat(path)
+        self.assertEqual(info["stat"], (st.st_size, st.st_mtime_ns))
+        self.assertEqual(len(os.listdir(self.cache)), 1, "a copy in the cache")
+        other = os.path.join(self.mine, "other.wav")
+        self.same_size_and_time(other, path)
+        os.replace(other, path)
+        with urllib.request.urlopen(info["url"], timeout=5) as r:
+            self.assertEqual(r.read(), original)
+        with self.s.open_audio(info["url"]) as f:
+            self.assertEqual(f.read(), original)
+
+    def test_without_usable_identity_means_no_file_id_or_no_volume_serial(self):
+        import types
+        self.assertIsNone(audio_server._ident_of(types.SimpleNamespace(st_dev=7, st_ino=0)))
+        self.assertIsNone(audio_server._ident_of(types.SimpleNamespace(st_dev=0, st_ino=5)))
+        self.assertEqual(audio_server._ident_of(types.SimpleNamespace(st_dev=7, st_ino=5)), (7, 5))
 
     def test_the_same_file_moved_and_retargeted_still_plays(self):
         moved = os.path.join(self.mine, "Case 2")
