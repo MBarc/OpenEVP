@@ -83,7 +83,7 @@
     </div>
     <div id="live-import" hidden>
       <div id="live-split-row">
-        <label title="After Stop, the import is split into one file per recording wherever the recorder went quiet this long (the whole import is kept too)"><input type="checkbox" id="live-split" checked> Split into separate recordings at</label>
+        <label title="After Stop, suggest cuts wherever the recorder went quiet this long; you check them before anything is split"><input type="checkbox" id="live-split" checked> Suggest cuts at</label>
         <input id="live-gap" type="number" min="0.5" max="60" step="0.5" value="3" aria-label="Seconds of silence"> seconds of silence
       </div>
       <details id="live-guide" open>
@@ -92,7 +92,7 @@
           <li>Run a cable from the recorder's headphone jack to your PC's line-in, or to a USB audio adapter. Many recorders have a 3.5 mm jack; some, like the Panasonic RR-DR60, have a smaller 2.5 mm one, so you may need a 2.5 mm to 3.5 mm adapter. A line-in works better than a microphone input, which is much more sensitive.</li>
           <li>Choose that input above, then play a little and set the recorder's volume to about the middle. The meter should move well, but loud parts should stay out of the red.</li>
           <li>Set the recorder's playback speed to normal, and turn voice activation off.</li>
-          <li>Press Record here first, then Play on the recorder, and Stop when it is done. Shortly after Stop, OpenEVP splits the import into one file per recording wherever the recorder went quiet for the seconds set above. The whole import is kept as one file too.</li>
+          <li>Press Record here first, then Play on the recorder, and Stop when it is done. The import opens in the player with suggested cuts wherever the recorder went quiet for the seconds set above. Check them, remove or add cuts, then split it into separate recordings or keep it as one. The whole import is always kept.</li>
         </ol>
       </details>
     </div>
@@ -155,6 +155,13 @@
           <button id="mark-save" class="primary">Save</button>
           <button id="mark-cancel">Cancel</button>
         </span>
+      </div>
+      <div id="cut-bar" hidden role="group" aria-label="Split this import">
+        <span id="cut-text"></span>
+        <span id="cut-list"></span>
+        <button id="cut-add" type="button" title="Add a cut where the play cursor is">✂ Add cut here</button>
+        <button id="cut-split" type="button" class="primary" title="Save one file per part beside this one (this one is kept)"></button>
+        <button id="cut-keep" type="button" title="Leave it as one recording">Keep as one</button>
       </div>
       <div id="marks" hidden>
         <div id="marks-list"></div>

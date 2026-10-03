@@ -15,9 +15,11 @@ next start finishes any left behind (live_recover) and says so.
 Live mode makes one file, "Live YYYY-MM-DD HH-MM-SS.wav". Import mode (a
 recorder's headphone output into line-in) records one file the same way,
 "Import YYYY-MM-DD HH-MM-SS (full).wav" when it is to be split on silence:
-after Stop a background job (openevp.silence: one pass over the whole file)
-writes one file per recording beside it, "Import YYYY-MM-DD HH-MM-SS (n).wav",
-which together are the whole file; the whole file is always kept. Stop (or a
+after Stop it opens in the player with suggested cuts (openevp.silence: one
+pass over the whole file, in the background), which the user edits and
+confirms (split_import); a background job then writes one file per part beside
+it, "Import YYYY-MM-DD HH-MM-SS (n).wav", which together are the whole file;
+the whole file is always kept. Stop (or a
 nearly full disk, or a file reaching 4 GB) finishes the file: the .part gets its
 final name (never over an existing file), the marks made while recording are
 stored against its fingerprint (computed while writing) and its fingerprint is
@@ -75,6 +77,9 @@ STOPPED_SIZE = "Recording stopped because the file reached 4 GB, the most a WAV 
 UPDATING = "An update is being installed, so OpenEVP is about to close. Record after it restarts."
 SPLITTING = "Wait for the import to be split into separate recordings, or cancel that."
 SPLIT_NO_SPACE = "there is not enough free space on the drive for the separate files"
+MAX_CUTS = 500                   # cuts in one split
+MIN_PIECE = 0.5                  # seconds: the shortest part a split makes
+JOB_JOIN = 10.0                  # seconds closing waits for the import jobs, in all
 UNRECOVERED = " (unrecovered).raw"
 STOPPED_IDLE = "Recording stopped because no audio arrived for a minute. What was recorded until then is saved."
 
@@ -264,7 +269,7 @@ class LiveOps:
         self._live = None                        # the _Session recording now
         self._parts_lock = threading.Lock()
         self._live_saved = None                  # Live settings picked in this session (when they could not be remembered)
-        self._splits = {}                        # job -> cancel Event: imports being split after Stop
+        self._splits = {}                        # job -> (cancel Event, thread): cuts being looked for, or a split
 
     # ---- state other parts of the app ask about ----
     def recording(self):
@@ -564,10 +569,12 @@ class LiveOps:
         out = {"ok": True, "files": files, "folder": os.path.basename(os.path.normpath(s.folder)),
                "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode}
         if s.split and s.saved and not self._stop.is_set():
-            job = self._start_split(s, s.saved[0])   # pieces come later ("import-split-*" events)
+            # An import: the cuts are suggested in the background ("import-suggest-*"), shown on
+            # the waveform for the user to confirm (split_import) or not.
+            job = self._start_job(self._suggest_job, s.saved[0]["path"], s.saved[0]["fp"], s.split)
             if job is not None:
-                out["split"] = {"job": job}
-        if s.mode == "live" and s.saved and open_player and not self._stop.is_set():
+                out["suggest"] = {"job": job, "fp": s.saved[0]["fp"]}
+        if (s.mode == "live" or s.split) and s.saved and open_player and not self._stop.is_set():
             # Saved either way; if it cannot be opened in the player, the page says why.
             try:
                 loaded = self._play_file(s.saved[-1]["path"], root=s.root, library=True)
@@ -663,47 +670,125 @@ class LiveOps:
         finally:
             self._live_lock.release()
 
-    # ---- splitting an import into one file per recording (after Stop) ----
-    def _start_split(self, s, saved):
-        """Start splitting a finished import on silence in the background; its job id,
-        or None when the app is closing."""
+    # ---- splitting an import: suggested cuts, confirmed by the user, then the split ----
+    def _start_job(self, target, *args):
+        """Run target(job, cancel, *args) on a thread of its own; its id, or None when the
+        app is closing. The id is registered before the thread starts (cancel works at
+        once); the page buffers events of a job it does not know yet (live.js), so an
+        event that comes before the id reaches the page is never lost."""
         job = secrets.token_hex(6)
         cancel = threading.Event()
-        thread = threading.Thread(target=self._split_job, args=(job, cancel, s, saved), name="import-split")
-        with self._workers_lock:                 # started and registered in one step against shutdown()
+        thread = threading.Thread(target=self._run_job, args=(job, target, cancel) + args, name="import-job",
+                                  daemon=True)
+        with self._workers_lock:
             if self._stop.is_set():
                 return None
-            self._splits[job] = cancel
-            try:
-                thread.start()
-            except Exception:
-                del self._splits[job]
-                return None
-            self._workers = [t for t in self._workers if t.is_alive()] + [thread]
+            self._splits[job] = (cancel, thread)
+        try:
+            thread.start()
+        except Exception:
+            self._splits.pop(job, None)
+            return None
         return job
 
+    def _run_job(self, job, target, cancel, *args):
+        try:
+            target(job, cancel, *args)
+        finally:
+            self._splits.pop(job, None)
+
     def cancel_import_split(self, job):
-        """Stop splitting an import (its whole file stays as it is)."""
-        cancel = self._splits.get(job) if isinstance(job, str) else None
-        if cancel is None:
+        """Stop looking for cuts in an import, or stop splitting it (its file stays as it is)."""
+        held = self._splits.get(job) if isinstance(job, str) else None
+        if held is None:
             return _fail("That import is no longer being split.")
-        cancel.set()
+        held[0].set()
         return {"ok": True}
 
     def splitting(self):
-        """True while an import is being split into pieces."""
+        """True while cuts are being looked for in an import, or it is being split."""
         return bool(self._splits)
 
-    def _split_job(self, job, cancel, s, saved):
-        """Split the import's file (kept as it is) into one WAV per recording: openevp.silence
-        finds the cuts in one pass over the whole file, then each piece is written to a
-        .part (listed in "live_parts" with a "derived" sidecar: a crash leaves nothing to
-        finish, the next start deletes them) and, once all are written, each gets its
-        name, its share of the marks and its fingerprint in the index. Cancelled, failed,
-        or the app closing: the pieces made so far are deleted and the page is told."""
-        path, fp = saved["path"], saved["fp"]
+    def _stop_jobs(self, timeout=None):
+        """Closing: every import job is told to stop, then waited for, at most timeout
+        seconds in all (a job never blocks on the page: events are posted, not sent)."""
+        timeout = JOB_JOIN if timeout is None else timeout
+        jobs = list(self._splits.values())
+        for cancel, _ in jobs:
+            cancel.set()
+        deadline = time.monotonic() + timeout
+        for _, thread in jobs:
+            thread.join(max(0.0, deadline - time.monotonic()))
+
+    def _suggest_job(self, job, cancel, path, fp, gap):
+        """Look for the gaps between recordings in a finished import (openevp.silence, one
+        pass over the file) and tell the page where it suggests cutting: "import-suggest-done"
+        {job, fp, cuts (seconds), duration}, or "import-suggest-failed"."""
         stopped = lambda: cancel.is_set() or self._stop.is_set()   # noqa: E731
         shown = [-1]
+
+        def progress(done, total):
+            pct = int(100 * done / max(1, total))
+            if pct != shown[0]:
+                shown[0] = pct
+                self._emit("import-suggest-progress", {"job": job, "percent": pct})
+        try:
+            cuts, rate, _channels, frames = silence.plan(path, gap, stopped, progress)
+            self._emit("import-suggest-done", {"job": job, "fp": fp, "duration": round(frames / rate, 3),
+                                               "cuts": [round(c / rate, 3) for c in cuts]})
+        except Exception as e:
+            self._emit("import-suggest-failed", {"job": job, "fp": fp, "cancelled": isinstance(e, silence.Cancelled),
+                                                 "error": f"Could not look for the gaps in {os.path.basename(path)}: "
+                                                          f"{_plain(e)}. You can still add cuts yourself."})
+
+    def split_import(self, rec, cuts):
+        """Split the recording loaded in the player (rec: its handle; a WAV in the library)
+        at the cuts the user confirmed (seconds, from the suggestions and their own), into
+        one WAV per part beside it; the recording itself is kept. {"ok", "job"}: progress
+        and the result come as "import-split-*" events."""
+        entry = self._entry(rec)
+        if entry is None:
+            return _fail("Load the recording again.")
+        src = entry.get("source") or {}
+        path, root = src.get("path"), src.get("library")
+        if src.get("kind") != "file" or not root or not path or not path.lower().endswith(".wav") or not entry.get("fp"):
+            return _fail("Only a WAV in the EVP Library can be split.")
+        duration = entry.get("duration") or 0
+        if not isinstance(cuts, list) or not cuts or len(cuts) > MAX_CUTS or any(
+                isinstance(c, bool) or not isinstance(c, (int, float)) or c != c for c in cuts):
+            return _fail("Choose where to split first.")
+        cuts = sorted(float(c) for c in cuts)
+        edges = [0.0] + cuts + [float(duration)]
+        if cuts[0] <= 0 or cuts[-1] >= duration or any(b - a < MIN_PIECE for a, b in zip(edges, edges[1:])):
+            return _fail(f"Each part must be at least {MIN_PIECE:g} seconds long.")
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        if self._store is None or self._store.read_only:
+            return _fail(f"{NO_STORE}: {self._store.read_only_reason if self._store else 'it could not be opened'}")
+        with self._live_lock:
+            if self._live is not None:
+                return _fail(RECORDING)
+            if self._splits:
+                return _fail(SPLITTING)
+            got = self._check_library_file(root, path)      # still that file, inside the same library folder
+            if isinstance(got, dict):
+                return got
+            folder = os.path.dirname(path)
+            job = self._start_job(self._split_job, root, folder, path, entry["fp"], cuts)
+        if job is None:
+            return _fail(CLOSING)
+        return {"ok": True, "job": job}
+
+    def _split_job(self, job, cancel, root, folder, path, fp, cut_seconds):
+        """Split a WAV (kept as it is) at the confirmed cuts into one WAV per part: each is
+        written to a .part (listed in "live_parts" with a "derived" sidecar: a crash leaves
+        nothing to finish, the next start deletes them) and, once all are written, each
+        gets its name, its share of the marks and its fingerprint in the index. Cancelled,
+        failed, or the app closing: the parts made so far are deleted and the page is told."""
+        stopped = lambda: cancel.is_set() or self._stop.is_set()   # noqa: E731
+        shown = [-1]
+        stem = os.path.splitext(os.path.basename(path))[0]
+        base = stem[:-len(" (full)")] if stem.endswith(" (full)") else stem
 
         def progress(fraction):
             pct = int(100 * fraction)
@@ -714,25 +799,28 @@ class LiveOps:
         pins = folders.Pins()
         try:
             try:
-                pins.chain(s.root, s.folder)
+                pins.chain(root, folder)
             except (OSError, ValueError):
                 raise _Moved() from None
-            if not s.contained() or not os.path.isfile(path):
+            if not folders.inside(root, path):
                 raise _Moved()
-            cuts, rate, channels, n = silence.plan(path, s.split, stopped, lambda d, t: progress(0.5 * d / max(1, t)))
-            if not cuts:
-                self._emit("import-split-done", {"job": job, "files": [], "folder": os.path.basename(s.folder),
-                                                 "full": os.path.basename(path)})
-                return
-            if shutil.disk_usage(s.folder).free - os.path.getsize(path) < RESERVE_BYTES:
-                raise OSError(SPLIT_NO_SPACE)
-            bounds = list(zip([0] + cuts, cuts + [n]))
-            copied = 0
             with wave.open(path) as w:
+                rate, channels, n = w.getframerate(), w.getnchannels(), w.getnframes()
+                if w.getsampwidth() != 2:
+                    raise ValueError("only 16-bit PCM can be split")
+                if wavinfo.wav_fingerprint(path, should_stop=stopped) != fp:
+                    raise ValueError("it changed since it was loaded")
+                cuts = sorted({int(round(c * rate)) for c in cut_seconds if 0 < int(round(c * rate)) < n})
+                if not cuts:
+                    raise ValueError("there is nothing to split")
+                if shutil.disk_usage(folder).free - os.path.getsize(path) < RESERVE_BYTES:
+                    raise OSError(SPLIT_NO_SPACE)
+                bounds = list(zip([0] + cuts, cuts + [n]))
+                copied = 0
                 for i, (a, b) in enumerate(bounds, 1):
-                    if not s.contained():
+                    if not folders.inside(root, folder, allow_root=True):
                         raise _Moved()
-                    piece = _Piece(s.folder, f"Import {s.stamp} ({i}).wav", rate, channels, a, "import", derived=True)
+                    piece = _Piece(folder, f"{base} ({i}).wav", rate, channels, a, "import", derived=True)
                     parts.append(piece)
                     self._register_part(piece.part)
                     w.setpos(a)
@@ -742,23 +830,23 @@ class LiveOps:
                             raise silence.Cancelled()
                         data = w.readframes(min(left, silence.READ_FRAMES))
                         if not data:
-                            raise ValueError("the import's file is shorter than it was")
+                            raise ValueError("the file is shorter than it was")
                         piece.writer.write(data)
                         k = len(data) // (2 * channels)
                         left -= k
                         copied += k
-                        progress(0.5 + 0.5 * copied / max(1, n))
+                        progress(copied / max(1, n))
                     piece.result = piece.writer.close()
             if stopped():
                 raise silence.Cancelled()
-            full_marks = self._store.marks(fp)
+            all_marks = self._store.marks(fp)
             files = []
             for piece, (a, b) in zip(parts, bounds):
                 got, pfp = piece.result
-                target = livewav.publish(piece.part, s.folder, piece.name)
+                target = livewav.publish(piece.part, folder, piece.name)
                 seconds = got / rate
                 lo, hi = a / rate, b / rate
-                mine = [{**m, "start": m["start"] - lo, "end": m["end"] - lo} for m in full_marks
+                mine = [{**m, "start": m["start"] - lo, "end": m["end"] - lo} for m in all_marks
                         if (lo < m["end"] <= hi) or (a == 0 and m["end"] <= hi)]
                 stored = self._store_live_marks(pfp, target, seconds, mine)
                 _remove(piece.sidecar)
@@ -767,7 +855,7 @@ class LiveOps:
                 self._index_live(target, pfp, seconds)
                 files.append({"id": _file_id(target), "name": os.path.basename(target),
                               "seconds": round(seconds, 1), "marks": stored})
-            self._emit("import-split-done", {"job": job, "files": files, "folder": os.path.basename(s.folder),
+            self._emit("import-split-done", {"job": job, "files": files, "folder": os.path.basename(folder),
                                              "full": os.path.basename(path)})
         except Exception as e:
             for piece in parts:
@@ -780,7 +868,7 @@ class LiveOps:
                 _remove(piece.part)
                 _remove(piece.sidecar)
                 self._unregister_part(piece.part)
-            cancelled = isinstance(e, silence.Cancelled)
+            cancelled = isinstance(e, (silence.Cancelled, wavinfo.Stopped))
             reason = "it was cancelled" if cancelled else (
                 "its folder is no longer where it was in the library" if isinstance(e, _Moved) else _plain(e))
             self._emit("import-split-failed", {"job": job, "cancelled": cancelled, "full": os.path.basename(path),
@@ -788,7 +876,6 @@ class LiveOps:
                                                         f"recordings: {reason}. It is kept as one file."})
         finally:
             pins.close()
-            self._splits.pop(job, None)
 
     # ---- crash recovery ----
     def live_recover(self):

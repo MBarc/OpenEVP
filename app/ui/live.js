@@ -20,10 +20,13 @@ const LV = {
   wave: { cols: [], min: 32768, max: -32769, n: 0, perCol: 0 },
   spec: { bins: null, last: 0, lut: null, img: null },
   raf: 0, lastStatus: 0, drawn: 0, color: "",
-  split: null,                           // an import being split after Stop: {job, text}
+  cuts: null,                            // an import's cuts: {job, fp, cuts, suggested, looking, splitJob}
+  cutRegions: [],                        // the cuts drawn on the waveform
+  jobs: new Map(), jobEvents: new Map(), // import jobs the page knows (job -> handler); events of jobs it does not yet
 };
 const LIVE_COLS_PER_SEC = 40;            // waveform and spectrogram: the same time scale, 25 ms a column
 const LIVE_CHUNK_SEC = 0.5;              // audio sent to the backend per call
+const CUT_MIN = 0.5;                     // seconds: a cut needs this much on each side (app/live.py MIN_PIECE)
 const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by the backend, at most
 const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
 const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
@@ -381,14 +384,15 @@ async function pump(rec) {
       rec.queuedFrames -= c.frames;
       rec.inflightFrames = c.frames;
       const r = await callWithTimeout(() => api().live_chunk(rec.session, c.seq, c.data), LIVE_CALL_MS);
+      const unsure = rec.inflightFrames;                // 0 if Stop already counted it as missing
       rec.inflightFrames = 0;
       if (r.timeout) {                                  // it may or may not have arrived: counted as missing
         rec.dead = true; rec.failed = NOT_ANSWERING;
-        lose(rec, c.frames, "OpenEVP stopped answering");
+        lose(rec, unsure, "OpenEVP stopped answering");
         loseBacklog(rec, "OpenEVP stopped answering");
         break;
       }
-      if (!r.ok) { rec.failed = r.error; lose(rec, c.frames, r.error); loseBacklog(rec, r.error); break; }
+      if (!r.ok) { rec.failed = r.error; lose(rec, unsure, r.error); loseBacklog(rec, r.error); break; }
       rec.status = r;
       if (r.stopped) { rec.ended = true; rec.stoppedBy = r; loseBacklog(rec, "the recording had stopped"); break; }
       afterChunk(rec);
@@ -487,6 +491,12 @@ function lose(rec, frames, why) {
   if (why && !rec.losses.includes(why)) rec.losses.push(why);
 }
 
+// The chunk in flight when Stop gives up on it: counted as missing (once: the sender then sees 0).
+function loseInflight(rec, why) {
+  lose(rec, rec.inflightFrames, why);
+  rec.inflightFrames = 0;
+}
+
 // Sending ended unsuccessfully: every chunk still queued is missing too.
 function loseBacklog(rec, why) {
   lose(rec, rec.queuedFrames, why);
@@ -514,14 +524,18 @@ async function runStop(rec, opts) {
   if (drain && !rec.ended) {
     queueChunk(rec);
     if (!await drained(rec, LIVE_DRAIN_MS)) {
-      rec.abandoned = true;
-      lose(rec, rec.queuedFrames + rec.pendingFrames, "saving the last of it took too long");
+      rec.abandoned = true;                             // the chunk in flight, the queue and the rest: missing
+      const why = "saving the last of it took too long";
+      loseInflight(rec, why);
+      lose(rec, rec.queuedFrames + rec.pendingFrames, why);
+      rec.queue = []; rec.queuedFrames = 0; rec.pending = []; rec.pendingFrames = 0;
     }
   } else {
     rec.abandoned = true;
     lose(rec, rec.queuedFrames + rec.pendingFrames, rec.overflow ? "it could not be saved fast enough" : "");
     rec.queue = []; rec.queuedFrames = 0; rec.pending = []; rec.pendingFrames = 0;
     if (rec.sending) await Promise.race([rec.sending, liveDelay(LIVE_CALL_MS)]);
+    loseInflight(rec, rec.overflow ? "it could not be saved fast enough" : "OpenEVP stopped answering");
   }
   let r;
   if (rec.stoppedBy) r = rec.stoppedBy.result;
@@ -572,15 +586,12 @@ async function recordingDone(rec, r, reason, opts = {}) {
   else if (files.length === 1) msg = `Saved ${files[0].name} in ${r.folder}`;
   else msg = `Saved ${plural(files.length, "recording")} in ${r.folder}`;
   if (files.length) msg = truncated ? `${msg}, but ${missingText} (${why}).` : `✓ ${msg}.`;
-  if (r.split) {                           // an import: split into one file per recording in the background
-    LV.split = { job: r.split.job, text: [reason, msg, ...notes].filter(Boolean).join(" ") };
-    notes.push("Splitting it into separate recordings…");
+  if (r.suggest) {                         // an import: cuts are suggested, then the user decides
+    LV.cuts = { job: r.suggest.job, fp: r.suggest.fp, cuts: [], suggested: null, looking: true, splitJob: null };
+    registerJob(r.suggest.job, suggestEvent);
   }
   const text = [reason, msg, ...notes].filter(Boolean).join(" ");
-  if (r.split) {
-    banner(text, reason || truncated ? "warn" : "ok", { label: "Cancel splitting", run: cancelSplit });
-    progress(0, 100);
-  } else banner(text, reason || notes.length || !files.length || truncated ? "warn" : "ok");
+  banner(text, reason || notes.length || !files.length || truncated ? "warn" : "ok");
   if (opts.open === false) return r;
   await loadLibrary();
   if (r.player && files.length) {
@@ -593,33 +604,172 @@ async function recordingDone(rec, r, reason, opts = {}) {
     scheduleLibraryRender();
     await loadIntoPlayer(seq, files[0].name, r.player, false);
     banner(text, reason || notes.length || truncated ? "warn" : "ok");     // loading clears nothing, but say it last
+    showCuts();                                                            // an import's cuts, once known
   }
   return r;
 }
 
-// ---- an import split into one file per recording, after Stop (app/live.py _split_job) ----
+// ---- an import: suggested cuts on the waveform, confirmed by the user, then the split ----
+// After an import's Stop the whole recording opens in the player; the backend looks for the gaps
+// between recordings (app/live.py _suggest_job) and the page draws them as cuts on the waveform.
+// The user removes cuts, adds their own (at the play cursor), and confirms ("Split into N
+// recordings") or keeps the import as one. Nothing is split without that.
+// Job events can come before the page knows the job (the id comes back with Stop's answer, or
+// split_import's): they wait in LV.jobEvents until the job is registered.
+function registerJob(job, handler) {
+  LV.jobs.set(job, handler);
+  const waiting = LV.jobEvents.get(job) || [];
+  LV.jobEvents.delete(job);
+  for (const [event, p] of waiting) handler(event, p);
+}
+
+function liveJobEvent(event, p) {
+  const handler = LV.jobs.get(p.job);
+  if (handler) { handler(event, p); return; }
+  if (!LV.jobEvents.has(p.job)) {
+    LV.jobEvents.set(p.job, []);
+    while (LV.jobEvents.size > 20) LV.jobEvents.delete(LV.jobEvents.keys().next().value);
+  }
+  LV.jobEvents.get(p.job).push([event, p]);
+}
+
+function suggestEvent(event, p) {
+  const C = LV.cuts;
+  if (!C || C.job !== p.job) return;
+  if (event === "import-suggest-progress") { status(`Looking for the gaps between recordings… ${p.percent}%`); return; }
+  LV.jobs.delete(p.job);
+  status("");
+  C.looking = false;
+  if (event === "import-suggest-done") {
+    C.cuts = p.cuts.slice();
+    C.suggested = p.cuts.length;
+  } else {
+    C.cuts = [];
+    C.suggested = 0;
+    banner(p.error, "warn");
+  }
+  showCuts();
+}
+
+function cutsShown() { return !!(LV.cuts && S.current && S.current.fp === LV.cuts.fp); }
+
+// The cut bar under the waveform, and the cuts drawn on it.
+function showCuts() {
+  const C = LV.cuts, bar = $("cut-bar");
+  clearCutRegions();
+  if (!cutsShown() || C.looking) { bar.hidden = true; return; }
+  bar.hidden = false;
+  const n = C.cuts.length, busy = !!C.splitJob;
+  $("cut-text").textContent = busy ? "Splitting…"
+    : !n ? (C.suggested === 0 ? "No gaps between recordings found. Play to a spot between two recordings and add a cut there, or keep it as one."
+                              : "No cuts. Add one at the play cursor, or keep it as one.")
+         : `${plural(n, "cut")}. Remove any that are wrong (✕), add one at the play cursor, then split.`;
+  const list = $("cut-list");
+  list.textContent = "";
+  C.cuts.forEach((t, i) => {
+    const chip = document.createElement("span");
+    chip.className = "cut-chip";
+    const at = document.createElement("button");
+    at.type = "button"; at.className = "link"; at.textContent = `✂ ${fmtPrecise(t)}`;
+    at.title = "Play from here";
+    at.onclick = () => { S.ws.setTime(Math.max(0, t - 1)); S.ws.play(); };
+    const x = document.createElement("button");
+    x.type = "button"; x.className = "cut-remove"; x.textContent = "✕"; x.title = "Remove this cut";
+    x.disabled = busy;
+    x.onclick = () => removeCut(i);
+    chip.append(at, x);
+    list.appendChild(chip);
+    if (S.regions && S.regions.addRegion) {
+      const region = S.regions.addRegion({ id: `cut-${i}`, start: t, color: "rgba(200, 50, 50, 0.9)", content: "✂",
+                                           drag: false, resize: false });
+      LV.cutRegions.push(region);
+    }
+  });
+  $("cut-add").disabled = busy;
+  $("cut-keep").disabled = busy;
+  $("cut-split").disabled = busy || !n;
+  $("cut-split").textContent = `Split into ${plural(n + 1, "recording")}`;
+}
+
+function clearCutRegions() {
+  for (const r of LV.cutRegions) { try { r.remove(); } catch (e) { /* gone */ } }
+  LV.cutRegions = [];
+}
+
+function removeCut(i) {
+  if (!LV.cuts || LV.cuts.splitJob) return;
+  LV.cuts.cuts.splice(i, 1);
+  showCuts();
+}
+
+function addCut() {
+  const C = LV.cuts;
+  if (!C || C.splitJob || !S.current) return;
+  const t = Math.round(S.ws.getCurrentTime() * 1000) / 1000, d = S.current.duration || 0;
+  if (t < CUT_MIN || t > d - CUT_MIN || C.cuts.some((c) => Math.abs(c - t) < CUT_MIN)) {
+    status(`A cut needs at least ${CUT_MIN} seconds on each side. Move the play cursor and try again.`);
+    return;
+  }
+  status("");
+  C.cuts.push(t);
+  C.cuts.sort((a, b) => a - b);
+  showCuts();
+}
+
+// A cut on the waveform was clicked (app.js regionClicked): it goes.
+function cutClicked(region) {
+  const i = LV.cutRegions.indexOf(region);
+  if (i >= 0) removeCut(i);
+}
+
+async function splitImport() {
+  const C = LV.cuts;
+  if (!C || C.splitJob || !C.cuts.length || !S.current) return;
+  const r = await api().split_import(S.current.rec, C.cuts.slice());
+  if (!r.ok) { banner([r.error, r.advice].filter(Boolean).join(" ")); return; }
+  C.splitJob = r.job;
+  banner("Splitting it into separate recordings…", "ok", { label: "Cancel splitting", run: cancelSplit });
+  progress(0, 100);
+  showCuts();
+  registerJob(r.job, splitEvent);
+}
+
+function keepAsOne() {
+  if (!LV.cuts || LV.cuts.splitJob) return;
+  LV.cuts = null;
+  showCuts();
+  banner("Kept as one recording.", "ok");
+}
+
 async function cancelSplit() {
-  if (!LV.split) return;
-  const r = await api().cancel_import_split(LV.split.job);
+  if (!LV.cuts || !LV.cuts.splitJob) return;
+  const r = await api().cancel_import_split(LV.cuts.splitJob);
   if (!r.ok) banner(r.error);
 }
 
-function liveSplitEvent(event, p) {
-  if (!LV.split || p.job !== LV.split.job) return;
+function splitEvent(event, p) {
+  if (!LV.cuts || p.job !== LV.cuts.splitJob) return;
   if (event === "import-split-progress") {
     progress(p.percent, 100);
     status(`Splitting the import into separate recordings… ${p.percent}%`);
     return;
   }
-  LV.split = null;
+  LV.jobs.delete(p.job);
+  LV.cuts = null;
+  showCuts();
   progress(0, null);
   status("");
   if (event === "import-split-done") {
-    banner(p.files.length
-      ? `✓ Split ${p.full} into ${plural(p.files.length, "recording")} in ${p.folder}. The whole import is kept too.`
-      : `No gaps between recordings were found in ${p.full}, so it stays one file.`, "ok");
+    banner(`✓ Split ${p.full} into ${plural(p.files.length, "recording")} in ${p.folder}. The whole import is kept too.`, "ok");
   } else banner(p.error, "warn");
   loadLibrary();
+}
+
+// Another recording was loaded in the player (app.js setCurrent): the cuts belong to the import.
+function liveCutsLeft(r) {
+  if (LV.cuts && !LV.cuts.splitJob && (!r || r.fp !== LV.cuts.fp)) LV.cuts = null;
+  clearCutRegions();
+  $("cut-bar").hidden = true;
 }
 
 // ---- drawing: meter, waveform, spectrogram (animation frames only) ----
@@ -763,6 +913,9 @@ function setupLive() {
   $("live-enhance").onchange = applyMonitor;
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());
   $("live-mark").onclick = liveMark;
+  $("cut-add").onclick = addCut;
+  $("cut-split").onclick = splitImport;
+  $("cut-keep").onclick = keepAsOne;
   document.addEventListener("keydown", liveKeys);
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener("devicechange", inputsChanged);

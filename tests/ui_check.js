@@ -2626,49 +2626,108 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok($("live-gap").disabled);
   $("live-split").checked = true; $("live-split").onchange();
   $("live-folder").value = "root";
-  // An import records one file; after Stop it is split in the background (progress, Cancel), and
-  // the pieces are listed when that is done.
+  // An import records one file; after Stop it opens in the player with suggested cuts cutsDrawn on the
+  // waveform. The user removes and adds cuts, then splitCalls (or keeps it as one). Job events that come
+  // before the page knows the job are kept for it.
   chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Import 2026-10-03 21-05-09 (full).wav", stopped: null });
-  const stopsBefore = lv.filter((c) => c[0] === "stop").length;
   await $("live-record").onclick();
   sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "import", folder: "root", rate: 48000, channels: 2, split: 5 });
   assert.strictEqual($("live-file").textContent, "Recording Import 2026-10-03 21-05-09 (full).wav");
   const tap3 = worklets[worklets.length - 1];
-  const feed = () => { const pcm = new Int16Array(24000 * 2); tap3.port.onmessage({ data: { pcm: pcm.buffer, frames: 24000, peak: 0, sumsq: 0 } }); };
-  feed(); await settle();
-  stopAnswer = { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0, split: { job: "j1" },
-                 files: [{ id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 1 }] };
-  const cancels = [];
-  api.cancel_import_split = async (job) => { cancels.push(job); return { ok: true }; };
+  tap3.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  // A player and regions that remember what is cutsDrawn, and a play cutCursor the test moves.
+  let cutCursor = 0;
+  const cutsDrawn = new Map();
+  const cutRegionsFake = new Proxy({ addRegion(o) { const r = { id: o.id, start: o.start, remove() { cutsDrawn.delete(o.id); } };
+                                                cutsDrawn.set(o.id, r); return r; },
+                                  getRegions: () => [...cutsDrawn.values()] },
+                                { get: (t, k) => (k in t ? t[k] : anything) });
+  const cutWsFake = new Proxy({ getCurrentTime: () => cutCursor, getDuration: () => 71, setTime(t) { cutCursor = t; } },
+                           { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__fws = cutWsFake; context.__frg = cutRegionsFake;
+  vm.runInContext("S.ws = __fws; S.regions = __frg;", context);
+  const importPlayerR = { ok: true, rec: "r-imp", url: "http://a/imp.wav", peaks: [0.1], duration: 71, rate: 48000, channels: 2,
+                         fp: "fp-imp", marks: [], reviewed: false, backup: { status: null, detail: "" },
+                         name: "Import 2026-10-03 21-05-09 (full).wav" };
+  api.live_stop = async () => {
+    lv.push(["stop"]);
+    // The suggestions are ready before Stop's answer reaches the page: they must not be lost.
+    window.onBackendEvent("import-suggest-done", { job: "s1", fp: "fp-imp", duration: 71, cuts: [10.5, 30.25] });
+    return { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0, player: importPlayerR,
+             suggest: { job: "s1", fp: "fp-imp" }, files: [{ id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 0 }] };
+  };
   await $("live-record").onclick();
   await settle();
-  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsBefore + 1);
-  assert.strictEqual($("banner-text").textContent,
-                     "✓ Saved Import 2026-10-03 21-05-09 (full).wav in OpenEVP. Splitting it into separate recordings…");
-  assert.strictEqual($("banner-action").textContent, "Cancel splitting");
-  assert.strictEqual(vm.runInContext("S.view", context), "live", "an import stays in the view");
-  window.onBackendEvent("import-split-progress", { job: "other", percent: 50 });     // not this import's
-  assert.notStrictEqual($("status").textContent, "Splitting the import into separate recordings… 50%");
-  window.onBackendEvent("import-split-progress", { job: "j1", percent: 40 });
+  assert.strictEqual(vm.runInContext("S.view", context), "library", "the import opens in the player");
+  assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-imp");
+  assert.ok(!$("cut-bar").hidden);
+  const cutChips = () => $("cut-list").children.map((c) => c.children[0].textContent);
+  assert.deepStrictEqual(cutChips(), ["✂ 0:10.5", "✂ 0:30.3"]);
+  assert.deepStrictEqual([...cutsDrawn.keys()], ["cut-0", "cut-1"]);
+  assert.strictEqual($("cut-split").textContent, "Split into 3 recordings");
+  assert.ok(!html.slice(html.indexOf('id="cut-bar"'), html.indexOf('id="marks"')).includes("—"));
+  // Remove a suggestion (its ✕), add one at the play cutCursor, refuse one too close, remove by clicking it.
+  $("cut-list").children[1].children[1].onclick();
+  assert.strictEqual(cutChips().length, 1);
+  assert.deepStrictEqual([...cutsDrawn.keys()], ["cut-0"]);
+  assert.strictEqual($("cut-split").textContent, "Split into 2 recordings");
+  cutCursor = 50; $("cut-add").onclick();
+  cutCursor = 10.7; $("cut-add").onclick();
+  assert.ok(/at least 0.5 seconds/.test($("status").textContent));
+  sameJSON(vm.runInContext("LV.cuts.cuts", context), [10.5, 50]);
+  cutCursor = 60; $("cut-add").onclick();
+  context.regionClicked(cutsDrawn.get("cut-2"), { stopPropagation() {} });                      // clicking a cut removes it
+  sameJSON(vm.runInContext("LV.cuts.cuts", context), [10.5, 50]);
+  // Split: the confirmed cuts go to the backend; its progress may come before its answer.
+  const splitCalls = [], splitCancels = [];
+  api.split_import = async (rec, cuts) => {
+    splitCalls.push([rec, cuts]);
+    window.onBackendEvent("import-split-progress", { job: "j9", percent: 40 });
+    return { ok: true, job: "j9" };
+  };
+  api.cancel_import_split = async (job) => { splitCancels.push(job); return { ok: true }; };
+  await $("cut-split").onclick();
+  await settle();
+  sameJSON(splitCalls, [["r-imp", [10.5, 50]]]);
   assert.strictEqual($("status").textContent, "Splitting the import into separate recordings… 40%");
   assert.strictEqual($("progress-fill").style.width, "40%");
+  assert.strictEqual($("banner-action").textContent, "Cancel splitting");
+  assert.ok($("cut-add").disabled && $("cut-split").disabled && $("cut-keep").disabled);
+  window.onBackendEvent("import-split-progress", { job: "other", percent: 90 });         // another job's: kept aside
+  assert.strictEqual($("status").textContent, "Splitting the import into separate recordings… 40%");
   await $("banner-action").onclick();
-  sameJSON(cancels, ["j1"]);
-  window.onBackendEvent("import-split-done", { job: "j1", folder: "OpenEVP", full: "Import 2026-10-03 21-05-09 (full).wav",
-                                               files: [{ id: "p1", name: "Import 2026-10-03 21-05-09 (1).wav" },
-                                                       { id: "p2", name: "Import 2026-10-03 21-05-09 (2).wav" }] });
+  sameJSON(splitCancels, ["j9"]);
+  window.onBackendEvent("import-split-done", { job: "j9", folder: "OpenEVP", full: "Import 2026-10-03 21-05-09 (full).wav",
+                                               files: [{ id: "p1" }, { id: "p2" }, { id: "p3" }] });
   assert.strictEqual($("banner-text").textContent,
-                     "✓ Split Import 2026-10-03 21-05-09 (full).wav into 2 recordings in OpenEVP. The whole import is kept too.");
-  assert.ok($("progress").hidden && $("status").textContent === "");
-  // No gaps found; or the split failed (cancelled): the whole file stays, and that is said.
-  for (const [event, p, text] of [
-    ["import-split-done", { files: [] }, "No gaps between recordings were found in Import x (full).wav, so it stays one file."],
-    ["import-split-failed", { cancelled: true, error: "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file." },
-     "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file."]]) {
-    vm.runInContext(`LV.split = { job: "j2", text: "" };`, context);
-    window.onBackendEvent(event, { job: "j2", folder: "OpenEVP", full: "Import x (full).wav", ...p });
-    assert.strictEqual($("banner-text").textContent, text);
-  }
+                     "✓ Split Import 2026-10-03 21-05-09 (full).wav into 3 recordings in OpenEVP. The whole import is kept too.");
+  assert.ok($("cut-bar").hidden && $("progress").hidden && $("status").textContent === "");
+  assert.strictEqual(cutsDrawn.size, 0);
+  // Keep as one: nothing is split; no gaps found: the bar says so; a failed split: said, the file kept.
+  vm.runInContext(`LV.cuts = { job: "s2", fp: "fp-imp", cuts: [12], suggested: 1, looking: false, splitJob: null }; showCuts();`, context);
+  assert.ok(!$("cut-bar").hidden);
+  $("cut-keep").onclick();
+  assert.ok($("cut-bar").hidden);
+  assert.strictEqual($("banner-text").textContent, "Kept as one recording.");
+  assert.strictEqual(splitCalls.length, 1);
+  vm.runInContext(`LV.cuts = { job: "s3", fp: "fp-imp", cuts: [], suggested: null, looking: true, splitJob: null };`, context);
+  context.registerJob("s3", context.suggestEvent);
+  window.onBackendEvent("import-suggest-done", { job: "s3", fp: "fp-imp", duration: 71, cuts: [] });
+  assert.ok(/^No gaps between recordings found/.test($("cut-text").textContent));
+  assert.ok($("cut-split").disabled);
+  vm.runInContext(`LV.cuts = { job: "s4", fp: "fp-imp", cuts: [20], suggested: 1, looking: false, splitJob: "j8" };`, context);
+  context.registerJob("j8", context.splitEvent);
+  window.onBackendEvent("import-split-failed", { job: "j8", cancelled: true, full: "Import x (full).wav",
+                                                 error: "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file." });
+  assert.strictEqual($("banner-text").textContent,
+                     "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file.");
+  // Another recording loaded in the player: the cuts go.
+  vm.runInContext(`LV.cuts = { job: "s5", fp: "fp-imp", cuts: [20], suggested: 1, looking: false, splitJob: null };`, context);
+  vm.runInContext(`setCurrent("other", { rec: "r2", fp: "fp-other", duration: 5, marks: [] });`, context);
+  assert.ok($("cut-bar").hidden && vm.runInContext("LV.cuts === null", context));
+  context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
+  vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   // A backend that stops the import by itself (a nearly full disk): said, and what was saved.
   await context.openLive();
   await settle();
@@ -2833,6 +2892,33 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(window.__liveDrained, true);
   assert.strictEqual(stopCalls, 1);
   assert.strictEqual(tapW.port.posted.filter((m) => m.flush !== undefined).length, 1, "one flush");
+  // 6. Astra's drain case: three half-second chunks, the first two answered late, the third never.
+  //    Stop's 30 s drain limit runs out with the third in flight: the warning says 0.5 s (never "✓").
+  await context.openLive();
+  await settle();
+  const answers = [];
+  api.live_chunk = (sid, seq) => new Promise((resolve) => { answers.push(resolve); });
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "x1", name: "Live 2026-10-03 21-11-00.wav", seconds: 1, marks: 0 }] });
+  await $("live-record").onclick();
+  const tapX = worklets[worklets.length - 1];
+  for (let i = 0; i < 3; i++) tapX.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  const stoppingX = $("live-record").onclick();
+  await settle();
+  answers[0]({ ok: true, seconds: 0.5, file: "x", stopped: null }); await settle();
+  answers[1]({ ok: true, seconds: 1, file: "x", stopped: null }); await settle();
+  assert.strictEqual(answers.length, 3, "the third is in flight");
+  await fireLiveTimersAt(vm.runInContext("LIVE_DRAIN_MS", context));
+  await stoppingX;
+  await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-11-00.wav in OpenEVP, but the last 0.5 seconds " +
+                     "may be missing (saving the last of it took too long).");
+  await fireLiveTimersAt(vm.runInContext("LIVE_CALL_MS", context));   // the third's own timeout later: not counted twice
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-11-00.wav in OpenEVP, but the last 0.5 seconds " +
+                     "may be missing (saving the last of it took too long).");
+  liveTimers.length = 0;
   context.setTimeout = () => 0;
   $("live-close").onclick();
   await settle();

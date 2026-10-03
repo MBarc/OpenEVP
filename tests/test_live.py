@@ -173,16 +173,26 @@ class SplitterTests(unittest.TestCase):
         self.assertEqual(cuts_of([quiet(2, 1), voice(1.5), quiet(1, 4), voice(1), quiet(5, 2), voice(1.5),
                                   quiet(1, 5), voice(1), quiet(5, 3), voice(1.5)]), [])
 
-    def test_astras_third_case_splits_only_at_the_true_floor(self):
-        # 2 s at -50, 2 s at -30, 2 s at -15, 2 s at -30, 4 s at -65, more sound. Looked at as a whole,
-        # -65 dB is the quietest the input ever is: the only cut is in that stretch, half a second
-        # before the sound after it. The -50 dB stretch is not taken for the floor.
+    def test_astras_third_case_suggests_nothing(self):
+        # 2 s at -50, 2 s at -30, 2 s at -15, 2 s at -30, 4 s at -65, more sound: no level the
+        # recordings sit at with content standing out from it. Nothing is suggested.
         x = [noise(2, db=-50, seed=1), noise(2, db=-30, seed=2), noise(2, db=-15, seed=3), noise(2, db=-30, seed=4),
              noise(4, db=-65, seed=5), noise(3, db=-15, seed=6)]
-        self.assertEqual(cuts_of(x), [12 - 0.5])
-        # Without the -65 dB stretch, nothing in the file is quieter than the room tone at its
-        # start, which never comes back between sounds: no cut at all.
-        self.assertEqual(cuts_of(x[:4] + [noise(4, db=-30, seed=7), x[5]]), [])
+        self.assertEqual(cuts_of(x), [])
+
+    def test_a_first_long_pause_at_the_floor_between_loud_passages_is_not_a_gap(self):
+        # Astra's fourth pass: 2 s at -50, 5 s at -15, 5 s at -50, 5 s at -15. The -50 dB room is the
+        # floor and the recording's pauses sit at it; no background of its own: no suggestion.
+        self.assertEqual(cuts_of([noise(2, db=-50, seed=1), noise(5, db=-15, seed=2), noise(5, db=-50, seed=3),
+                                  noise(5, db=-15, seed=4)]), [])
+
+    def test_dips_to_the_floor_around_a_long_quiet_passage_are_not_one_gap(self):
+        # Astra's fourth pass: two 50 ms dips to the floor around 8 s at -79 dB (above the floor's
+        # 4 dB, under sound's 8 dB): what is between them is far too long to make them one gap.
+        rec = self.recording(5, 2)
+        dip = noise(0.05, db=-85, seed=9)
+        self.assertEqual(cuts_of([self.line(2, 1), rec, dip, noise(8, db=-79, seed=3), dip, self.recording(5, 4),
+                                  self.line(2, 5)]), [])
 
     def test_quiet_that_is_not_the_floor_does_not_split(self):
         # Under the recording's background but not back at the cable's idle hiss: no cut.
@@ -235,6 +245,25 @@ class SplitterTests(unittest.TestCase):
         t0 = clock.monotonic()
         self.assertEqual(silence.find_cuts(steady, RATE), [])
         self.assertLess(clock.monotonic() - t0, 5)
+
+    def test_thousands_of_rejected_candidates_take_well_under_a_second(self):
+        # Astra measured 1,000/2,000/4,000 rejected candidates at 3.2/9.8/38.1 s (a percentile over
+        # a growing prefix each time). Now prefix counts: linear.
+        import time as clock
+        rng = np.random.default_rng(1)
+        intro = [np.full(200, -50.0), np.full(60, -15.0), np.full(200, -50.0)]      # a recording: background + voice
+        block = [np.full(60, -85.0), np.full(40, -15.0)]                           # a gap, then loud with no background
+        for n in (1000, 4000):
+            levels = np.concatenate([np.full(40, -85.0)] + intro + block * n) + rng.normal(0, 0.3, 40 + 460 + 100 * n)
+            t0 = clock.monotonic()
+            silence.find_cuts(levels, RATE)
+            took = clock.monotonic() - t0
+            self.assertLess(took, 1.0, f"{n} candidates took {took:.2f} s")
+
+    def test_planning_stops_when_asked(self):
+        levels = np.full(72000, -60.0)
+        with self.assertRaises(silence.Cancelled):
+            silence.find_cuts(levels, RATE, should_stop=lambda: True)
 
 
 # ---- the backend: recording into the library -----------------------------------------
@@ -362,6 +391,8 @@ class LiveApiTests(Tmp):
         return np.concatenate([line(2, 1), rec(4, 2), line(5, 3), rec(3, 4), line(1, 5)])
 
     def record_import(self, a, stream, split=3.0, marks=()):
+        os.makedirs(self.lib, exist_ok=True)
+        a.list_library()                                  # the page lists the library before anything
         with mock.patch("app.live.datetime") as dt:
             dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 3, 9, 0, 0)
             r = self.start(a, mode="import", split=split)
@@ -380,89 +411,184 @@ class LiveApiTests(Tmp):
         self.assertTrue(ok, self.events.items)
         return next((n, p) for n, p in self.events.items if n in names)
 
-    def test_an_import_is_one_file_then_split_into_one_file_per_recording(self):
-        a = self.api()
-        stream = self.import_stream()
-        r, stop = self.record_import(a, stream, marks=(4.5, 9.5))
-        self.assertEqual(r["file"], "Import 2026-10-03 09-00-00 (full).wav")    # recorded as one file
-        self.assertEqual([f["name"] for f in stop["files"]], ["Import 2026-10-03 09-00-00 (full).wav"])
-        self.assertIn("job", stop["split"])
-        self.assertNotIn("player", stop)                 # an import does not open the player
+    def suggestions(self, a, stream, **kw):
+        r, stop = self.record_import(a, stream, **kw)
+        name, got = self.wait_event({"import-suggest-done", "import-suggest-failed"})
+        self.assertEqual(name, "import-suggest-done", got)
+        self.assertEqual(got["job"], stop["suggest"]["job"])
+        return r, stop, got
+
+    def split(self, a, rec, cuts):
+        r = a.split_import(rec, cuts)
+        self.assertTrue(r["ok"], r)
         name, done = self.wait_event({"import-split-done", "import-split-failed"})
         self.assertEqual(name, "import-split-done", done)
-        self.assertTrue(any(n == "import-split-progress" for n, _ in self.events.items))
+        self.assertEqual(done["job"], r["job"])
+        return done
+
+    def wait_idle(self, a):
+        import time as clock
+        for _ in range(200):                              # the job's thread ends just after its last event
+            if not a.splitting():
+                return
+            clock.sleep(0.01)
+        self.fail("the import job did not end")
+
+    def audio_of(self, name):
+        with wave.open(os.path.join(self.lib, name)) as w:
+            return w.readframes(w.getnframes())
+
+    def test_an_import_opens_with_suggested_cuts_and_splits_only_when_confirmed(self):
+        a = self.api()
+        stream = self.import_stream()
+        r, stop, got = self.suggestions(a, stream, marks=(4.5, 9.5))
+        full = "Import 2026-10-03 09-00-00 (full).wav"
+        self.assertEqual(r["file"], full)                 # recorded as one file
+        self.assertEqual([f["name"] for f in stop["files"]], [full])
+        self.assertTrue(stop["player"]["ok"])             # it opens in the player
+        self.assertEqual(got["fp"], stop["player"]["fp"])
+        self.assertEqual(got["cuts"], [2 + 4 + 5 - 0.5])  # suggested: half a second before the second recording
+        self.assertEqual(sorted(n for n in os.listdir(self.lib) if n.endswith(".wav")), [full])   # nothing split yet
+        done = self.split(a, stop["player"]["rec"], got["cuts"])
         names = [f["name"] for f in done["files"]]
         self.assertEqual(names, ["Import 2026-10-03 09-00-00 (1).wav", "Import 2026-10-03 09-00-00 (2).wav"])
         self.assertEqual([f["marks"] for f in done["files"]], [2, 0])
-        # The whole file is kept, and the pieces put together are exactly it.
-        audio = {}
-        for n in names + ["Import 2026-10-03 09-00-00 (full).wav"]:
-            with wave.open(os.path.join(self.lib, n)) as w:
-                audio[n] = w.readframes(w.getnframes())
-        self.assertEqual(audio[names[0]] + audio[names[1]], audio["Import 2026-10-03 09-00-00 (full).wav"])
-        self.assertEqual(audio["Import 2026-10-03 09-00-00 (full).wav"], pcm(stream))
-        self.assertAlmostEqual(len(audio[names[0]]) / 2 / RATE, 2 + 4 + 5 - 0.5, delta=0.001)
-        # Marks: the whole file has both; each piece the ones that end in it, at its own times.
+        self.assertEqual(self.audio_of(names[0]) + self.audio_of(names[1]), self.audio_of(full))
+        self.assertEqual(self.audio_of(full), pcm(stream))
         first = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, names[0])))
         self.assertEqual([m["end"] for m in first], [4.5, 9.5])
-        whole = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, "Import 2026-10-03 09-00-00 (full).wav")))
-        self.assertEqual([m["end"] for m in whole], [4.5, 9.5])
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
-        self.assertFalse(a.splitting())
+        self.wait_idle(a)
 
-    def test_marks_go_to_the_piece_they_end_in(self):
+    def test_a_split_follows_the_cuts_the_user_confirmed(self):
+        # The user removed the suggestion and put two cuts of their own: the split follows them.
         a = self.api()
-        r, stop = self.record_import(a, self.import_stream(), marks=(12.5,))
-        name, done = self.wait_event({"import-split-done", "import-split-failed"})
-        second = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, done["files"][1]["name"])))
-        self.assertEqual([(m["start"], m["end"]) for m in second], [(0.0, 2.0)])    # the piece starts at 10.5 s
+        r, stop, got = self.suggestions(a, self.import_stream(), marks=(12.5,))
+        done = self.split(a, stop["player"]["rec"], [6.0, 12.0])
+        names = [f["name"] for f in done["files"]]
+        self.assertEqual(len(names), 3)
+        self.assertEqual([round(len(self.audio_of(n)) / 2 / RATE, 3) for n in names], [6.0, 6.0, 3.0])
+        third = self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, names[2])))
+        self.assertEqual([(m["start"], m["end"]) for m in third], [(0.0, 0.5)])   # cut at its start
+        self.assertEqual(b"".join(self.audio_of(n) for n in names), self.audio_of("Import 2026-10-03 09-00-00 (full).wav"))
+
+    def test_bad_cut_lists_are_refused(self):
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream())
+        rec = stop["player"]["rec"]
+        for bad in ([], [0], [15.0], [-1], [5.0, 5.2], ["5"], [True], None, [float("nan")]):
+            self.assertFalse(a.split_import(rec, bad)["ok"], bad)
+        self.assertFalse(a.split_import("no-such-rec", [5.0])["ok"])
+
+    def test_keep_as_one_leaves_the_import_alone(self):
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream())
+        self.assertEqual(sorted(n for n in os.listdir(self.lib) if n.endswith(".wav")),
+                         ["Import 2026-10-03 09-00-00 (full).wav"])
+        self.assertFalse(a.splitting())
 
     def test_an_import_without_the_split_is_one_plain_file(self):
         a = self.api()
         r, stop = self.record_import(a, self.import_stream(), split=0)
         self.assertEqual(r["file"], "Import 2026-10-03 09-00-00.wav")
-        self.assertNotIn("split", stop)
+        self.assertNotIn("suggest", stop)
 
-    def test_an_import_with_no_gaps_stays_one_file_and_says_so(self):
+    def test_an_import_with_no_gaps_gets_no_suggestion(self):
         a = self.api()
-        r, stop = self.record_import(a, noise(6, db=-85))
-        name, done = self.wait_event({"import-split-done", "import-split-failed"})
-        self.assertEqual((name, done["files"]), ("import-split-done", []))
-        self.assertEqual([n for n in os.listdir(self.lib) if n.endswith(".wav")], ["Import 2026-10-03 09-00-00 (full).wav"])
+        r, stop, got = self.suggestions(a, noise(6, db=-85))
+        self.assertEqual(got["cuts"], [])
+
+    def test_the_job_id_is_known_before_its_worker_runs(self):
+        # Cancel works the moment the id is returned: the job is registered before its thread starts
+        # (and the page keeps events of a job it has not heard of yet: ui_check.js).
+        import threading
+        a = self.api()
+        started = threading.Event()
+        real = threading.Thread.start
+
+        def held_start(thread):
+            if thread.name == "import-job":
+                started.set()
+                self.assertTrue(any(True for _ in a._splits), "registered first")
+            return real(thread)
+        with mock.patch.object(threading.Thread, "start", held_start):
+            r, stop = self.record_import(a, self.import_stream())
+        self.assertTrue(started.is_set())
 
     def test_cancelling_the_split_keeps_the_whole_file_and_nothing_else(self):
         import threading
         a = self.api()
-        go, real_plan = threading.Event(), live.silence.plan
+        r, stop, got = self.suggestions(a, self.import_stream())
+        go, real_fp = threading.Event(), live.wavinfo.wav_fingerprint
 
-        def slow_plan(path, gap, should_stop=None, progress=None):
+        def slow_fp(path, should_stop=None):
             self.assertTrue(go.wait(10))
-            return real_plan(path, gap, should_stop, progress)
-        with mock.patch.object(live.silence, "plan", slow_plan):
-            r, stop = self.record_import(a, self.import_stream())
+            return real_fp(path, should_stop=should_stop)
+        with mock.patch.object(live.wavinfo, "wav_fingerprint", slow_fp):
+            s = a.split_import(stop["player"]["rec"], got["cuts"])
             self.assertTrue(a.splitting())
             # While it splits, Record and folder operations wait.
             self.assertEqual(a.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 1})["error"],
                              live.SPLITTING)
-            self.assertTrue(a.cancel_import_split(stop["split"]["job"])["ok"])
+            self.assertTrue(a.cancel_import_split(s["job"])["ok"])
             go.set()
             name, done = self.wait_event({"import-split-done", "import-split-failed"})
         self.assertEqual((name, done["cancelled"]), ("import-split-failed", True))
         self.assertIn("It is kept as one file", done["error"])
-        self.assertEqual(sorted(os.listdir(self.lib)), ["Import 2026-10-03 09-00-00 (full).wav"])
+        self.assertEqual(sorted(n for n in os.listdir(self.lib) if not n.startswith(".")),
+                         ["Import 2026-10-03 09-00-00 (full).wav"])
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
-        self.assertFalse(a.splitting())
+        self.wait_idle(a)
 
     def test_a_split_whose_folder_moved_is_not_made(self):
         a = self.api()
-        with mock.patch("app.live._root_identity", side_effect=lambda root: getattr(self, "_root", None) or
-                        __import__("app.library_ops", fromlist=["_root_identity"])._root_identity(root)):
-            r, stop = self.record_import(a, self.import_stream())
-            self._root = ("elsewhere", False)
-            name, done = self.wait_event({"import-split-done", "import-split-failed"})
-        self.assertEqual(name, "import-split-failed")
-        self.assertIn("no longer where it was", done["error"])
+        r, stop, got = self.suggestions(a, self.import_stream())
+        with mock.patch.object(live.folders, "inside", return_value=False):
+            s = a.split_import(stop["player"]["rec"], got["cuts"])
+        self.assertFalse(s["ok"])
         self.assertEqual([n for n in os.listdir(self.lib) if n.endswith(".wav")], ["Import 2026-10-03 09-00-00 (full).wav"])
+
+    def test_shutdown_never_waits_on_a_blocked_page(self):
+        # The page stopped taking events (evaluate_js would wait for ever): workers post events
+        # through the dispatcher and never wait; closing tells the import jobs to stop and waits
+        # for them a bounded time.
+        import threading
+        import time as clock
+        from app import events
+        never = threading.Event()
+        sent = []
+
+        def blocked_send(event, payload):
+            sent.append(event)
+            never.wait()
+        disp = events.Dispatcher(blocked_send)
+        a = backend.Api(None, disp.emit, lambda s: None, self.lib, self.server, store=self.store)
+        r, stop = self.record_import(a, self.import_stream())
+        t0 = clock.monotonic()
+        a.shutdown()
+        disp.close(timeout=0.2)
+        self.assertLess(clock.monotonic() - t0, 5)
+        self.assertFalse(a.splitting())
+        self.assertTrue(sent, "events were posted")
+        never.set()
+
+    def test_a_job_stuck_in_its_own_emit_cannot_hold_shutdown(self):
+        # Even an emit that blocks the job itself (no dispatcher) only holds closing JOB_JOIN.
+        import threading
+        import time as clock
+        never = threading.Event()
+        a = backend.Api(None, lambda e, p: never.wait() if e.startswith("import-") else None, lambda s: None,
+                        self.lib, self.server, store=self.store)
+        with mock.patch.object(live, "JOB_JOIN", 0.3):
+            r, stop = self.record_import(a, self.import_stream())
+            t0 = clock.monotonic()
+            a.shutdown()
+            self.assertLess(clock.monotonic() - t0, 3)
+        never.set()
+        for _ in range(100):                              # let the stuck job finish before the folder goes
+            if not a.splitting():
+                break
+            clock.sleep(0.05)
 
     def test_pieces_a_crash_left_half_written_are_deleted_at_the_next_start(self):
         a = self.api()
@@ -834,6 +960,44 @@ class LivePlaybackTests(Tmp):
             r, data, fp = self.record()
         self.check(r, data, fp)
         self.assertTrue([n for n in os.listdir(self.cache) if not n.startswith(".")], "a copy in the cache")
+
+
+class DispatcherTests(unittest.TestCase):
+    """app/events.py: events go to the page in order, and posting never waits for it."""
+
+    def test_in_order_and_never_blocking(self):
+        import threading
+        import time as clock
+        from app import events
+        gate, got = threading.Event(), []
+
+        def send(event, payload):
+            gate.wait()
+            got.append((event, payload))
+        d = events.Dispatcher(send, max_queued=5)
+        t0 = clock.monotonic()
+        for i in range(8):                                # the page is not taking any: nothing waits
+            d.emit("x-progress" if i % 2 else "x-row", i)
+        self.assertLess(clock.monotonic() - t0, 0.5)
+        self.assertGreater(d.dropped, 0)
+        gate.set()
+        d.close(timeout=2)
+        rows = [p for e, p in got if e == "x-row"]
+        self.assertEqual(rows, sorted(rows))
+        self.assertIn(6, rows, "the newest events are kept; progress is dropped first")
+
+    def test_close_is_bounded_whatever_the_page_does(self):
+        import threading
+        import time as clock
+        from app import events
+        never = threading.Event()
+        d = events.Dispatcher(lambda e, p: never.wait())
+        d.emit("a", 1)
+        t0 = clock.monotonic()
+        d.close(timeout=0.2)
+        self.assertLess(clock.monotonic() - t0, 1)
+        d.emit("after", 2)                                # ignored once closed
+        never.set()
 
 
 class CloseDrainTests(unittest.TestCase):

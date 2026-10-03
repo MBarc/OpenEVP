@@ -2247,7 +2247,7 @@ window.onBackendEvent = (event, p) => {
   }
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
-  if (event.startsWith("import-split-")) { liveSplitEvent(event, p); return; }                    // live.js
+  if (event.startsWith("import-")) { liveJobEvent(event, p); return; }                            // live.js
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;
@@ -3041,9 +3041,11 @@ function playbackFinished() {
   if (r) r.play();
 }
 
+function isCut(r) { return typeof r.id === "string" && r.id.startsWith("cut-"); }   // an import's cuts (live.js)
+
 function regionCreated(r) {
-  if (isMark(r)) return;                                    // marks live beside the selection
-  for (const other of S.regions.getRegions()) if (other !== r && !isMark(other)) other.remove();   // one selection at a time
+  if (isMark(r) || isCut(r)) return;                        // marks and cuts live beside the selection
+  for (const other of S.regions.getRegions()) if (other !== r && !isMark(other) && !isCut(other)) other.remove();   // one selection at a time
   S.region = r;
   if (S.activeMark) deselectMark();                         // the bar (and the loop) is the selection's now
   showSelection();
@@ -3065,6 +3067,7 @@ function regionOut(r) {
 // Clicking a mark selects it and plays it (once, or from its start round and round while looping).
 function regionClicked(r, e) {
   e.stopPropagation();
+  if (isCut(r)) { cutClicked(r); return; }                  // clicking a cut removes it
   if (!isMark(r)) { r.play(); return; }
   selectMark(markId(r));
   playActiveMark();
@@ -3264,6 +3267,7 @@ function setupMarks() {
 // The recording now in the player (its label and the backend's audio result), or none (null).
 function setCurrent(label, r) {
   closeMarkForm();
+  liveCutsLeft(r);                              // an import's cuts belong to it (live.js)
   S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping
   for (const region of S.markRegions.values()) region.remove();
   S.markRegions.clear();

@@ -13,7 +13,7 @@ import webview
 from openevp import __version__
 from openevp.paths import default_output
 
-from . import folders, mic_permission, native_share, sharing, updater
+from . import events, folders, mic_permission, native_share, sharing, updater
 from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
 from .backend import Api, recording_wav
 from .devices import DeviceManager
@@ -503,6 +503,7 @@ def _run_app(smoke=None):
     server = None
     api = None
     store = None
+    dispatcher = None
     try:
         # A playback decode stops early (formats.Cancelled) once the app is closing.
         server = AudioServer(lambda key: recording_wav(
@@ -512,12 +513,13 @@ def _run_app(smoke=None):
         server.start()
         window = None
 
-        def emit(event, payload):
+        def send(event, payload):                         # on the dispatcher's thread only (app/events.py)
             if window is not None:
-                try:
-                    window.evaluate_js(f"window.onBackendEvent({json.dumps(event)}, {json.dumps(payload)})")
-                except Exception:
-                    pass                                  # the window is already gone during shutdown
+                window.evaluate_js(f"window.onBackendEvent({json.dumps(event)}, {json.dumps(payload)})")
+
+        # Workers post events and never wait for the page: evaluate_js has no time limit.
+        dispatcher = events.Dispatcher(send)
+        emit = dispatcher.emit
 
         def pick_wav(start_dir):
             dialog = webview.FileDialog.OPEN if hasattr(webview, "FileDialog") else webview.OPEN_DIALOG
@@ -616,6 +618,8 @@ def _run_app(smoke=None):
     finally:
         if api is not None:
             api.shutdown()                              # joins the workers, then closes the store
+        if dispatcher is not None:
+            dispatcher.close()                          # bounded: a hung page never holds the exit
         elif store is not None:
             store.close()
         if server is not None:
