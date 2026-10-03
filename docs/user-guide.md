@@ -255,7 +255,9 @@ What arrives depends on the file:
 - An MP3 saved as `.mpeg` (how WhatsApp Web saves voice notes), `.mpga`,
   `.mp2` or `.m2a` is shared as a copy called `<name>.mp3`, because some apps
   think `.mpeg` means video.
-- A recorder's `.dvf` is shared as the `.wav` beside it if there is one.
+- A recorder's `.dvf` is shared as the `.wav` beside it if there is one and it
+  holds the same recording (a different recording that only has the same name
+  never goes in its place).
   Otherwise OpenEVP makes an MP3 of the whole recording first. You'll see
   "Preparing … to share" for a moment. Keep holding the mouse button. If you
   let go too early, just drag again and it starts straight away.

@@ -157,14 +157,48 @@ class SharePathTests(ShareBase):
 
     def test_a_dvf_goes_as_the_wav_beside_it(self):
         self.write("Old Mill/x.dvf", dvf_bytes())
-        wav = self.write("Old Mill/x.wav", wav_bytes(b"x"))
+        wav = self.write("Old Mill/x.wav", DECODED)                 # the same audio as the .dvf decodes to
         api = self.new_api()
-        ids = self.ids(api)
-        with FakeDecoder().installed():
+        fake = FakeDecoder()
+        with fake.installed():
+            ids = self.ids(api)
+            indexed = fake.calls
             self.assertTrue(api.drag_out([ids["x.dvf"]])["ok"])
             self.assertTrue(api.drag_out([ids["x.dvf"], ids["x.wav"]])["ok"])   # both copies: once
         self.assertEqual([self.norm(d) for d in self.dragged], [self.norm([wav])] * 2)
+        self.assertEqual(fake.calls, indexed, "the library's fingerprints said so: nothing decoded")
         self.assertFalse(os.path.exists(self.share))
+
+    def test_a_wav_that_only_shares_the_name_is_not_sent(self):
+        dvf = self.write("Old Mill/x.dvf", dvf_bytes())
+        self.write("Old Mill/x.wav", wav_bytes(b"another recording"))
+        api = self.new_api()
+        fake = FakeDecoder()
+        with fake.installed():
+            ids = self.ids(api)
+            self.assertTrue(api.drag_out([ids["x.dvf"]])["ok"])
+        (made,) = self.dragged[0]
+        self.assertEqual(os.path.normcase(made), os.path.normcase(sharing.made_path(self.share, dvf, os.stat(dvf))))
+        with open(made, "rb") as f:
+            self.assertEqual(f.read(), mp3.encode(DECODED, "x"))
+
+    def test_without_cached_fingerprints_the_dvf_is_decoded_once(self):
+        dvf = self.write("Old Mill/x.dvf", dvf_bytes())
+        wav = self.write("Old Mill/x.wav", wav_bytes(b"another recording"))
+        api = self.new_api()
+        fake = FakeDecoder()
+        with fake.installed():
+            ids = self.ids(api)
+            with mock.patch.object(api, "_cached_fp", return_value=None):
+                before = fake.calls
+                self.assertTrue(api.drag_out([ids["x.dvf"]])["ok"])
+                self.assertEqual(fake.calls, before + 1, "the decode that compared is the one encoded")
+                self.assertEqual(os.path.basename(self.dragged[-1][0]), "x.mp3")
+                with open(wav, "wb") as f:
+                    f.write(DECODED)                                # now the same audio
+                self.assertTrue(api.drag_out([ids["x.dvf"]])["ok"])
+        self.assertEqual(self.norm(self.dragged[-1]), self.norm([wav]))
+        self.assertTrue(os.path.isfile(dvf))
 
     def test_a_dvf_without_a_wav_goes_as_an_mp3_made_for_it(self):
         dvf = self.write("Old Mill/Night one.dvf", dvf_bytes())

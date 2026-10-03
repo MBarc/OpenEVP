@@ -245,8 +245,9 @@ Drag out and Copy file (by hand: no automated test drives the real mouse):
 38. Drag a `.dvf` that has **no** `.wav` beside it into **WhatsApp desktop**: the
     status line says "Preparing <name>.dvf to share…" for a moment (keep holding),
     then WhatsApp takes `<name>.mp3`; it plays there. Drag the same row again: it
-    starts at once (no Preparing). Drag a `.dvf` that **has** a `.wav`: the `.wav`
-    is what arrives.
+    starts at once (no Preparing). Drag a `.dvf` that **has** a `.wav` of the same
+    recording: the `.wav` is what arrives. Put an unrelated `.wav` named like a
+    `.dvf` beside it: dragging the `.dvf` sends `<name>.mp3`, never that `.wav`.
 39. Drag a row into **WhatsApp Web** in a browser (Edge or Chrome): the file is
     attached as from File Explorer.
 40. Drag a row onto the **desktop** and into an Explorer folder: a copy appears;

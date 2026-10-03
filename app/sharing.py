@@ -9,9 +9,11 @@ file other programs can play:
 - an MP3 saved as .mpeg (WhatsApp Web's name), .mpga, .mp2 or .m2a: a copy of
   it as <name>.mp3 in the share cache, since some programs take .mpeg for video
   (a copy, never a hard link: a program that writes to it can't change the original);
-- a recorder's own file (a .dvf): the WAV beside it (same name, .wav) if there is
-  one, else an MP3 of the whole recording, made on demand with the clip MP3
-  settings (openevp.mp3) into the share cache as <name>.mp3.
+- a recorder's own file (a .dvf): the WAV beside it (same name, .wav) if it holds
+  the same audio (the fingerprints of the decoded audio match: the library's
+  cached ones, else worked out now), else an MP3 of the whole recording, made on
+  demand with the clip MP3 settings (openevp.mp3) into the share cache as
+  <name>.mp3. A WAV that only shares the name is never sent in its place.
 
 The share cache is a folder in the temp folder. Each recording gets its own
 subfolder (named from its path, size and modification time), so two recordings
@@ -44,7 +46,7 @@ import tempfile
 import threading
 import time
 
-from openevp import formats, mp3
+from openevp import formats, mp3, wavinfo
 
 from . import folders
 from .library_ops import LIB_CHANGED, _decoder_problem, _fail, _not_format, _plain
@@ -289,14 +291,11 @@ class ShareOps:
             fmt = formats.by_ext(os.path.splitext(path)[1])
             if fmt is not None and not playable_as_is(fmt):
                 beside = wav_beside(path)
-                if beside is not None and folders.inside(root, beside):
-                    path = beside
-                else:
-                    got = self._made_mp3(path, fmt)
-                    if not got["ok"]:
-                        return got
-                    made += got["made"]
-                    path = got["path"]
+                got = self._recorder_file_share(path, fmt, beside if beside and folders.inside(root, beside) else None)
+                if not got["ok"]:
+                    return got
+                made += got["made"]
+                path = got["path"]
             elif fmt in formats.MP3_FORMATS and fmt.ext != ".mp3":
                 got = self._as_mp3(path)
                 if not got["ok"]:
@@ -342,30 +341,99 @@ class ShareOps:
             return _fail(f"Could not prepare {name} to share: {_plain(e)}")
         return {"ok": True, "path": target}
 
-    def _made_mp3(self, path, fmt):
-        """{ok, path, made}: the MP3 of a recorder's file in the share cache,
-        made now (made 1) unless it is there already."""
+    def _recorder_file_share(self, path, fmt, beside):
+        """{ok, path, made}: what is shared for a recorder's file (a .dvf): the WAV
+        beside it (beside, already checked to be inside the library folder, or
+        None) when it holds the same audio, else the MP3 made of it (_made_mp3).
+        The same audio: the fingerprints of the decoded audio match -- the
+        library's cached ones when it has both; otherwise the .dvf is decoded
+        now, and a WAV that turns out not to match gets the MP3 made of that
+        very decode (never decoded twice)."""
+        if beside is None:
+            return self._made_mp3(path, fmt)
         name = os.path.basename(path)
-        if not mp3.available():
-            return _fail(f"{name} can't be shared: {mp3.UNAVAILABLE}")
+        known, wav_fp = self._known_fps(path, beside)
+        if wav_fp is None:                              # not a readable PCM WAV: not the same audio
+            return self._made_mp3(path, fmt)
+        if known is not None:
+            return {"ok": True, "path": beside, "made": 0} if known == wav_fp else self._made_mp3(path, fmt)
+        problem = self._recorder_file_problem(path, fmt)
+        if problem:
+            return problem
+        try:
+            st = os.stat(path)
+            self._emit("share-preparing", {"name": name})
+            wav = self._share_wav(path, fmt, st)
+            with wavinfo.buffer_file(wav) as f:
+                same = wavinfo.wav_fingerprint(f, should_stop=self._stop.is_set) == wav_fp
+        except (formats.Cancelled, wavinfo.Stopped):
+            return _fail("The app is closing.")
+        except Exception as e:
+            return _fail(f"Could not prepare {name} to share: {_plain(e)}")
+        if same:
+            return {"ok": True, "path": beside, "made": 0}
+        return self._made_mp3(path, fmt, decoded=(wav, st))
+
+    def _known_fps(self, path, wav):
+        """(the cached fingerprint of the recorder's file at path, or None; the
+        fingerprint of the WAV beside it: cached, else worked out from the file
+        now; None when it is not a readable PCM WAV)."""
+        def cached(p):
+            try:
+                st = os.stat(p)
+            except OSError:
+                return None
+            got = self._cached_fp(p, st.st_size, st.st_mtime_ns)
+            return got.get("fp") if got else None
+        wav_fp = cached(wav)
+        if wav_fp is None:
+            try:
+                wav_fp = wavinfo.wav_fingerprint(wav, should_stop=self._stop.is_set)
+            except (OSError, ValueError, wavinfo.Stopped):
+                wav_fp = None
+        return cached(path), wav_fp
+
+    def _recorder_file_problem(self, path, fmt):
+        """Why a recorder's file can't be decoded to share it (a _fail()), or None."""
+        name = os.path.basename(path)
         problem = _decoder_problem(fmt) or fmt.file_problem(path)
         if problem:
             return _fail(f"{name} can't be shared: {problem}.")
         problem = _not_format(fmt, path)
         if problem:
             return _fail(problem)
+        try:
+            size = os.stat(path).st_size
+        except OSError as e:
+            return _fail(f"Could not prepare {name} to share: {_plain(e)}")
+        if fmt.max_bytes is not None and size > fmt.max_bytes:
+            return _fail(f"{name} is too large to be {fmt.a_recording()}.")
+        return None
+
+    def _made_mp3(self, path, fmt, decoded=None):
+        """{ok, path, made}: the MP3 of a recorder's file in the share cache,
+        made now (made 1) unless it is there already. decoded: (its WAV, the
+        os.stat it was decoded at), when it was decoded already."""
+        name = os.path.basename(path)
+        if not mp3.available():
+            return _fail(f"{name} can't be shared: {mp3.UNAVAILABLE}")
+        problem = self._recorder_file_problem(path, fmt)
+        if problem:
+            return problem
         root = share_root()
         try:
-            st = os.stat(path)
-            if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
-                return _fail(f"{name} is too large to be {fmt.a_recording()}.")
+            st = decoded[1] if decoded is not None else os.stat(path)
             target = made_path(root, path, st)
             if _reusable(target):
                 _touch(os.path.dirname(target))
                 return {"ok": True, "path": target, "made": 0}
             clean(root)
-            self._emit("share-preparing", {"name": name})
-            wav = self._share_wav(path, fmt, st)
+            if decoded is not None:
+                wav = decoded[0]
+                decoded = None
+            else:
+                self._emit("share-preparing", {"name": name})
+                wav = self._share_wav(path, fmt, st)
             data = mp3.encode(wav, title=os.path.splitext(name)[0])
             del wav
             with folders.Pins() as pins:
