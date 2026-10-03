@@ -90,8 +90,6 @@ tr.lib-folder.drop-target td { background: var(--accent-soft); box-shadow: inset
                 padding: 5px 12px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
 .context-item:hover:not(:disabled), .context-item:focus-visible { background: var(--accent-soft); outline: none; }
 .context-item:disabled { color: var(--muted); cursor: default; opacity: .6; }
-#drag-label { position: fixed; top: -100px; left: 0; padding: 4px 10px; border-radius: 4px; background: var(--accent);
-              color: var(--panel); font-size: 13px; font-weight: 600; white-space: nowrap; pointer-events: none; }
 #folder-dialog-name { width: 100%; font: inherit; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--line);
                       background: var(--bg); color: var(--text); }
 #folder-dialog-name[hidden], #folder-dialog-body[hidden], #folder-dialog-error[hidden] { display: none; }

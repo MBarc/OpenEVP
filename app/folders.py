@@ -253,6 +253,7 @@ NO_RECYCLE_BIN = "This drive has no Recycle Bin. Delete the folder in File Explo
 NO_ROOM = ("This folder can't go to the Recycle Bin (it is too big for it, or the Recycle Bin is set to "
            "delete files immediately). Delete it in File Explorer if you really mean to.")
 IN_USE = "{} was not (completely) moved to the Recycle Bin: a file is in use, or deleting was cancelled."
+FILE_IN_USE = "{} was not moved to the Recycle Bin: it is in use (open in another program?), or deleting was cancelled."
 BITBUCKET = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume"
 
 _BITS64 = ctypes.sizeof(ctypes.c_void_p) == 8
@@ -312,7 +313,14 @@ def bin_settings(guid):
 
 
 def tree_size(path):
-    """Bytes in path and everything in it (links not followed; unreadable parts skipped)."""
+    """Bytes in path and everything in it (links not followed; unreadable parts
+    skipped); a file's own size for a file."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode):
+            return 0 if _link_stat(st) else st.st_size
+    except OSError:
+        return 0
     total, stack = 0, [path]
     while stack:
         try:
@@ -346,6 +354,28 @@ def bin_refuses(root, size, guid_of=None, settings_of=None):
     return capacity is not None and size > capacity * 1024 * 1024
 
 
+def drive_type(root):
+    """GetDriveTypeW of a drive root ("C:\\"): DRIVE_FIXED (3) for a local disk."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
+    kernel32.GetDriveTypeW.restype = ctypes.c_uint
+    return kernel32.GetDriveTypeW(root)
+
+
+def where_it_is(path):
+    """The place path really names: its folder with every symlink and junction
+    resolved (the long-path prefix of a drive path dropped), then its own name, not
+    followed. None when it cannot be resolved."""
+    try:
+        path = os.path.abspath(path)
+        parent = os.path.realpath(os.path.dirname(path))
+    except (OSError, ValueError):
+        return None
+    if parent.startswith("\\\\?\\") and parent[5:6] == ":":
+        parent = parent[4:]
+    return os.path.join(parent, os.path.basename(path))
+
+
 def recycle(path, owner=None, before=None):
     """Move one folder (or file) to the Recycle Bin, or raise RecycleError in
     plain words. Never deletes permanently on purpose: a drive without a Recycle
@@ -356,17 +386,27 @@ def recycle(path, owner=None, before=None):
         raise RecycleError("The Recycle Bin is only available on Windows.")
     path = os.path.abspath(path)
     name = os.path.basename(path)
+    is_file = os.path.isfile(path)
+
+    def said(message):                               # the same words, for a file
+        return message.replace("the folder", "the file").replace("This folder", "This file") if is_file else message
     if path.startswith("\\\\"):
-        raise RecycleError(NO_RECYCLE_BIN)           # network and \\?\ paths
-    if len(path) >= MAX_PATH:
+        raise RecycleError(said(NO_RECYCLE_BIN))     # network and \\?\ paths
+    # Where it really is: a folder above it may be a symlink or junction to another
+    # drive (a NAS, a USB stick), where the shell would delete for good. Every check
+    # below, and the delete itself, is on that place; another volume is refused.
+    # (The item itself is not followed: a link is recycled as the link.)
+    real = where_it_is(path)
+    if (real is None or real.startswith("\\\\")      # a share, or a volume with no drive letter
+            or os.path.normcase(os.path.splitdrive(real)[0]) != os.path.normcase(os.path.splitdrive(path)[0])):
+        raise RecycleError(said(NO_RECYCLE_BIN))
+    if len(path) >= MAX_PATH or len(real) >= MAX_PATH:
         raise RecycleError(f"The path of {name} is too long for the Recycle Bin. "
                            "Delete it in File Explorer if you really mean to.")
+    path = real
     root = os.path.splitdrive(path)[0] + "\\"
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     shell32 = ctypes.WinDLL("shell32", use_last_error=True)
     ole32 = ctypes.WinDLL("ole32")
-    kernel32.GetDriveTypeW.argtypes = [ctypes.c_wchar_p]
-    kernel32.GetDriveTypeW.restype = ctypes.c_uint
     shell32.SHQueryRecycleBinW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(SHQUERYRBINFO)]
     shell32.SHQueryRecycleBinW.restype = ctypes.c_long
     shell32.SHFileOperationW.argtypes = [ctypes.POINTER(SHFILEOPSTRUCTW)]
@@ -375,13 +415,13 @@ def recycle(path, owner=None, before=None):
     ole32.CoInitializeEx.restype = ctypes.c_long
     ole32.CoUninitialize.restype = None
 
-    if kernel32.GetDriveTypeW(root) != DRIVE_FIXED:
-        raise RecycleError(NO_RECYCLE_BIN)
+    if drive_type(root) != DRIVE_FIXED:
+        raise RecycleError(said(NO_RECYCLE_BIN))
     # FOF_WANTNUKEWARNING only asks before deleting for good (and a Yes would
     # delete): refuse up front whatever the Recycle Bin would not take. The
     # warning stays as a backstop for a case this does not foresee.
     if bin_refuses(root, tree_size(path)):
-        raise RecycleError(NO_ROOM)
+        raise RecycleError(said(NO_ROOM))
     source = ctypes.create_unicode_buffer(path + "\0")   # double-NUL terminated; kept referenced
     op = SHFILEOPSTRUCTW(hwnd=owner or None, wFunc=FO_DELETE,
                          pFrom=ctypes.cast(source, ctypes.c_wchar_p), pTo=None, fFlags=RECYCLE_FLAGS)
@@ -389,7 +429,7 @@ def recycle(path, owner=None, before=None):
     try:
         info = SHQUERYRBINFO(cbSize=ctypes.sizeof(SHQUERYRBINFO))
         if shell32.SHQueryRecycleBinW(root, ctypes.byref(info)) != 0:
-            raise RecycleError(NO_RECYCLE_BIN)
+            raise RecycleError(said(NO_RECYCLE_BIN))
         if before is not None:
             before()
         code = shell32.SHFileOperationW(ctypes.byref(op))
@@ -399,6 +439,6 @@ def recycle(path, owner=None, before=None):
     del source
     if code == 0 and not op.fAnyOperationsAborted and not os.path.lexists(path):
         return
-    if code == 0:
-        raise RecycleError(IN_USE.format(name))
+    if code == 0 or (is_file and code in (5, 32, 33)):   # access denied, sharing or lock violation
+        raise RecycleError((FILE_IN_USE if is_file else IN_USE).format(name))
     raise RecycleError(f"{name} was not moved to the Recycle Bin (code 0x{code & 0xFFFFFFFF:x}).")

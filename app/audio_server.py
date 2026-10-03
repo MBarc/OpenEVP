@@ -429,6 +429,19 @@ class AudioServer:
             raise ValueError("the file changed on disk: load it again")
         return f
 
+    def open_cached(self, key):
+        """The decoded WAV cached under key, opened for reading (a binary file; close
+        it), or None when nothing is cached under it (nothing is decoded here)."""
+        with self._lock:
+            e = self._entries.get(key)
+            if e is None or e.get("path"):           # a file served in place is not a decode
+                return None
+            path = os.path.join(self._dir, e["file"] + ".wav")
+        try:
+            return _open_shared(path)
+        except OSError:
+            return None
+
     def add_spectrogram(self, url, spec):
         """Keep a spectrogram of the audio at url; returns its tiles' base URL
         (<base>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""
@@ -486,6 +499,19 @@ class AudioServer:
                 e["path"] = moved
                 self._entries[new_key] = self._entries.pop(key)   # most recently used: kept longest
                 self._by_file[e["file"]] = new_key
+
+    def forget_files(self, paths):
+        """These files were deleted: stop serving them in place and drop their
+        decoded copies (never a pinned entry, which may be playing). Returns how
+        many entries went."""
+        keys = {os.path.normcase(os.path.abspath(p)) for p in paths}
+        with self._lock:
+            gone = [k for k, e in self._entries.items() if k not in self._pinned and (
+                (e.get("path") is not None and os.path.normcase(e["path"]) in keys)
+                or (len(k) > 1 and isinstance(k[1], str) and k[1] in keys))]
+            for k in gone:
+                self._drop(k)
+        return len(gone)
 
     def forget(self, device_id):
         with self._lock:

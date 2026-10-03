@@ -231,3 +231,59 @@ Show in File Explorer:
     library folder's own row: **Open in File Explorer** (under Open) opens it.
     Delete a file in Explorer, then Show in File Explorer on its row: "<name> is
     no longer there. Refresh the list." and no Explorer window.
+
+Drag out and Copy file (by hand: no automated test drives the real mouse):
+
+37. In the EVP Library, drag a WAV row into a **Discord** chat: Discord shows the
+    file ready to send, with the same name; send it to yourself and it plays. Do
+    the same with a clip (`Clips` folder) and an MP3.
+37a. Drag an MP3 saved as `.mpeg` (a WhatsApp Web voice note) into **WhatsApp
+    desktop** and send it: it arrives as `<name>.mp3`, plays, and WhatsApp does
+    not crash. Same with Copy file + Ctrl+V. The `.mpeg` in the library keeps its
+    name and is unchanged; the `.mp3` in `%TEMP%\openevp-share\` is a separate
+    copy. Do the same in Discord.
+38. Drag a `.dvf` that has **no** `.wav` beside it into **WhatsApp desktop**: the
+    status line says "Preparing <name>.dvf to share…" for a moment (keep holding),
+    then WhatsApp takes `<name>.mp3`; it plays there. Drag the same row again: it
+    starts at once (no Preparing). Drag a `.dvf` that **has** a `.wav`: the `.wav`
+    is what arrives.
+39. Drag a row into **WhatsApp Web** in a browser (Edge or Chrome): the file is
+    attached as from File Explorer.
+40. Drag a row onto the **desktop** and into an Explorer folder: a copy appears;
+    the original is still in the library (refresh it). Hold Shift while dropping
+    on a folder on the same drive: still a copy, never a move.
+41. Tick three recordings (one `.dvf` without a WAV), drag one of the ticked rows
+    into Discord: all three files arrive (the `.dvf` as an MP3). In the **All
+    recordings** view rows can be dragged out too.
+42. Drag a `.dvf` without a WAV and let go before "Preparing" ends: no drag, and
+    the status says "Ready to share: drag it again."; the next drag starts at once.
+    Drag a row and press Esc while dragging: nothing is dropped.
+43. Still works inside the window: drag a row onto a folder row, and onto a
+    breadcrumb step: it moves there, as before (the cursor shows "+" because the
+    drag offers copy only; the page moves it). Drag a row out of the window and
+    back onto a folder: it moves. Dropped on an empty part of the list: nothing.
+44. Right-click a row → **Copy file** (right under Show in File Explorer; two
+    ticked rows: **Copy 2 files**), then Ctrl+V in a Discord chat: the file is
+    attached. Ctrl+V in an Explorer folder: a copy appears. Focus a row with the
+    keyboard (Tab, arrows) and press **Ctrl+C**, then paste: the same. The status
+    line says "Copied 1 file. …".
+45. Close OpenEVP after sharing a `.dvf` as MP3; the MP3 in
+    `%TEMP%\openevp-share\` stays (a chat may still be reading it). Start
+    OpenEVP more than 6 hours later: it is gone.
+
+Deleting recordings and clips:
+
+46. In the EVP Library, right-click a recording that has both a `.dvf` and a
+    `.wav` with marks → **Delete…** (last in the menu): the dialog lists both
+    files, says how many EVP marks they carry, and that they go to the Recycle
+    Bin; Cancel has the focus. Confirm: both are in the Recycle Bin (never
+    deleted for good), the row and the library count update. Restore them from
+    the Recycle Bin and refresh: the recording is back with its marks. Tick
+    three recordings and press **Delete** on one of them: the dialog lists all
+    three. Type a search that hides one of them and press **Delete** again: only
+    the two in view are listed. Delete a clip in a `Clips` folder the same way. Delete the recording
+    playing in the player: the player empties first. Open the `.wav` in another
+    program that locks it (or keep it open in Audacity) and delete the
+    recording: OpenEVP says the `.dvf` went and the `.wav` is still there, and
+    why. In a second OpenEVP window, Delete… is greyed out and the key says why;
+    during an export or a backup it is refused.

@@ -1000,6 +1000,18 @@ class AppData:
             if to_delete:
                 self._index_dirty = True
 
+    def forget_index(self, paths):
+        """Drop the cached entries of these files (deleted). Returns how many went."""
+        with self._lock:
+            self._require_writable()
+            files = self._index["files"]
+            gone = [k for k in {_index_key(p) for p in paths} if k in files]
+            for k in gone:
+                del files[k]
+            if gone:
+                self._index_dirty = True
+            return len(gone)
+
     def move_index_prefix(self, old, new):
         """A file or folder moved from `old` to `new`: re-key every cached entry
         for `old` itself or anything under it to the same place under `new`

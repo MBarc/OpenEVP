@@ -94,6 +94,21 @@ class AudioServerTests(unittest.TestCase):
             self.get(urls[3])
         self.assertEqual(os.listdir(self.dir.name), [])
 
+    def test_open_cached_reads_a_decode_without_making_one(self):
+        key = ("dvf", "c:\\lib\\x.dvf", 10, 20)
+        self.assertIsNone(self.s.open_cached(key))                  # nothing decoded: nothing is
+        self.assertEqual(self.calls, [])
+        self.s.prepare(key)
+        with self.s.open_cached(key) as f:
+            self.assertEqual(f.read(), WAV)
+        path = os.path.join(self.dir.name, "a.wav")
+        with open(path, "wb") as f:
+            f.write(WAV)
+        self.s.prepare_file(path)                                   # served in place: not a decode
+        self.assertTrue(all(self.s.open_cached(k) is None for k, e in self.s._entries.items() if e.get("path")))
+        self.s.forget("dvf")
+        self.assertIsNone(self.s.open_cached(key))
+
     def test_wrong_token_and_provider_errors(self):
         url = self.s.prepare(("1-4@7", "A", 1))["url"]
         bad = url.replace(self.s._token, "x" * len(self.s._token))
