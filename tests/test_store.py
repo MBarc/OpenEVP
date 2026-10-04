@@ -346,9 +346,10 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.marks("fp1"), [])
             store.close()
 
-    def test_close_is_bounded_when_a_write_is_stuck(self):
-        # A write holding the store's lock (stuck on the disk): close() lets the folder lock go
-        # after CLOSE_LOCK_WAIT without its last write, says so in the log, and refuses later calls.
+    def test_close_is_bounded_when_a_write_is_stuck_and_keeps_the_folder_locked(self):
+        # A write holding the store's lock (stuck on the disk): close() stops waiting after
+        # CLOSE_LOCK_WAIT, says so in the log, refuses later calls, and keeps the folder lock: that
+        # writer may still replace a file, so no other instance may write until this process ends.
         with tempfile.TemporaryDirectory() as d:
             store = AppData(d)
             store.add_mark("fp1", 1.0, 2.0, "A", "voice")
@@ -366,14 +367,38 @@ class StoreTests(unittest.TestCase):
                     self.assertLogs("openevp.store", level="WARNING") as logged:
                 store.close()
             self.assertLess(time.monotonic() - t0, 2)
-            self.assertIn("closing without the last write", logged.output[0])
-            again = AppData(d)                                   # the folder lock was let go
+            self.assertIn("closing without waiting", logged.output[0])
+            second = AppData(d)
+            self.assertTrue(second.read_only, "never a second writer while the first may still replace files")
+            second.close()
+            never.set()                                          # the stuck write ends
+            with self.assertRaises(StoreUnavailable):
+                store.add_mark("fp1", 3.0, 4.0, "B", "")
+            store_module._release_lock(store._lock_file)         # what the process ending does
+            again = AppData(d)
             self.assertFalse(again.read_only)
             self.assertEqual(len(again.marks("fp1")), 1)         # nothing broken
             again.close()
-            never.set()
-            with self.assertRaises(StoreUnavailable):
-                store.add_mark("fp1", 3.0, 4.0, "B", "")
+
+    def test_shutdown_skips_the_fingerprint_cache_and_the_next_start_rebuilds_it(self):
+        # close(flush_index=False), as shutdown does: no cache write without a deadline. The cache on
+        # disk stays as it was (valid), and what it lacks is simply looked up again next time.
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.remember_fp("C:/lib/a.wav", 10, 1, "fpa", 1.0)
+            store.flush_index()
+            store.remember_fp("C:/lib/b.wav", 20, 2, "fpb", 2.0)
+            with mock.patch.object(store_module, "_write_json", side_effect=AssertionError("no write at shutdown")):
+                store.close(flush_index=False)
+            again = AppData(d)
+            self.assertEqual(again.problems(), [])
+            self.assertEqual(again.cached_fp("C:/lib/a.wav", 10, 1)["fp"], "fpa")
+            self.assertIsNone(again.cached_fp("C:/lib/b.wav", 20, 2), "not cached: read again")
+            again.remember_fp("C:/lib/b.wav", 20, 2, "fpb", 2.0)
+            again.close()
+            third = AppData(d)
+            self.assertEqual(third.cached_fp("C:/lib/b.wav", 20, 2)["fp"], "fpb")
+            third.close()
 
     def test_questions_a_test_build_left_in_marks_json_are_dropped_like_any_unknown_field(self):
         # A test build of Live mode kept questions in marks.json; that feature is gone. They are

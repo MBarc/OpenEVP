@@ -436,7 +436,7 @@ def _notify(callback):
 
 RETRY_JOIN_TIMEOUT = 5.0    # seconds close() waits for the lock-retry thread
 CLOSE_LOCK_WAIT = 10.0      # seconds close() waits for a write in progress (one stuck on the disk) before
-                            # letting the folder lock go without its last write
+                            # it stops waiting (keeping the folder lock until the process ends)
 
 
 # ---- AppData ------------------------------------------------------------------
@@ -531,30 +531,30 @@ class AppData:
                                  daemon=True).start()
             return
 
-    def close(self):
-        """Write the fingerprint cache and let the folder lock go. Bounded: when a write in
-        progress holds the store's lock longer than CLOSE_LOCK_WAIT (stuck on the disk), the
-        folder lock is let go without the last write (logged). Every write is atomic (a temp file,
-        then a rename), so one abandoned half way never leaves a broken file."""
+    def close(self, flush_index=True):
+        """Let the folder lock go (after writing the fingerprint cache, unless flush_index is
+        False: at shutdown it is skipped, it is a cache the next start rebuilds). Bounded: when
+        a write in progress holds the store's lock longer than CLOSE_LOCK_WAIT (stuck on the
+        disk), close() stops waiting and keeps the folder lock: that writer may still replace a
+        file, so no other OpenEVP may write here until this process has ended (the system lets
+        the lock go then). Later calls are refused."""
         self._retry_stop.set()
         t = self._retry_thread
         if t is not None and t is not threading.current_thread():
             t.join(RETRY_JOIN_TIMEOUT)          # it only does file work under the lock
         if not self._lock.acquire(timeout=CLOSE_LOCK_WAIT):
-            _log.warning("OpenEVP data: a write was still running after %.0f s; closing without the last "
-                         "write (the fingerprint cache)", CLOSE_LOCK_WAIT)
-            f, self._lock_file = self._lock_file, None
-            self._closed = True                 # every later call is refused
-            if f is not None:
-                _release_lock(f)
+            _log.warning("OpenEVP data: a write was still running after %.0f s; closing without waiting "
+                         "for it (the data folder stays locked until OpenEVP has ended)", CLOSE_LOCK_WAIT)
+            self._closed = True                 # every later call is refused; the folder lock is kept
             return
         try:
             if self._closed:
                 return
-            try:
-                self.flush_index()
-            except StoreUnavailable:
-                pass
+            if flush_index:
+                try:
+                    self.flush_index()
+                except StoreUnavailable:
+                    pass
             if self._lock_file is not None:
                 _release_lock(self._lock_file)
                 self._lock_file = None

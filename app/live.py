@@ -231,6 +231,7 @@ class _Session:
         self.seq = 0
         self.frames = 0                          # frames received
         self.saved = []                          # the finished files (parts): {"path", "fp", "frames", "marks", "start"}
+        self.done_parts = []                     # every part finished so far (_Piece), published or not
         self.problems = []
         self.dropped_marks = 0
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
@@ -286,6 +287,7 @@ class _Session:
             _remove(new.sidecar)
             raise OSError("the next part could not be started") from None
         self.piece = new
+        self.done_parts.append(old)              # its interval and journal stay known, even if publishing fails
         self.ops._finish_piece(self, old)
 
     def finish(self):
@@ -593,7 +595,7 @@ class LiveOps:
                 return _fail(NOT_RECORDING)
             at = min(float(at), s.frames / s.rate + MARK_SLACK)
             begin = s.piece.start_frame / s.rate             # where the part being written starts
-            if at <= begin and s.saved:
+            if at <= begin and s.done_parts:
                 return self._mark_finished_part(s, at)
             end = at - begin                                 # in the part's own seconds
             mark = {"start": round(max(0.0, end - MARK_SECONDS), 3), "end": round(end, 3),
@@ -609,18 +611,32 @@ class LiveOps:
 
     def _mark_finished_part(self, s, at):
         """A mark whose end falls in a part already finished (M pressed just as the next part
-        started): stored with that part's file at once."""
-        f = next((f for f in reversed(s.saved) if f["start"] / s.rate < at), s.saved[-1])
-        begin, seconds = f["start"] / s.rate, f["frames"] / s.rate
+        started): it goes to that part, the one whose interval holds its end. Published: stored
+        with its file at once (if the store refuses, into the part's journal again, for the next
+        start). Not published (finishing it failed; the next start finishes it): into its journal."""
+        p = next((p for p in reversed(s.done_parts) if p.start_frame / s.rate < at), s.done_parts[0])
+        begin, seconds = p.start_frame / s.rate, p.writer.frames / s.rate
         end = min(at - begin, seconds)
         mark = {"start": round(max(0.0, end - MARK_SECONDS), 3), "end": round(end, 3),
                 "cls": MARK_CLASS, "note": MARK_NOTE}
-        stored, why = self._store_live_marks(f["fp"], f["path"], seconds, [mark], s)
-        f["marks"] += stored
-        if why is not None:
-            s.problems.append(f"A mark in {os.path.basename(f['path'])} could not be saved: {why}")
-            return _fail(f"The mark could not be saved: {why}")
-        return {"ok": True, "mark": {"at": at, "file": os.path.basename(f["path"]), **mark}}
+        f = getattr(p, "saved_entry", None)
+        if f is not None:
+            stored, why = self._store_live_marks(f["fp"], f["path"], seconds, [mark], s)
+            f["marks"] += stored
+            if why is None:
+                return {"ok": True, "mark": {"at": at, "file": os.path.basename(f["path"]), **mark}}
+            s.problems.append(_meta_later(os.path.basename(f["path"]), why))
+        p.marks.append(mark)
+        try:
+            if f is not None:                    # its journal again (it went once all was stored)
+                _journal(p.sidecar, p.meta, f["path"], f["fp"], f["frames"])
+                self._register_part(p.part)
+            else:
+                p.save_marks()
+        except Exception as e:
+            p.marks.remove(mark)
+            return _fail(f"The mark could not be saved: {_plain(e)}")
+        return {"ok": True, "mark": {"at": at, "file": os.path.basename(f["path"]) if f else p.name, **mark}}
 
     def live_stop(self, sid):
         """Stop and save: {"ok", "files": [{"id", "name", "seconds", "marks"}], "folder",
@@ -703,7 +719,8 @@ class LiveOps:
             # place in the recovery list: the next start stores what is missing.
             s.problems.append(_meta_later(os.path.basename(path), why))
         self._index_live(path, fp, seconds)
-        s.saved.append({"path": path, "fp": fp, "frames": frames, "marks": stored, "start": piece.start_frame})
+        piece.saved_entry = {"path": path, "fp": fp, "frames": frames, "marks": stored, "start": piece.start_frame}
+        s.saved.append(piece.saved_entry)
 
     def _store_live_marks(self, fp, path, seconds, marks, s=None):
         """Store marks made while recording against the finished file. A mark already

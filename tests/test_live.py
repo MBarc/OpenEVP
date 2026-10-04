@@ -907,6 +907,42 @@ class LiveApiTests(Tmp):
         self.assertEqual((name, got["fp"]), ("import-suggest-done", stop["player"]["fp"]))
         self.wait_idle(a)
 
+    def test_a_mark_in_a_part_that_could_not_be_published_goes_to_its_journal(self):
+        # Astra: part 1 (0..100 s) could not be given its name, so it is not among the saved files;
+        # a mark at 99.9 s (part 2 starts at 100 s) still goes to part 1: into its journal, and the
+        # next start finishes part 1 with it.
+        a = self.api()
+        real = livewav.publish
+        calls = []
+
+        def first_fails(*args, **kw):
+            calls.append(args[2])
+            if len(calls) == 1:
+                raise OSError("the disk said no")
+            return real(*args, **kw)
+        x = tone(100.5, hz=437.3)
+        with mock.patch.object(livewav, "MAX_DATA", 100 * RATE * 2), mock.patch("app.live.datetime") as dt, \
+                mock.patch.object(live.livewav, "publish", side_effect=first_fails):
+            dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 4, 1, 2, 3)
+            sid = self.start(a)["session"]
+            step = RATE * 5
+            for seq, k in enumerate(range(0, len(x), step)):
+                self.send(a, sid, x[k:k + step], seq)
+            m = a.live_mark(sid, 99.9)
+            stop = a.live_stop(sid)
+        self.assertTrue(m["ok"], m)
+        self.assertEqual((m["mark"]["file"], m["mark"]["start"], m["mark"]["end"]), ("Live 2026-10-04 01-02-03.wav", 96.9, 99.9))
+        part1 = os.path.join(self.lib, "Live 2026-10-04 01-02-03.wav.part")
+        with open(part1 + ".json", encoding="utf-8") as f:
+            self.assertEqual([(q["start"], q["end"]) for q in json.load(f)["marks"]], [(96.9, 99.9)])
+        self.assertEqual([f["name"] for f in stop["files"]], ["Live 2026-10-04 01-02-03 (part 2).wav"])
+        fp2 = wavinfo.wav_fingerprint(os.path.join(self.lib, "Live 2026-10-04 01-02-03 (part 2).wav"))
+        self.assertEqual(self.store.marks(fp2), [], "never in part 2")
+        got = self.api().live_recover()["recovered"]
+        self.assertEqual([(g["name"], g["marks"]) for g in got], [("Live 2026-10-04 01-02-03.wav", 1)])
+        fp1 = wavinfo.wav_fingerprint(os.path.join(self.lib, "Live 2026-10-04 01-02-03.wav"))
+        self.assertEqual([(q["start"], q["end"]) for q in self.store.marks(fp1)], [(96.9, 99.9)])
+
     def test_a_crash_in_part_2_recovers_part_2(self):
         a = self.api()
         with mock.patch.object(livewav, "MAX_DATA", RATE * 2), mock.patch("app.live.datetime") as dt:
@@ -1550,18 +1586,27 @@ class CloseDrainTests(unittest.TestCase):
                                             report=api.log_unsaved, sleep=lambda x: None)
                     api.shutdown()
                     print(round(time.monotonic() - t0, 2), flush=True)
-                    os._exit(0)                        # right away: nothing more is written
+                    sys.stdin.readline()               # the test checks the folder is still locked
+                    os._exit(0)                        # then the process ends: nothing more is written
                 """))
-            run = subprocess.run([sys.executable, script, os.path.dirname(os.path.abspath(__file__)),
-                                  os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), d],
-                                 capture_output=True, text=True, timeout=60)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            self.assertLess(float(run.stdout.split()[0]), 10, run.stdout)
-            self.assertIn("closing without the last write", run.stderr)          # logged
+            child = subprocess.Popen([sys.executable, script, os.path.dirname(os.path.abspath(__file__)),
+                                      os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), d],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            took = child.stdout.readline()
+            self.assertTrue(took, child.stderr.read() if child.poll() is not None else "no answer")
+            self.assertLess(float(took), 10, took)
+            # The stuck writer may still replace files: until that process has ended, no other
+            # OpenEVP may write here.
+            other = AppData(os.path.join(d, "appdata"))
+            self.assertTrue(other.read_only, "the folder stays locked while the first process lives")
+            other.close()
+            out, err = child.communicate("\n", timeout=60)
+            self.assertEqual(child.returncode, 0, err)
+            self.assertIn("closing without waiting", err)                        # logged
             with open(os.path.join(d, "appdata", live.UNSAVED_LOG), encoding="utf-8") as f:
                 self.assertEqual(json.loads(f.read().splitlines()[0])["items"],
                                  ["the mark at 0:04", "the mark at 0:07"])
-            # The next start (the folder lock was let go): said once.
+            # The next start (the process has ended, so the system let the folder lock go): said once.
             store = AppData(os.path.join(d, "appdata"))
             try:
                 self.assertFalse(store.read_only)

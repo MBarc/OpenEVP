@@ -2673,7 +2673,9 @@ class Api(ShareOps, LibraryOps, LiveOps):
             fs.wait()
         self._live_shutdown()                   # a recording running is finished and saved
         if self._store is not None:
-            self._store.close()
+            # The fingerprint cache is not written here (no write without a deadline at shutdown):
+            # the indexer writes it as it goes, and the next start re-reads what it lacks.
+            self._store.close(flush_index=False)
 
     def _export(self, device_id, native, work, to_wav, dest, job):
         """Download each recording (on the device thread), then save it (here, never

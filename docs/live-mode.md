@@ -149,8 +149,11 @@ after Stop (an import with a silence gap set): it opens in the player with
   Every step of the close runs bounded: the window's own last steps (letting
   the close through, destroying the window) are waited for at most 5 s each, and
   at shutdown `AppData.close()` waits at most 10 s for a write holding the
-  store's lock, then lets the folder lock go without its last write (logged;
-  every write is atomic, so nothing is left half written). If the page did not
+  store's lock, then stops waiting and keeps the folder lock (logged): that
+  writer may still replace a file, so no other OpenEVP may write there until
+  this process has ended and the system lets the lock go. Shutdown does not
+  write the fingerprint cache (`close(flush_index=False)`): the indexer writes it
+  as it goes, and the next start reads again what it lacks. If the page did not
   finish, `Api.finish_recording()`
   (which may wait on the recording's lock or the disk) runs on a thread of its
   own until the deadline; then the window closes regardless. `shutdown()` waits
@@ -249,8 +252,12 @@ imports), and a region shows on the waveform and plays like any other mark;
 class and note are set in the player afterwards. In a recording in parts (past
 4 GB) a mark belongs to the part its end falls in, and starts no earlier than
 that part's start (clamped, not split); one whose end falls in a part already
-finished (M pressed as the next part began) is stored with that part's file at
-once (`_mark_finished_part`). The page sends the time it counted (frames
+finished (M pressed as the next part began) goes to the part whose interval
+holds its end: stored with its file at once, or, if that part could not be
+published (or the store refuses), into that part's journal for the next start
+(`_mark_finished_part`; `_Session.done_parts` keeps every finished part).
+Questions logged by the test builds (before the question log was removed) are
+discarded: they are not read from `marks.json`, sidecars or `questions.json`. The page sends the time it counted (frames
 captured since Record) after its queued audio has been taken; the backend keeps
 the mark in memory and in the sidecar and stores it against the fingerprint
 when the file is finished (clamped to the file's length, times rounded down to
