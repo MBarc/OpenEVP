@@ -19,6 +19,7 @@ import copy
 import ctypes
 import datetime
 import json
+import logging
 import math
 import os
 import re
@@ -29,6 +30,7 @@ import time
 import uuid
 
 _WINDOWS = sys.platform.startswith("win")
+_log = logging.getLogger("openevp.store")
 if _WINDOWS:
     import msvcrt
 else:
@@ -448,6 +450,8 @@ def _notify(callback):
 
 
 RETRY_JOIN_TIMEOUT = 5.0    # seconds close() waits for the lock-retry thread
+CLOSE_LOCK_WAIT = 10.0      # seconds close() waits for a write in progress (one stuck on the disk) before
+                            # letting the folder lock go without its last write
 
 
 # ---- AppData ------------------------------------------------------------------
@@ -552,11 +556,23 @@ class AppData:
             return
 
     def close(self):
+        """Write the fingerprint cache and let the folder lock go. Bounded: when a write in
+        progress holds the store's lock longer than CLOSE_LOCK_WAIT (stuck on the disk), the
+        folder lock is let go without the last write (logged). Every write is atomic (a temp file,
+        then a rename), so one abandoned half way never leaves a broken file."""
         self._retry_stop.set()
         t = self._retry_thread
         if t is not None and t is not threading.current_thread():
             t.join(RETRY_JOIN_TIMEOUT)          # it only does file work under the lock
-        with self._lock:
+        if not self._lock.acquire(timeout=CLOSE_LOCK_WAIT):
+            _log.warning("OpenEVP data: a write was still running after %.0f s; closing without the last "
+                         "write (the fingerprint cache)", CLOSE_LOCK_WAIT)
+            f, self._lock_file = self._lock_file, None
+            self._closed = True                 # every later call is refused
+            if f is not None:
+                _release_lock(f)
+            return
+        try:
             if self._closed:
                 return
             try:
@@ -567,6 +583,8 @@ class AppData:
                 _release_lock(self._lock_file)
                 self._lock_file = None
             self._closed = True
+        finally:
+            self._lock.release()
 
     def _require_writable(self):
         if self._closed:

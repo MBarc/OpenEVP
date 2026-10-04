@@ -346,6 +346,35 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.marks("fp1"), [])
             store.close()
 
+    def test_close_is_bounded_when_a_write_is_stuck(self):
+        # A write holding the store's lock (stuck on the disk): close() lets the folder lock go
+        # after CLOSE_LOCK_WAIT without its last write, says so in the log, and refuses later calls.
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "voice")
+            held, never = threading.Event(), threading.Event()
+
+            def stuck():
+                store._lock.acquire()
+                held.set()
+                never.wait()
+                store._lock.release()
+            threading.Thread(target=stuck, daemon=True).start()
+            held.wait()
+            t0 = time.monotonic()
+            with mock.patch.object(store_module, "CLOSE_LOCK_WAIT", 0.2), \
+                    self.assertLogs("openevp.store", level="WARNING") as logged:
+                store.close()
+            self.assertLess(time.monotonic() - t0, 2)
+            self.assertIn("closing without the last write", logged.output[0])
+            again = AppData(d)                                   # the folder lock was let go
+            self.assertFalse(again.read_only)
+            self.assertEqual(len(again.marks("fp1")), 1)         # nothing broken
+            again.close()
+            never.set()
+            with self.assertRaises(StoreUnavailable):
+                store.add_mark("fp1", 3.0, 4.0, "B", "")
+
     def test_second_appdata_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             first = AppData(d)

@@ -408,7 +408,7 @@ class LiveApiTests(Tmp):
         self.assertFalse(os.path.exists(part + ".json"))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
-    def test_unsaved_changes_logged_when_the_settings_stalled_are_said_at_the_next_start(self):
+    def test_unsaved_changes_logged_at_close_are_said_once_at_the_next_start(self):
         a = self.api()
         self.assertTrue(a.log_unsaved({"file": "Live x.wav", "items": ["the question \"Who?\"", 3]}))
         self.assertTrue(a.log_unsaved({"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}))
@@ -416,15 +416,6 @@ class LiveApiTests(Tmp):
         self.assertEqual(got, [{"file": "Live x.wav", "items": ["the question \"Who?\""]},
                                {"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}])
         self.assertEqual(self.api().live_recover()["unsaved"], [])
-
-    def test_record_unsaved_is_said_once_at_the_next_start(self):
-        a = self.api()
-        self.assertTrue(a.record_unsaved({"file": "Live x.wav", "items": ["class B for the mark at 0:04", 5, ""]}))
-        self.assertFalse(a.record_unsaved({"items": []}))
-        self.assertFalse(a.record_unsaved("nonsense"))
-        b = self.api()                                    # the next start
-        self.assertEqual(b.live_recover()["unsaved"], [{"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}])
-        self.assertEqual(b.live_recover()["unsaved"], [])
 
     def test_questions_survive_a_crash(self):
         a = self.api()
@@ -1425,8 +1416,8 @@ class CloseDrainTests(unittest.TestCase):
         self.assertEqual(w.js[0], "liveDrainForClose(0); true")         # 3 s for the page: all margin
 
     def test_a_report_that_hangs_cannot_hold_the_close(self):
-        # Astra: report() writes the settings, which may stall on the disk. It runs on a thread of its
-        # own, waited for briefly; then log() writes the list down instead, and the close goes on.
+        # report() (a log file write) runs on a thread of its own, waited for briefly: a disk that
+        # stalls it cannot hold the close.
         import json as js
         import threading
         import time as clock
@@ -1446,15 +1437,10 @@ class CloseDrainTests(unittest.TestCase):
         t0 = clock.monotonic()
         with mock.patch.object(main, "CLOSE_REPORT_WAIT", 0.2):
             main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"),
-                                    timeout=1.0, sleep=lambda s: None, report=report,
-                                    log=lambda got: order.append(("log", got)))
+                                    timeout=1.0, sleep=lambda s: None, report=report)
         took = clock.monotonic() - t0
         self.assertLess(took, 1.5, took)
-        for _ in range(100):
-            if ("log", listed) in order:
-                break
-            clock.sleep(0.01)
-        self.assertEqual(order, ["report", ("log", listed), "close"])
+        self.assertEqual(order, ["report", "close"])
         self.assertTrue(w.destroyed)
         never.set()
 
@@ -1472,6 +1458,67 @@ class CloseDrainTests(unittest.TestCase):
             main._close_after_drain(Stuck([True]), never.wait, sleep=lambda s: None)
         self.assertLess(clock.monotonic() - t0, 1.5)
         never.set()
+
+    def test_closing_with_the_store_stuck_still_exits_and_the_report_is_on_the_disk(self):
+        # Astra: a process that closes while a store write holds its lock (stuck on the disk) and
+        # exits right after: the close never waits on the store, shutdown's store.close() is
+        # bounded, and the report of changes not saved is on the disk (fsync) for the next start.
+        import subprocess
+        import textwrap
+        with tempfile.TemporaryDirectory() as d:
+            script = os.path.join(d, "close.py")
+            with open(script, "w", encoding="utf-8") as f:
+                f.write(textwrap.dedent("""
+                    import json, os, sys, threading, time
+                    here, repo, d = sys.argv[1:4]
+                    sys.path[:0] = [here, repo]
+                    from test_library import Events, FakeServer
+                    from app import backend, main, store
+                    store.CLOSE_LOCK_WAIT = 0.5
+                    s = store.AppData(os.path.join(d, "appdata"))
+                    api = backend.Api(None, Events(), lambda x: None, os.path.join(d, "lib"), FakeServer(), store=s)
+                    held = threading.Event()
+                    def stuck_write():
+                        s._lock.acquire()          # a write stuck on the disk, holding the store
+                        held.set()
+                        threading.Event().wait()
+                    threading.Thread(target=stuck_write, daemon=True).start()
+                    held.wait()
+                    listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04", "the question \\"Who?\\""]}
+                    class Window:
+                        def evaluate_js(self, js):
+                            if js == main._UNSAVED_JS:
+                                return json.dumps(listed)
+                            return True
+                        def destroy(self):
+                            pass
+                    t0 = time.monotonic()
+                    main._close_after_drain(Window(), lambda: None, finalize=api.finish_recording,
+                                            report=api.log_unsaved, sleep=lambda x: None)
+                    api.shutdown()
+                    print(round(time.monotonic() - t0, 2), flush=True)
+                    os._exit(0)                        # right away: nothing more is written
+                """))
+            run = subprocess.run([sys.executable, script, os.path.dirname(os.path.abspath(__file__)),
+                                  os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), d],
+                                 capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertLess(float(run.stdout.split()[0]), 10, run.stdout)
+            self.assertIn("closing without the last write", run.stderr)          # logged
+            with open(os.path.join(d, "appdata", live.UNSAVED_LOG), encoding="utf-8") as f:
+                self.assertEqual(json.loads(f.read().splitlines()[0])["items"],
+                                 ["class B for the mark at 0:04", 'the question "Who?"'])
+            # The next start (the folder lock was let go): said once.
+            store = AppData(os.path.join(d, "appdata"))
+            try:
+                self.assertFalse(store.read_only)
+                b = backend.Api(None, Events(), lambda x: None, os.path.join(d, "lib"), FakeServer(), store=store)
+                got = b.live_recover()["unsaved"]
+                self.assertEqual([(u["file"], len(u["items"])) for u in got], [("Live x.wav", 2)])
+                self.assertEqual(b.live_recover()["unsaved"], [])
+                b.shutdown()
+            finally:
+                store.close()
 
     def test_a_page_that_is_gone_still_closes(self):
         from app import main

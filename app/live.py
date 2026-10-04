@@ -52,10 +52,9 @@ from .library_ops import CLOSING, ROOT_CHANGED, _fail, _file_id, _plain, _root_i
 from .store import MIN_MARK_LENGTH, StoreReadOnly, StoreUnavailable
 
 PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute paths)
-UNSAVED_SETTING = "live_unsaved"  # changes made while recording that may not have been saved when
-                                  # OpenEVP closed: [{"file", "items": [text]}], said at the next start
 MAX_UNSAVED = 200
-UNSAVED_LOG = "live-unsaved.jsonl"  # in the data folder: the same, written when the settings could not be
+UNSAVED_LOG = "live-unsaved.jsonl"  # in the data folder: changes made while recording that may not have been
+                                    # saved when OpenEVP closed ({"file", "items"} a line), said at the next start
 LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool,
                                  #  "field": bool (the dark night screen)}
 RESERVE_BYTES = 500 << 20        # recording stops before the disk has less than this free
@@ -1038,32 +1037,15 @@ class LiveOps:
             pins.close()
 
     # ---- crash recovery ----
-    def record_unsaved(self, report):
-        """The window closed while a recording was being saved, and these marks, edits or
-        questions may not have been saved ({"file", "items": [text]} from the page): kept for
-        the next start (live_recover says them), so they are never lost without a word."""
-        if not isinstance(report, dict) or not isinstance(report.get("items"), list):
-            return False
-        items = [x[:400] for x in report["items"] if isinstance(x, str) and x][:MAX_UNSAVED]
-        if not items or self._store is None:
-            return False
-        name = report.get("file") if isinstance(report.get("file"), str) else ""
-        try:
-            kept = self._store.get_setting(UNSAVED_SETTING, [])
-            kept = kept if isinstance(kept, list) else []
-            self._store.set_setting(UNSAVED_SETTING, (kept + [{"file": name[:300], "items": items}])[-20:])
-            return True
-        except (StoreReadOnly, StoreUnavailable):
-            return False
-
     def _unsaved_log(self):
         folder = getattr(self._store, "_folder", None) if self._store is not None else None
         return os.path.join(folder, UNSAVED_LOG) if folder else None
 
     def log_unsaved(self, report):
-        """record_unsaved() did not return in time as the window closed (a stalled settings
-        write): the list is appended to a plain log file in the data folder instead, which the
-        next start reads as well (live_recover)."""
+        """The window is closing while a recording is saved, and these marks, edits or questions
+        may not have been saved ({"file", "items": [text]} from the page): appended to a plain log
+        file in the data folder, flushed to the disk, for the next start to say (live_recover).
+        Never through the store: its lock may be held by a stalled write, and closing must not wait."""
         path = self._unsaved_log()
         if path is None or not isinstance(report, dict) or not isinstance(report.get("items"), list):
             return False
@@ -1072,6 +1054,8 @@ class LiveOps:
         try:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps({"file": name[:300], "items": items}) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
             return True
         except OSError:
             return False
@@ -1099,19 +1083,12 @@ class LiveOps:
         """Finish the .part files a crash left behind (once the store is writable):
         {"ok", "recovered": [{"name", "folder", "seconds", "marks"}], "failed": [text],
         "unsaved": [{"file", "items"}] (changes that may not have been saved when OpenEVP
-        last closed during a recording; said once)}."""
+        last closed during a recording, from live-unsaved.jsonl; said once)}."""
         out = {"ok": True, "recovered": [], "failed": [], "unsaved": []}
         store = self._store
         if store is None or store.read_only:
             return out
-        kept = store.get_setting(UNSAVED_SETTING, [])
-        if isinstance(kept, list) and kept:
-            out["unsaved"] = [k for k in kept if isinstance(k, dict) and isinstance(k.get("items"), list)]
-            try:
-                store.set_setting(UNSAVED_SETTING, [])
-            except (StoreReadOnly, StoreUnavailable):
-                pass
-        out["unsaved"] += self._read_unsaved_log()
+        out["unsaved"] = self._read_unsaved_log()
         with self._live_lock:
             active = set()
             if self._live is not None and self._live.piece is not None:

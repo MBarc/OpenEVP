@@ -156,7 +156,7 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
 CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
 CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
 CLOSE_PAGE_MARGIN = 3.0            # seconds of the page's share it is not told about: polling and the report after
-CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved, and again to keep it
+CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved, and again to write it
 CLOSE_LAST_WAIT = 5.0              # seconds the window's own last steps (before_close, destroy) are waited for
 _DRAIN_START_JS = "liveDrainForClose({ms}); true"
 _DRAIN_DONE_JS = "window.__liveDrained === true"
@@ -184,8 +184,7 @@ def _bounded(fn, seconds, name):
 
 
 def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
-                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None,
-                       log=None):
+                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None):
     """Closing during a recording, on a worker thread: the page stops and saves it
     as Stop does (the worklet's last samples, every queued chunk, then the backend
     finishes the file: live.js liveDrainForClose). The whole close takes at most
@@ -196,11 +195,11 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
       of its waits into it;
     - then the page's list of marks, edits and questions that may not have been
       saved (liveUnsavedNow: called off, unanswered, or still waiting) is read,
-      briefly, and given to report(), which keeps it for the next start: a closing
-      window cannot show it, and it must never be lost without a word. report() runs
-      on a thread of its own too (its store write may stall); if it does not return
-      in time, log() writes the list down instead (on its own thread, never waited
-      for) and the close goes on;
+      briefly, and given to report() (Api.log_unsaved: a plain append to a log
+      file, flushed to the disk; never the store, whose lock a stalled write may
+      hold), which keeps it for the next start: a closing window cannot show it,
+      and it must never be lost without a word. report() runs on a thread of its
+      own, waited for at most CLOSE_REPORT_WAIT seconds;
     - if it did not finish, finalize() (the backend finishing the file with what
       has arrived) runs on a thread of its own too, until the deadline: it may wait
       on the recording's lock or on the disk;
@@ -246,9 +245,7 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
             _bounded(read_unsaved, min(CLOSE_REPORT_WAIT, left()), "close-drain-unsaved")
             if unsaved:
                 got = unsaved[0]
-                if not _bounded(lambda: report(got), min(CLOSE_REPORT_WAIT, left()), "close-drain-report") \
-                        and log is not None:
-                    threading.Thread(target=log, args=(got,), name="close-drain-log", daemon=True).start()
+                _bounded(lambda: report(got), min(CLOSE_REPORT_WAIT, left()), "close-drain-report")
         if not drained.is_set() and finalize is not None:
             finisher = threading.Thread(target=run_finalize, name="close-finalize", daemon=True)
             finisher.start()
@@ -640,7 +637,7 @@ def _run_app(smoke=None):
                     # Not yet: the page first saves what it still holds (bounded), then the
                     # window closes (close_now lets that close through).
                     threading.Thread(target=_close_after_drain, args=(window, close_now, api.finish_recording),
-                                     kwargs={"report": api.record_unsaved, "log": api.log_unsaved},
+                                     kwargs={"report": api.log_unsaved},
                                      name="close-drain", daemon=True).start()
                     return False
                 if proceed:
