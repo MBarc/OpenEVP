@@ -104,6 +104,7 @@ window.addEventListener("pywebviewready", async () => {
   $("dest").textContent = S.dest;
   $("version").textContent = `v${S.caps.version}`;
   $("about-version").textContent = `v${S.caps.version}`;
+  setupNight();                              // before the player: the waveform takes the theme's colours
   // The player always accepts a WAV or MP3 file from disk. Clicking a recording to play it
   // (and WAV export) needs our LPEC decoder; without it rows are not clickable.
   setupPlayer();
@@ -1350,7 +1351,7 @@ function applyPlayerMarks(r) {
   const drawn = !!S.ws.getDuration();                           // otherwise drawMarks adds them on "ready"
   for (const m of S.marks) {
     const region = S.markRegions.get(m.id);
-    if (region) region.setOptions({ start: m.start, end: m.end, color: MARK_COLORS[m.cls], content: m.cls });
+    if (region) region.setOptions({ start: m.start, end: m.end, color: markColor(m.cls), content: m.cls });
     else if (drawn) addMarkRegion(m);
   }
   $("reviewed").checked = !!r.reviewed;
@@ -2931,15 +2932,16 @@ function specElement() {
   if (S.spec.el) return S.spec.el;
   const el = document.createElement("div");
   el.className = "spectrogram";
-  Object.assign(el.style, { position: "relative", height: `${SPEC_HEIGHT}px`, marginTop: "2px", background: "#000004" });
+  Object.assign(el.style, { position: "relative", height: `${SPEC_HEIGHT}px`, marginTop: "2px" });
   const labels = document.createElement("div");
   Object.assign(labels.style, { position: "sticky", left: "0", width: "44px", height: "100%", zIndex: "4", pointerEvents: "none",
-                                font: "10px/1 Segoe UI, sans-serif", color: "#fff", textShadow: "0 0 2px #000, 0 0 2px #000" });
+                                font: "10px/1 Segoe UI, sans-serif", textShadow: "0 0 2px #000, 0 0 2px #000" });
   const msg = document.createElement("div");
   Object.assign(msg.style, { position: "sticky", left: "48px", top: "0", padding: "4px", font: "12px Segoe UI, sans-serif",
-                             color: "#ccc", pointerEvents: "none", zIndex: "4" });
+                             pointerEvents: "none", zIndex: "4" });
   el.append(labels, msg);
   el.labels = labels; el.msg = msg;
+  specTheme(el);
   S.ws.getWrapper().appendChild(el);
   S.spec.el = el;
   return el;
@@ -2988,7 +2990,7 @@ function renderSpectrogram() {
   const last = Math.min(Math.ceil(info.columns / span) - 1, Math.floor((scroll + view) * perPx / span) + 1);
   const wanted = new Set();
   for (let i = first; i <= last; i++) {
-    const k = `${level}/${i}`;
+    const k = `${specMap()}/${level}/${i}`;          // the colour map is part of the tile (and its URL)
     wanted.add(k);
     if (S.spec.imgs.has(k)) continue;
     const img = document.createElement("img");
@@ -2999,11 +3001,63 @@ function renderSpectrogram() {
                                imageRendering: perPx < 1 ? "pixelated" : "auto" });
     img.alt = "";
     img.draggable = false;
-    img.src = `${info.tiles}/${level}/${i}.png`;
+    img.src = `${info.tiles}/${specMap()}/${level}/${i}.png`;
     el.insertBefore(img, el.labels);
     S.spec.imgs.set(k, img);
   }
   for (const [k, img] of S.spec.imgs) if (!wanted.has(k)) { img.remove(); S.spec.imgs.delete(k); }
+}
+
+// ---- The night screen: the whole app dark red on black, one setting (capabilities().night) ----
+// app/main.py opens the page with ?night=1 when it is on, and index.html sets html.night before the
+// styles load, so it never flashes white; the window's own background is dark too. Switched here
+// (the toolbar's Night screen) or on the Live screen (the same setting): colours come from style.css
+// (html.night); what is drawn by script follows: the waveform, the marks, the selection, the
+// spectrogram tiles (drawn in the "night" colour map by the backend) and the Live scopes.
+function nightOn() { return document.documentElement.classList.contains("night"); }
+
+function setupNight() {
+  applyNight(!!S.caps.night);
+  $("night").onchange = () => setNight($("night").checked);
+}
+
+async function setNight(on) {
+  applyNight(on);
+  const r = await api().set_night(on);
+  if (r && r.ok === false) showError(r);
+}
+
+function applyNight(on) {
+  document.documentElement.classList.toggle("night", on);
+  $("night").checked = on;
+  $("live-field").checked = on;
+  const css = getComputedStyle(document.documentElement);
+  if (S.ws && S.ws.setOptions) {
+    S.ws.setOptions({ waveColor: css.getPropertyValue("--muted").trim(), progressColor: css.getPropertyValue("--accent").trim() });
+  }
+  for (const m of S.marks) {
+    const region = S.markRegions.get(m.id);
+    if (region) region.setOptions({ color: markColor(m.cls) });
+  }
+  if (S.regions && S.regions.enableDragSelection) {
+    if (typeof S.dragOff === "function") S.dragOff();
+    S.dragOff = S.regions.enableDragSelection({ color: selectionColor() });
+    if (S.region && S.region.setOptions) S.region.setOptions({ color: selectionColor() });
+  }
+  if (S.spec.el) { specTheme(S.spec.el); clearSpectrogramTiles(); queueSpectrogram(); }
+  liveThemeChanged();
+}
+
+function selectionColor() { return nightOn() ? "rgba(208, 80, 80, 0.25)" : "rgba(108, 195, 167, 0.28)"; }
+
+// The player's spectrogram tiles: inferno by day, red on black at night (openevp/spectrogram.py PALETTES).
+function specMap() { return nightOn() ? "night" : "inferno"; }
+
+function specTheme(el) {
+  const night = nightOn();
+  el.style.background = night ? "#000000" : "#000004";
+  el.labels.style.color = night ? "#d36b6b" : "#fff";
+  el.msg.style.color = night ? "#b85c5c" : "#ccc";
 }
 
 // ---- Selection: drag across the waveform to pick a part; play or loop just that part ----
@@ -3014,7 +3068,7 @@ function fmtPrecise(s) {
 
 function setupSelection() {
   S.regions = S.ws.registerPlugin(WaveSurfer.Regions.create());
-  S.regions.enableDragSelection({ color: "rgba(108, 195, 167, 0.28)" });
+  S.dragOff = S.regions.enableDragSelection({ color: selectionColor() });
   S.region = null;
   S.regions.on("region-created", regionCreated);
   S.regions.on("region-updated", regionUpdated);
@@ -3187,6 +3241,9 @@ async function play(device, folder, number, label) {
 
 // ---- EVP marks: a selection saved as an EVP (class A/B/C + note), kept per recording ----
 const MARK_COLORS = { A: "rgba(220, 60, 60, .30)", B: "rgba(230, 150, 30, .30)", C: "rgba(70, 130, 220, .30)" };
+// At night: red, amber and a dusky rose, told apart by colour and lightness, with the letter on each.
+const MARK_COLORS_NIGHT = { A: "rgba(235, 80, 80, .42)", B: "rgba(215, 140, 40, .38)", C: "rgba(150, 70, 110, .45)" };
+function markColor(cls) { return (nightOn() ? MARK_COLORS_NIGHT : MARK_COLORS)[cls]; }
 const MIN_MARK = 0.05;                        // seconds; the backend refuses shorter marks
 const READ_ONLY_TIP = "Marks can't be changed right now.";   // only if the backend gave no reason
 const NO_MARKS_TIP = "Marks are not available here.";
@@ -3302,7 +3359,7 @@ function drawMarks(seq) {
 
 function addMarkRegion(m) {
   const movable = marksWritable() && !isPoint(m);
-  const region = S.regions.addRegion({ id: "mark-" + m.id, start: m.start, end: m.end, color: MARK_COLORS[m.cls],
+  const region = S.regions.addRegion({ id: "mark-" + m.id, start: m.start, end: m.end, color: markColor(m.cls),
                                        content: m.cls, drag: movable, resize: movable, minLength: MIN_MARK });
   S.markRegions.set(m.id, region);
 }
@@ -3313,7 +3370,7 @@ function replaceMark(mark) {
   S.marks = sortMarks(S.marks.map((m) => (m.id === mark.id ? mark : m)));
   const region = S.markRegions.get(mark.id);
   const where = movePending(mark.id) ? {} : { start: mark.start, end: mark.end };
-  if (region) region.setOptions({ ...where, color: MARK_COLORS[mark.cls], content: mark.cls });
+  if (region) region.setOptions({ ...where, color: markColor(mark.cls), content: mark.cls });
   renderMarks();
 }
 

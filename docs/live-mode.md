@@ -366,9 +366,12 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   (`aria-pressed`), the segmented ones built by `segButtons`. Record is bottom
   left, MARK bottom right under the thumb, with Listen on the row below; M still
   works.
-- **Night screen** (`live.field`, remembered): dark red colours for the screen
-  and the window around it while it is open (`body.live-night`), the waveform in
-  red, the spectrogram dimmed and reddened by a CSS filter.
+- **Night screen:** the app's (backend `NIGHT`, `set_night`, `capabilities().night`;
+  the test builds' `live.field` moved into it once, `backend.night_setting`). The
+  Live screen's button is the same switch as the toolbar's. While it is on, the
+  scopes draw in its colours: the waveform from `--live-accent`, the spectrogram
+  with `nightLut()` (the same red on black map as the player's tiles,
+  `openevp/spectrogram.py night_palette`).
 - **Preview and silence:** the input is drawn from the moment it opens; nothing
   is sent until Record. The spectrogram's empty area is grey, lighter than
   silence, so silence shows as a dark band moving in, and the waveform as a flat

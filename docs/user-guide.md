@@ -197,9 +197,8 @@ the same way Stop does before the window closes.
 
 ### The night screen
 
-Tap **Night screen** (top right) for a dark red screen that's easier on your
-eyes in the dark, and keeps your night vision. It covers the whole window
-while the recording screen is open. OpenEVP remembers it.
+The recording screen has its own **Night screen** button (top right). It's
+the same switch as the one in the top bar: see [The night screen](#the-night-screen-1).
 
 ### Listening while you record
 
@@ -712,6 +711,23 @@ Export clips on a `Clips` folder itself) never cuts clips from clips.
 - OpenEVP knows its own `Clips` folders by a small hidden file inside them,
   `.openevp-clips`. Delete that file and its clips (WAV or MP3) count as
   ordinary recordings. A folder you named `Clips` yourself is just a folder.
+
+## The night screen
+
+Out on a ghost hunt in the dark, tick **Night screen** in the top bar, next to
+Check for updates. The whole app turns dark red on black: the EVP Library,
+the player, the recording screen, menus, dialogs and banners. It's easier on
+your eyes and keeps your night vision.
+
+- The waveforms turn red, and the spectrograms (the player's and the recording
+  screen's) are drawn red on black instead of in their usual colours.
+- Marks stay easy to tell apart: A is red, B is amber and C is a dusky rose,
+  each with its letter.
+- OpenEVP remembers it, and opens dark straight away next time: no white
+  flash.
+- Windows' own windows (choosing a folder, the question before closing) and
+  the small tips that show when you hover over a button stay in Windows'
+  colours.
 
 ## Where your marks live
 

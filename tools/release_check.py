@@ -89,7 +89,7 @@ Driver (a test PC or VM):
   [ ] Upgrade over v0.7.2: the driver is updated (DriverVer); marks, settings and library kept.
   [ ] Uninstall: the driver package is removed; the recorder goes back to its default driver.
 
-Record live and Import (docs/app-test-checklist.md 47-59):
+Record live and Import (docs/app-test-checklist.md 47-60):
   [ ] A real microphone: no permission prompt, the input remembered, M marks, Stop opens it in the player.
   [ ] A USB audio adapter with a recorder's headphone output: Import splits it into one file per recording.
   [ ] An hour-long session stays smooth; pulling the plug leaves a .part that the next start finishes.

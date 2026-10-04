@@ -46,7 +46,17 @@ def palette():
     return (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8).tobytes()
 
 
+# The night screen's map: black to dark red to a dim orange at the loudest, never bright, so it keeps
+# night vision. The same formula as app/ui/live.js nightLut(): t in 0..1 -> RGB.
+def night_palette():
+    """256 RGB triples (bytes): red on black."""
+    t = np.linspace(0, 1, 256)
+    rgb = np.stack([0.9 * t ** 1.1, 0.32 * t ** 2.8, 0.03 * t ** 3], axis=1)
+    return (np.clip(rgb, 0, 1) * 255 + 0.5).astype(np.uint8).tobytes()
+
+
 _PALETTE = palette()
+PALETTES = {"inferno": _PALETTE, "night": night_palette()}    # the colour maps a tile can be drawn in
 
 
 class Spectrogram:
@@ -67,18 +77,19 @@ class Spectrogram:
                 "column_seconds": self.hop / self.rate, "levels": len(self.levels), "tile": TILE,
                 "fmax": self.fmax, "fft": self.n}
 
-    def tile(self, level, index):
-        """Tile `index` of a level as PNG bytes, or None if there is no such tile."""
+    def tile(self, level, index, cmap="inferno"):
+        """Tile `index` of a level as PNG bytes in the colour map cmap (PALETTES), or None if there
+        is no such tile (or no such map)."""
         if not 0 <= level < len(self.levels):
             return None
         cols = self.levels[level]
         part = cols[index * TILE:(index + 1) * TILE]
-        if index < 0 or not part.shape[0]:
+        if index < 0 or not part.shape[0] or cmap not in PALETTES:
             return None
-        return png(np.ascontiguousarray(part.T[::-1]))
+        return png(np.ascontiguousarray(part.T[::-1]), PALETTES[cmap])
 
 
-def png(index_rows):
+def png(index_rows, palette_bytes=_PALETTE):
     """An 8-bit palette PNG of a (height, width) uint8 array of colour-map indices."""
     h, w = index_rows.shape
     raw = np.zeros((h, w + 1), np.uint8)                       # filter byte 0 (none) per row
@@ -87,7 +98,7 @@ def png(index_rows):
     def chunk(kind, body):
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body))
     return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 3, 0, 0, 0)) +
-            chunk(b"PLTE", _PALETTE) + chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)) + chunk(b"IEND", b""))
+            chunk(b"PLTE", palette_bytes) + chunk(b"IDAT", zlib.compress(raw.tobytes(), 6)) + chunk(b"IEND", b""))
 
 
 class Cancelled(Exception):

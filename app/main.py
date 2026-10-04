@@ -15,7 +15,7 @@ from openevp.paths import default_output
 
 from . import events, folders, mic_permission, native_share, sharing, updater
 from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
-from .backend import Api, recording_wav
+from .backend import Api, night_setting, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
 from .store import AppData
@@ -152,6 +152,14 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
         return "Backup in progress", f"{backup} Close?"
     return None
 
+
+NIGHT_BG = "#0A0505"                # the night screen's background (style.css html.night --bg)
+
+
+def _start_page(night):
+    """The page and the window's background: with the night screen on, both dark from the first
+    paint (index.html reads ?night=1 before its styles load), so the window never flashes white."""
+    return ("app/ui/index.html" + ("?night=1" if night else ""), NIGHT_BG if night else "#FFFFFF")
 
 CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
 CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
@@ -612,8 +620,11 @@ def _run_app(smoke=None):
         api.watch_store()                               # read-only: keep trying for the store's lock
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
-        window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,
-                                       width=1100, height=720, min_size=(800, 500), hidden=bool(smoke))
+        # The night screen is known before the window opens: the window's own background and the
+        # page's first paint (index.html reads ?night=1 before its styles) are dark from the start.
+        page, background = _start_page(night_setting(store))
+        window = webview.create_window("OpenEVP", page, js_api=api, width=1100, height=720, min_size=(800, 500),
+                                       hidden=bool(smoke), background_color=background)
 
         def close_now():
             nonlocal closing_after_recording

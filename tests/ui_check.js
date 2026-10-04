@@ -105,6 +105,7 @@ const document = {
   addEventListener(type, fn, capture) { listen(document, type, fn, capture); },
   activeElement: null,
   body: new Element("body"),
+  documentElement: new Element("html"),
 };
 // The format menu as index.html ships it.
 const format = document.getElementById("format");
@@ -212,6 +213,16 @@ function audioChain(ctx) {
     else out.push(["shaper", n.curve.length]);
   }
   return out;
+}
+
+// ---- the night screen before the first paint: index.html's inline script, as the page runs it ----
+function runNightScript(html, search) {
+  const m = /<script>(if \(\/\[\?&\]night=1[^<]*)<\/script>/.exec(html);
+  assert.ok(m, "an inline script sets the night screen before the styles load");
+  assert.ok(html.indexOf(m[0]) < html.indexOf('<link rel="stylesheet" href="style.css">'), "before the stylesheet");
+  const el = new Element("html");
+  vm.runInNewContext(m[1], { location: { search }, document: { documentElement: el } });
+  return el.classList.contains("night");
 }
 
 // ---- a clock the test moves on by hand (fakeTimers ... realTimers): setTimeout otherwise never fires ----
@@ -2236,6 +2247,31 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("tab-view").onclick();
   context.__ws = wsBeforeTabs;
   vm.runInContext("S.ws = __ws;", context);
+  // ---- The night screen: before the first paint, and on every view ----
+  assert.ok(runNightScript(html, "?night=1") && !runNightScript(html, "") && !runNightScript(html, "?nightly=1"));
+  {
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    const night = /html\.night \{([^}]*)\}/.exec(css);
+    assert.ok(night, "html.night sets the theme's colours");
+    for (const v of ["--bg: #0a0505", "--panel: #140909", "--text: #d36b6b", "--accent: #d05050", "--on-accent: #0a0505",
+                     "--mark-a:", "--mark-b:", "--mark-c:", "color-scheme: dark", "scrollbar-color:"]) {
+      assert.ok(night[1].includes(v), v);
+    }
+    // The major views draw with the theme's variables (no colour of their own to miss at night).
+    for (const sel of [".toolbar {", "#sidebar {", "#banner {", ".modal-card {", "#live {"]) {
+      const rule = css.slice(css.indexOf(sel), css.indexOf("}", css.indexOf(sel)));
+      assert.ok(rule && /var\(--(panel|bg|warn-bg|live-bg)\)/.test(rule), sel);
+    }
+    assert.ok(!css.includes("live-night") && !css.includes("#live.field"), "the Live screen has no night of its own");
+    assert.ok(html.includes('id="night-label"') && html.indexOf('id="night"') > html.indexOf('id="check-update"'),
+              "the switch is in the toolbar, next to Check for updates");
+  }
+  // Mark classes stay apart at night: their own colours (and letters on the regions).
+  assert.deepStrictEqual(JSON.parse(vm.runInContext(`JSON.stringify((() => { applyNight(true); const n = ["A", "B", "C"].map(markColor);
+                                     applyNight(false); return [n, ["A", "B", "C"].map(markColor)]; })())`, context)),
+           [["rgba(235, 80, 80, .42)", "rgba(215, 140, 40, .38)", "rgba(150, 70, 110, .45)"],
+            ["rgba(220, 60, 60, .30)", "rgba(230, 150, 30, .30)", "rgba(70, 130, 220, .30)"]]);
+
   // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
   assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
   // On by default: capabilities() said nothing (a new user), so it is on; only an explicit false turns it off.
@@ -2273,17 +2309,34 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(specEl().labels.children.map((c) => [c.textContent, c.style.bottom]),
                          [["1 kHz", "25.00%"], ["2 kHz", "50.00%"], ["3 kHz", "75.00%"]]);
   // Fit to 800 px: level 3 (782 columns would be too few, 1563 is enough); its 4 tiles, placed by time.
-  assert.deepStrictEqual(tiles(), ["3/0", "3/1", "3/2", "3/3"]);
-  const img0 = vm.runInContext(`S.spec.imgs.get("3/1")`, context);
+  // The colour map is part of each tile's key and URL (inferno by day).
+  assert.deepStrictEqual(tiles(), ["inferno/3/0", "inferno/3/1", "inferno/3/2", "inferno/3/3"]);
+  const img0 = vm.runInContext(`S.spec.imgs.get("inferno/3/1")`, context);
   assert.deepStrictEqual([img0.src, img0.style.left, img0.style.width, img0.style.imageRendering],
-                         ["http://t/spec/abc/3/1.png", "32.76400%", "32.76800%", "auto"]);
+                         ["http://t/spec/abc/inferno/3/1.png", "32.76400%", "32.76800%", "auto"]);
+  // The night screen: the tiles are asked again in the night colour map (another URL, so never a
+  // cached day tile), and the labels turn red.
+  let rafs = [];
+  const realRaf = context.requestAnimationFrame;
+  context.requestAnimationFrame = (fn) => { rafs.push(fn); return rafs.length; };
+  vm.runInContext("applyNight(true)", context);
+  assert.deepStrictEqual(tiles(), [], "the day tiles go");
+  rafs.forEach((fn) => fn()); rafs = [];
+  assert.deepStrictEqual(tiles(), ["night/3/0", "night/3/1", "night/3/2", "night/3/3"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("night/3/1").src`, context), "http://t/spec/abc/night/3/1.png");
+  assert.strictEqual(specEl().labels.style.color, "#d36b6b");
+  vm.runInContext("applyNight(false)", context);
+  rafs.forEach((fn) => fn());
+  context.requestAnimationFrame = realRaf;
+  assert.deepStrictEqual(tiles(), ["inferno/3/0", "inferno/3/1", "inferno/3/2", "inferno/3/3"]);
+  assert.strictEqual(specEl().labels.style.color, "#fff");
   await vm.runInContext("S.spec.save || Promise.resolve()", context);
   assert.deepStrictEqual(specSaves, [true]);
   // Zoomed in (400 px per second) and scrolled: full detail, only the tiles in view (and one each side).
   wrapW = 40000; wsScroll = 20000;
   context.renderSpectrogram();
-  assert.deepStrictEqual(tiles(), ["0/11", "0/12", "0/13"]);
-  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("0/12").style.imageRendering`, context), "pixelated");
+  assert.deepStrictEqual(tiles(), ["inferno/0/11", "inferno/0/12", "inferno/0/13"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("inferno/0/12").style.imageRendering`, context), "pixelated");
   assert.strictEqual(specEl().children.filter((c) => c.tagName === "IMG").length, 3, "tiles out of view are removed");
   wrapW = 800; wsScroll = 0;
   // Another recording before the answer: that answer is dropped; the new one asks again.
@@ -2960,17 +3013,31 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
       return c;
     };
     byId.set("live-wave", fakeCanvas("live-wave", 400, 100)); byId.set("live-spec", fakeCanvas("live-spec", 400, 120));
-    liveSettings = { ...liveSettings, field: true };
     vm.runInContext("LV.settings = null;", context);      // as after a restart: read from the backend again
     await context.openLive();
     await settle();
-    // The night screen is remembered and applied; Listen is never on by itself.
-    assert.ok($("live-field").checked && $("live").classList.contains("field"));
-    assert.ok(!$("live-monitor").checked);
-    $("live-field").checked = false; $("live-field").onchange();
+    assert.ok(!$("live-monitor").checked, "Listen is never on by itself");
+    // The night screen, app wide: one setting (set_night), the toolbar's switch and the Live screen's
+    // are the same. It goes on the whole document (html.night), so every view takes it.
+    const nights = [];
+    api.set_night = async (on) => { nights.push(on); return { ok: true, night: on, remembered: true }; };
+    const docEl = document.documentElement;
+    assert.ok(!docEl.classList.contains("night"));
+    $("live-field").checked = true; $("live-field").onchange();
     await settle();
-    assert.ok(!$("live").classList.contains("field"));
-    sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { field: false }]);
+    assert.ok(docEl.classList.contains("night") && $("night").checked && $("live-field").checked);
+    sameJSON(nights, [true]);
+    assert.ok(!lv.some((c) => c[0] === "set" && "field" in c[1]), "not a Live setting any more");
+    // The live scopes are drawn again in the night's colours: the spectrogram red on black.
+    assert.strictEqual(vm.runInContext("LV.spec.lut", context), null, "the colour map is picked again");
+    sameJSON(vm.runInContext("[...nightLut().slice(0, 3), ...nightLut().slice(765)]", context), [0, 0, 0, 230, 82, 8]);
+    assert.ok(vm.runInContext("(() => { const l = nightLut(); for (let i = 0; i < 256; i++) if (l[i * 3] < l[i * 3 + 1]) return false; return true; })()", context),
+              "red throughout");
+    // Off from the toolbar: off everywhere.
+    $("night").checked = false; $("night").onchange();
+    await settle();
+    assert.ok(!docEl.classList.contains("night") && !$("live-field").checked);
+    sameJSON(nights, [true, false]);
     // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, the night screen,
     // Suggest cuts; the Listen panel's options are buttons that show their state.
     for (const id of ["live-monitor-label", "live-field-label"]) {

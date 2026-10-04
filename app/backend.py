@@ -115,6 +115,27 @@ PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
 ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
 SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool; on unless turned off)
+NIGHT = "night"                     # the night screen, app wide (a bool; off unless turned on)
+
+
+def night_setting(store):
+    """Is the night screen on? (app/main.py asks before the window opens, so it never flashes
+    white.) The first time, the Live screen's own night setting of the test builds ("live"
+    {"field": true}) becomes this one, and is taken out of the Live settings."""
+    if store is None:
+        return False
+    saved = store.get_setting(NIGHT)
+    if isinstance(saved, bool):
+        return saved
+    live_saved = store.get_setting("live")
+    night = isinstance(live_saved, dict) and live_saved.get("field") is True
+    try:
+        store.set_setting(NIGHT, night)
+        if isinstance(live_saved, dict) and "field" in live_saved:
+            store.set_setting("live", {k: v for k, v in live_saved.items() if k != "field"})
+    except (StoreReadOnly, StoreUnavailable):
+        pass                                # read-only here: the writing window moves it
+    return night
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -497,6 +518,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
         self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
+        self._night = None                    # the night screen, picked in this session (when it could not be remembered)
         self._noise = OrderedDict()           # noise profile id -> (fp, openevp.denoise.Profile), this session only
         self._denoising = {}                  # reduce_noise() job -> its cancel Event
         self._spec_lock = threading.Lock()
@@ -570,7 +592,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
                 **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
-                "spectrogram": self.spectrogram_shown(),
+                "spectrogram": self.spectrogram_shown(), "night": self.night(),
                 "noise": {"default_amount": denoise.DEFAULT_AMOUNT, "max_reduction_db": denoise.MAX_REDUCTION_DB},
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
@@ -1175,6 +1197,25 @@ class Api(ShareOps, LibraryOps, LiveOps):
         with self._recs_lock:
             ok = url is None or url == entry.get("url") or url in entry.get("variants", ())
         return (entry.get("url") if url is None else url) if ok else None
+
+    def night(self):
+        """Is the night screen on (the whole app dark red on black)? Picked in this session if it
+        could not be remembered, else remembered (night_setting), else off."""
+        return self._night if self._night is not None else night_setting(self._store)
+
+    def set_night(self, on):
+        """Turn the night screen on or off, and remember it. {"ok", "night", "remembered"}."""
+        if not isinstance(on, bool):
+            return _fail("Unknown night screen setting.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(NIGHT, on)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._night = None if remembered else on
+        return {"ok": True, "night": on, "remembered": remembered}
 
     def spectrogram(self, rec, url=None):
         """The spectrogram of the loaded recording's audio (or of url, a version of it

@@ -397,20 +397,44 @@ class LiveApiTests(Tmp):
 
     def test_an_old_show_what_i_hear_setting_is_ignored(self):
         # A test build stored "heard" (the removed Show what I hear): read past, never written again.
-        self.store.set_setting(live.LIVE_SETTING, {"split": 4, "heard": True, "field": True})
+        self.store.set_setting(live.LIVE_SETTING, {"split": 4, "heard": True})
         a = self.api()
         got = a.live_settings()
         self.assertNotIn("heard", got)
-        self.assertEqual((got["split"], got["field"]), (4, True))
+        self.assertEqual(got["split"], 4)
         self.assertTrue(a.set_live_settings({"split": 5})["ok"])
         self.assertNotIn("heard", self.store.get_setting(live.LIVE_SETTING))
 
-    def test_live_settings_remember_the_night_screen(self):
+    def test_the_night_screen_is_the_apps_and_the_live_one_moves_into_it(self):
+        # A test build kept the night screen as the Live screen's own setting ("live" {"field"}): the
+        # first time it is asked, it becomes the app's (NIGHT) and leaves the Live settings.
+        self.store.set_setting(live.LIVE_SETTING, {"split": 4, "field": True})
         a = self.api()
-        self.assertFalse(a.live_settings()["field"])
-        self.assertTrue(a.set_live_settings({"field": True})["ok"])
-        self.assertTrue(self.api().live_settings()["field"])
-        self.assertFalse(a.set_live_settings({"field": "dark"})["ok"])
+        self.assertTrue(a.capabilities()["night"])
+        self.assertTrue(self.store.get_setting(backend.NIGHT))
+        self.assertEqual(self.store.get_setting(live.LIVE_SETTING), {"split": 4})
+        self.assertNotIn("field", a.live_settings())
+        self.assertFalse(a.set_live_settings({"field": True})["ok"], "not a Live setting any more")
+        self.assertEqual(a.set_night(False), {"ok": True, "night": False, "remembered": True})
+        self.assertFalse(self.api().night())
+        self.assertFalse(backend.night_setting(self.store), "moved once: an old field never comes back")
+        self.assertFalse(a.set_night("dark")["ok"])
+        self.assertTrue(a.set_night(True)["ok"] and backend.night_setting(self.store))
+
+    def test_the_night_screen_starts_off_and_a_read_only_window_keeps_its_choice_for_the_session(self):
+        a = self.api()
+        self.assertFalse(a.night())
+        with mock.patch.object(self.store, "set_setting", side_effect=live.StoreReadOnly("read only")):
+            self.assertEqual(a.set_night(True), {"ok": True, "night": True, "remembered": False})
+            self.assertTrue(a.night())
+
+    def test_the_window_opens_dark_with_the_night_screen(self):
+        # app/main.py: the page is asked for with ?night=1 (index.html sets html.night before its
+        # styles) and the window's own background is dark, so nothing flashes white.
+        from app import main
+        self.assertEqual(main._start_page(True), ("app/ui/index.html?night=1", main.NIGHT_BG))
+        self.assertEqual(main._start_page(False), ("app/ui/index.html", "#FFFFFF"))
+        self.assertEqual(main.NIGHT_BG.lower(), "#0a0505")
 
     def test_a_mark_at_the_very_last_sample_is_kept(self):
         # M just before Stop: the mark ends at the last sample received, a time with many

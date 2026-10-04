@@ -74,8 +74,6 @@ async function openLive() {
   $("live-gap").value = String(LV.settings.split > 0 ? LV.settings.split : 3);
   $("live-gap").disabled = !$("live-split").checked;
   $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
-  $("live-field").checked = !!LV.settings.field;
-  applyField();
   showListen();
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
@@ -86,7 +84,6 @@ async function openLive() {
 
 // Called by renderMain whenever another view is shown: the input is let go of.
 function liveViewLeft() {
-  document.body.classList.remove("live-night");
   closeInput();                                     // always: an input still opening is called off too
 }
 
@@ -191,11 +188,11 @@ function splitChanged() {
 
 // The buttons and fields: what can be changed now.
 // The dark red night screen (remembered): the Live view only.
-function applyField() {
-  $("live").classList.toggle("field", $("live-field").checked);
-  document.body.classList.toggle("live-night", $("live-field").checked && liveOpen());   // the window around it too
-  LV.color = "";                                    // the waveform's colour follows
+// The night screen changed (app.js applyNight): the scopes take its colours, drawn again from history.
+function liveThemeChanged() {
+  LV.color = "";
   LV.emptyColor = "";
+  LV.spec.lut = null;                               // inferno by day, red on black at night
   liveRedraw();
 }
 
@@ -1137,7 +1134,7 @@ function redrawSpec(c, g) {
   sp.rows = specRows(c.height);
   const m = h.spec ? Math.min(h.specN, LIVE_HISTORY_COLS, c.width) : 0;
   if (!m) return;
-  if (!sp.lut) sp.lut = infernoLut();
+  if (!sp.lut) sp.lut = nightOn() ? nightLut() : infernoLut();
   const img = g.createImageData(m, c.height), px = img.data, kept = h.specBins;
   for (let k = 0; k < m; k++) {
     const base = ((h.specN - m + k) % LIVE_HISTORY_COLS) * kept;
@@ -1209,6 +1206,18 @@ const INFERNO = [[0.0002189403691192265, 0.001651004631001012, -0.01948089843709
                  [77.162935699427, -33.40235894210092, -81.80730925738993],
                  [-71.31942824499214, 32.62606426397723, 73.20951985803202],
                  [25.13112622477341, -12.24266895238567, -23.07032500287172]];
+// The night screen's map (openevp/spectrogram.py night_palette, the same formula): red on black.
+function nightLut() {
+  const lut = new Uint8Array(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    lut[i * 3] = Math.round(Math.min(1, 0.9 * Math.pow(t, 1.1)) * 255);
+    lut[i * 3 + 1] = Math.round(Math.min(1, 0.32 * Math.pow(t, 2.8)) * 255);
+    lut[i * 3 + 2] = Math.round(Math.min(1, 0.03 * Math.pow(t, 3)) * 255);
+  }
+  return lut;
+}
+
 function infernoLut() {
   const lut = new Uint8Array(256 * 3);
   for (let i = 0; i < 256; i++) {
@@ -1231,7 +1240,7 @@ function drawSpec(now) {
   const due = Math.min(c.width, Math.floor((now - sp.last) * LIVE_COLS_PER_SEC / 1000));
   if (due < 1) return;
   sp.last += due * 1000 / LIVE_COLS_PER_SEC;
-  if (!sp.lut) sp.lut = infernoLut();
+  if (!sp.lut) sp.lut = nightOn() ? nightLut() : infernoLut();
   a.getByteFrequencyData(sp.bins);
   const top = Math.min(LIVE_SPEC_HZ, LV.rate / 2), binHz = LV.rate / a.fftSize, h = c.height;
   pushSpec(sp.bins, Math.min(sp.bins.length, Math.ceil(top / binHz) + 1), due);
@@ -1283,7 +1292,7 @@ function setupLive() {
   $("live-split").onchange = splitChanged;
   $("live-gap").onchange = splitChanged;
   $("live-monitor").onchange = () => { applyMonitor(); showListen(); renderLive(); };
-  $("live-field").onchange = () => { applyField(); saveLive({ field: $("live-field").checked }); };
+  $("live-field").onchange = () => setNight($("live-field").checked);   // the app's night screen, the same switch
   $("live-sound-settings").onclick = () => api().open_sound_settings();
   setupListen();
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());

@@ -367,8 +367,9 @@ test opens a real input):
     Task Manager.
 58. **Touch screen in the field.** On a tablet or touchscreen laptop, open Record
     live: every button and toggle is easy to hit with a finger; MARK is bottom
-    right under the thumb. Turn on **Night screen**: the whole window goes dark
-    red; reopen OpenEVP: it is still on. Rotate or resize the window: the
+    right under the thumb. Turn on **Night screen**: the whole app goes dark
+    red, and the toolbar's Night screen is ticked too; reopen OpenEVP: it is
+    still on, and the window opens dark with no white flash. Rotate or resize the window: the
     waveform and spectrogram fill the space and keep their picture. Mute the microphone: within about 3 s the screen says "No sound
     coming in…", the meter says Silent, the waveform shows a flat line and the
     spectrogram a dark band moving in; **Open sound settings** opens Windows'
@@ -380,4 +381,12 @@ test opens a real input):
     grade one in the EVP Library. A mark in the first second is shorter (it
     starts at 0:00). "about N h left" in the status strip matches the free space
     on the drive.
+60. **Night screen, app wide.** Tick **Night screen** in the top bar: the EVP
+    Library, the player, the recording screen, the About and other dialogs,
+    the right-click menus, banners and the scrollbars turn dark red on black;
+    nothing stays bright white. Play a recording: the waveform is red and the
+    spectrogram red on black (scroll and zoom: new tiles come in red too). A, B
+    and C marks are told apart (red, amber, rose, with letters). Close and
+    reopen OpenEVP: it opens dark at once, with no white flash. Untick it: back
+    to the usual colours everywhere, the spectrogram in its usual colours.
 

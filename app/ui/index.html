@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <title>OpenEVP</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<!-- The night screen before the first paint: app/main.py opens the page with ?night=1 when it is on -->
+<script>if (/[?&]night=1(&|$)/.test(location.search)) document.documentElement.classList.add("night");</script>
 <link rel="stylesheet" href="style.css">
 <script src="vendor/wavesurfer.min.js"></script>
 <script src="vendor/regions.min.js"></script>
@@ -13,6 +15,7 @@
   <strong>OpenEVP</strong>
   <button id="version" class="link muted" title="About OpenEVP"></button>
   <button id="check-update" class="link">Check for updates</button>
+  <label id="night-label" class="night-toggle" title="Dark red on black, for the dark: easier on your eyes, and it keeps your night vision"><input type="checkbox" id="night"> Night screen</label>
   <span class="spacer"></span>
   <span>Save to <button id="dest" class="link" title="Choose where recordings are saved"></button></span>
   <select id="format">
@@ -73,7 +76,7 @@
         <button type="button" id="live-mode-import" aria-pressed="false" title="Copy recordings off a recorder that only has a headphone jack, played into this PC">Import from a recorder</button>
       </span>
       <span class="spacer"></span>
-      <label class="toggle" id="live-field-label" title="A dark red screen that is easier on your eyes in the dark"><input type="checkbox" id="live-field"> Night screen</label>
+      <label class="toggle" id="live-field-label" title="Dark red on black for the whole app: easier on your eyes in the dark"><input type="checkbox" id="live-field"> Night screen</label>
       <button id="live-close" type="button" class="live-plain" title="Back to the EVP Library">Close</button>
     </div>
     <div id="live-strip">
