@@ -845,7 +845,9 @@ class StoreMultiprocessTests(unittest.TestCase):
 
 
 class QuestionsTests(unittest.TestCase):
-    """Questions asked while recording (Live mode's question log), kept per recording."""
+    """Questions asked while recording (Live mode's question log), kept per recording in
+    questions.json: never in marks.json, which an older OpenEVP rewrites with only the
+    fields it knows."""
 
     def test_added_once_kept_and_never_marks(self):
         with tempfile.TemporaryDirectory() as d:
@@ -856,14 +858,70 @@ class QuestionsTests(unittest.TestCase):
             store.add_question("fp1", 1.0, "Who is there?")
             self.assertEqual([x["at"] for x in store.questions("fp1")], [1.0, 3.5])
             self.assertEqual(store.marks("fp1"), [])
-            self.assertEqual(store.summary()["fp1"]["A"] + store.summary()["fp1"]["B"] + store.summary()["fp1"]["C"], 0)
+            self.assertNotIn("fp1", store.summary(), "questions never count as EVPs")
             for bad in ((-1, "x"), (11.0, "x"), (2.0, "   "), (float("nan"), "x")):
                 with self.assertRaises(ValueError):
                     store.add_question("fp1", *bad, duration=10.0)
             store.close()
             again = AppData(d)
-            self.assertEqual([x["text"] for x in again.recording("fp1")["questions"]], ["Who is there?", "Is anyone here?"])
+            self.assertEqual([x["text"] for x in again.questions("fp1")], ["Who is there?", "Is anyone here?"])
             again.close()
+
+    def test_kept_out_of_marks_json(self):
+        # marks.json stays exactly the version-1 schema every older OpenEVP reads and rewrites:
+        # rewriting it (as v0.9.10 does on its next mark) cannot drop a question.
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "voice", name="x.wav", duration=10.0)
+            store.add_question("fp1", 0.5, "Is anyone here?", duration=10.0)
+            store.close()
+            with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
+                marks = json.load(f)
+            self.assertEqual(marks["version"], 1)
+            self.assertNotIn("questions", json.dumps(marks))
+            # An older OpenEVP: it knows marks.json only, and rewrites it from what it read.
+            marks["recordings"]["fp1"]["marks"].append({"id": "old1", "start": 3.0, "end": 4.0, "cls": "B",
+                                                        "note": "", "created": ""})
+            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
+                json.dump(marks, f)
+            again = AppData(d)
+            self.assertEqual([q["text"] for q in again.questions("fp1")], ["Is anyone here?"])
+            self.assertEqual(len(again.marks("fp1")), 2)
+            again.close()
+
+    def test_a_second_window_reads_them_and_cannot_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            first.add_question("fp1", 1.0, "Who is there?")
+            second = AppData(d)
+            self.assertTrue(second.read_only)
+            self.assertEqual([q["text"] for q in second.questions("fp1")], ["Who is there?"])
+            with self.assertRaises(StoreReadOnly):
+                second.add_question("fp1", 2.0, "Can you knock?")
+            second.close()
+            first.close()
+            with open(os.path.join(d, "questions.json"), encoding="utf-8") as f:
+                self.assertEqual(len(json.load(f)["recordings"]["fp1"]["questions"]), 1)
+
+    def test_a_bad_or_newer_file_is_set_aside_and_an_unwritable_one_refused(self):
+        for content, tag in (("{not json", "corrupt"), (json.dumps({"version": 2, "recordings": {}}), "future")):
+            with tempfile.TemporaryDirectory() as d:
+                with open(os.path.join(d, "questions.json"), "w", encoding="utf-8") as f:
+                    f.write(content)
+                store = AppData(d)
+                self.assertTrue(any("questions.json" in p for p in store.problems()))
+                self.assertTrue(any(n.startswith(f"questions.json.{tag}-") for n in os.listdir(d)), os.listdir(d))
+                self.assertEqual(store.questions("fp1"), [])
+                store.add_question("fp1", 1.0, "Who is there?")         # starts fresh
+                store.close()
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            with mock.patch.object(store_module, "_write_json", side_effect=OSError("disk full")):
+                with self.assertRaises(StoreUnavailable):
+                    store.add_question("fp1", 1.0, "Who is there?")
+            self.assertEqual(store.questions("fp1"), [])
+            self.assertFalse(os.path.exists(os.path.join(d, "marks.json")))
+            store.close()
 
 
 if __name__ == "__main__":

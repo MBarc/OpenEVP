@@ -216,7 +216,7 @@ function audioChain(ctx) {
 
 // ---- a fake getUserMedia: the PC's inputs, and every request made ----------------------
 const mics = {
-  requests: [], fail: null,
+  requests: [], fail: null, hold: null,   // hold: an array; each request waits there until the test answers it
   devices: [{ kind: "audioinput", deviceId: "default", label: "Default - Microphone (Realtek Audio)" },
             { kind: "audioinput", deviceId: "d-mic", label: "Microphone (Realtek Audio)" },
             { kind: "audioinput", deviceId: "d-usb", label: "Line (USB Audio Device)" },
@@ -230,6 +230,7 @@ function fakeStream(device) {
 const navigator = { mediaDevices: {
   getUserMedia: async (c) => {
     mics.requests.push(c);
+    if (mics.hold) await new Promise((res) => mics.hold.push(res));
     if (mics.fail) { const e = new Error("blocked"); e.name = mics.fail; throw e; }
     const want = c.audio.deviceId, inputs = mics.devices.filter((d) => d.kind === "audioinput");
     let dev = inputs[0];
@@ -2623,6 +2624,35 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   markLi.children[4].value = "a whisper: get out";
   await markLi.children[4].onchange();
   sameJSON(edits.pop(), ["s1", 0, null, "a whisper: get out"]);
+  // Astra: edits apply in the order they were made, even when the backend answers out of order.
+  // A then B, with the answer to A held back: B is not even sent until A is answered, and the mark
+  // ends as B (in the list and in the backend's order). Each edit carries a growing number.
+  {
+    const held = [];
+    api.live_mark_update = (sid, id, cls, note, seq) => new Promise((resolve) => {
+      edits.push([sid, id, cls, note, seq]);
+      held.push(() => resolve({ ok: true, mark: {} }));
+    });
+    const doneA = markLi.children[1].onclick();            // A
+    await settle();
+    const doneB = markLi.children[2].onclick();            // B
+    await settle();
+    assert.strictEqual(edits.length, 1, "B waits for A's answer");
+    held.shift()();                                        // A answered
+    await doneA;
+    await settle();
+    assert.strictEqual(edits.length, 2);
+    assert.deepStrictEqual(edits.map((e) => e[2]), ["A", "B"]);
+    assert.ok(edits[1][4] > edits[0][4], "the edit numbers grow");
+    held.shift()();
+    await doneB;
+    assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
+    // A late answer the backend calls stale (a newer edit already applied) changes nothing here.
+    api.live_mark_update = async () => ({ ok: true, stale: true });
+    await markLi.children[3].onclick();                    // C, but stale
+    assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
+    edits.length = 0;
+  }
   // The question log: Enter (or Log question) notes the question at this moment, saved with the
   // recording; it is listed and marked on the waveform.
   const asked = [];
@@ -2650,8 +2680,22 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   batch(2048, 9);
   const tail = new Int16Array(100 * 2).fill(1234);         // held by the worklet: less than a batch
   tap2.port.tail = { pcm: tail.slice().buffer, frames: 100, peak: 0.04, sumsq: 0 };
-  await $("live-record").onclick();
+  // An edit still waiting for its answer when Stop is pressed: Stop finishes the file only after it.
+  let answerEdit;
+  api.live_mark_update = (sid, id, cls, note, seq) => new Promise((resolve) => {
+    lv.push(["edit", cls]); answerEdit = () => resolve({ ok: true, mark: {} });
+  });
+  const lateEdit = markLi.children[1].onclick();           // A
   await settle();
+  const stopAfterEdit = $("live-record").onclick();
+  await settle();
+  assert.ok(!lv.some((c) => c[0] === "stop"), "Stop waits for the edit");
+  answerEdit();
+  await lateEdit;
+  await stopAfterEdit;
+  await settle();
+  assert.ok(lv.findIndex((c) => c[0] === "edit") < lv.findIndex((c) => c[0] === "stop"));
+  lv.splice(lv.findIndex((c) => c[0] === "edit"), 1);
   assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
   assert.ok(tap2.port.posted.some((m) => m.flush !== undefined), "Stop asks the worklet for its last samples");
   const lastChunk = Buffer.from(lv[lv.length - 2][3], "base64");
@@ -2999,6 +3043,52 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     byId.delete("live-wave"); byId.delete("live-spec");
     $("live-close").onclick();
     await settle();
+  }
+  // Astra: leaving Live while the input is still opening (Windows asking, a slow driver) calls the
+  // open off: the stream that arrives late is let go and no microphone graph is built.
+  {
+    const streamsOf = () => vm.runInContext("LV.stream", context);
+    const nodesBefore = worklets.length;
+    const late = [];
+    const realGUM = navigator.mediaDevices.getUserMedia;
+    navigator.mediaDevices.getUserMedia = async (c) => { const st = await realGUM(c); late.push(st); return st; };
+    mics.hold = [];
+    const opening = context.openLive();
+    await settle();
+    assert.strictEqual(mics.hold.length, 1, "the input is being opened");
+    $("live-close").onclick();                             // leave Live before it answers
+    await settle();
+    mics.hold.shift()();
+    await opening;
+    await settle();
+    assert.strictEqual(late.length, 1);
+    assert.ok(late[0].track.stopped, "the late stream is released");
+    assert.strictEqual(streamsOf(), null);
+    assert.strictEqual(vm.runInContext("LV.ctx", context), null);
+    assert.strictEqual(worklets.length, nodesBefore, "no microphone graph");
+    // An open called off, then another: the first one's late stream never becomes the input.
+    const first = context.openLive();
+    await settle();
+    $("live-close").onclick();
+    await settle();
+    const second = context.openLive();
+    await settle();
+    assert.strictEqual(mics.hold.length, 2);
+    mics.hold.shift()();                                   // the first answers late
+    await first;
+    await settle();
+    assert.ok(late[1].track.stopped);
+    assert.strictEqual(streamsOf(), null);
+    mics.hold.shift()();                                   // the second: this one is the input
+    await second;
+    await settle();
+    assert.strictEqual(streamsOf(), late[2]);
+    assert.ok(!late[2].track.stopped);
+    mics.hold = null;
+    navigator.mediaDevices.getUserMedia = realGUM;
+    $("live-close").onclick();
+    await settle();
+    assert.ok(late[2].track.stopped, "closing the view lets the input go");
   }
   // The player shows the questions asked while recording: markers and a list.
   {

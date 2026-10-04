@@ -12,7 +12,7 @@
 const LV = {
   settings: null,                        // live_settings(): input, split, import
   mode: "live",                          // "live" or "import"
-  stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0,
+  stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0, gen: 0,
   heardAnalyser: null,                   // the spectrogram of what is heard (Show what I hear)
   rate: 0, channels: 0, deviceId: "", label: "", devices: [],
   rec: null,                             // the recording (see startRecording)
@@ -82,6 +82,7 @@ async function openLive() {
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
   renderLive();
+  if (!liveOpen()) return;                          // left while the settings or the library loaded
   await openInput(LV.settings.input);
 }
 
@@ -90,8 +91,7 @@ async function openLive() {
 function liveViewLeft() {
   returnEnhance();
   document.body.classList.remove("live-night");
-  if (!LV.stream && !LV.ctx) return;
-  closeInput();
+  closeInput();                                     // always: an input still opening is called off too
 }
 
 // ---- the player's Enhance panel, in the Live view while it is open ----
@@ -234,28 +234,34 @@ function inputProblem(e) {
 
 // Open an input: the one asked for (by id, else by name: ids can change between sessions), else
 // Windows' default. Asking for the default first is what lets the page see the inputs' names.
+// Every open has its own generation (LV.gen only grows): leaving the view, closing the input or
+// opening another calls it off, and after each step that waits it checks it is still wanted (its
+// generation, and the Live view still shown). A stream that arrives for an open called off is let go.
 async function openInput(want) {
-  const seq = ++LV.opening;
+  const gen = ++LV.gen;
+  LV.opening = gen;
   closeInput(true);
   renderLive();
+  const stale = () => gen !== LV.gen || !liveOpen();
+  const release = (stream) => { for (const t of stream.getTracks()) t.stop(); return false; };
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     liveStatus("Recording is not available in this window.", "warn"); LV.opening = 0; renderLive(); return false;
   }
   liveStatus("Opening the input…");
   try {
     let stream = await navigator.mediaDevices.getUserMedia(audioConstraints(want && want.id, false));
-    if (seq !== LV.opening) { stream.getTracks().forEach((t) => t.stop()); return false; }
+    if (stale()) return release(stream);
     await listInputs();
+    if (stale()) return release(stream);
     const track = stream.getAudioTracks()[0];
     const have = track.getSettings().deviceId || "";
     const target = want && (LV.devices.find((d) => d.deviceId === want.id) || LV.devices.find((d) => d.label === want.label));
     if (target && target.deviceId !== have) {
-      stream.getTracks().forEach((t) => t.stop());
+      release(stream);
       stream = await navigator.mediaDevices.getUserMedia(audioConstraints(target.deviceId, true));
-      if (seq !== LV.opening) { stream.getTracks().forEach((t) => t.stop()); return false; }
+      if (stale()) return release(stream);
     }
-    await startGraph(stream);
-    if (seq !== LV.opening) { closeInput(true); return false; }
+    if (!await startGraph(stream, stale)) return false;
     LV.opening = 0;
     liveStatus(want && target === undefined && want.label
       ? `"${want.label}" is not connected, so ${LV.label || "the default input"} is used.` : "");
@@ -263,7 +269,7 @@ async function openInput(want) {
     renderLive();
     return true;
   } catch (e) {
-    if (seq !== LV.opening) return false;
+    if (stale()) return false;
     LV.opening = 0;
     const [text, settings] = inputProblem(e);
     liveStatus(text, "warn");
@@ -297,15 +303,19 @@ function showInputs() {
   sel.value = LV.deviceId;
 }
 
-async function startGraph(stream) {
+// Build the capture graph for a stream: true once it is LV's input; false when the open was called
+// off meanwhile (stale()), and then nothing of it is left running.
+async function startGraph(stream, stale = () => false) {
   const track = stream.getAudioTracks()[0];
   const st = track.getSettings();
   const AC = window.AudioContext || window.webkitAudioContext;
   let ctx;
   try { ctx = new AC({ sampleRate: st.sampleRate || undefined, latencyHint: "playback" }); }
   catch (e) { ctx = new AC({ latencyHint: "playback" }); }     // a rate Web Audio refuses: its own (48 kHz)
+  let mine = false;                                     // LV holds this graph
   try {
     await ctx.audioWorklet.addModule("live-worklet.js");
+    if (stale()) throw STALE_OPEN;
     const channels = Math.min(2, st.channelCount || 1) === 2 ? 2 : 1;
     const src = ctx.createMediaStreamSource(stream);
     const node = new AudioWorkletNode(ctx, "openevp-capture", {
@@ -318,6 +328,7 @@ async function startGraph(stream) {
     node.port.onmessage = (e) => liveAudio(e.data);
     Object.assign(LV, { stream, ctx, src, node, analyser, rate: ctx.sampleRate, channels,
                         deviceId: st.deviceId || "", label: track.label || "" });
+    mine = true;
     LV.wave.perCol = Math.max(1, Math.round(ctx.sampleRate / LIVE_COLS_PER_SEC));
     historyReset();                                     // another input: its own history
     LV.quietFrames = 0;
@@ -327,17 +338,22 @@ async function startGraph(stream) {
     LV.spec.bins = new Uint8Array(analyser.frequencyBinCount);
     track.onended = inputEnded;
     if (ctx.resume) await ctx.resume();
+    if (stale()) throw STALE_OPEN;
     applyMonitor();
     if (!LV.raf) LV.raf = requestAnimationFrame(liveFrame);
+    return true;
   } catch (e) {
+    if (mine && LV.ctx === ctx) closeInput(true);     // LV's input until now: closed as a whole
     try { ctx.close(); } catch (x) { /* already closed */ }
     stream.getTracks().forEach((t) => t.stop());
+    if (e === STALE_OPEN) return false;
     throw e;
   }
 }
+const STALE_OPEN = new Error("the input is no longer wanted");
 
 function closeInput(keepSeq = false) {
-  if (!keepSeq) LV.opening = 0;
+  if (!keepSeq) { LV.gen++; LV.opening = 0; }           // an open still under way is called off
   if (LV.node) { LV.node.port.onmessage = null; try { LV.node.disconnect(); } catch (e) { /* gone */ } }
   if (LV.stream) for (const t of LV.stream.getTracks()) { t.onended = null; t.stop(); }
   if (LV.ctx) { try { LV.ctx.close(); } catch (e) { /* gone */ } }
@@ -548,6 +564,7 @@ async function startRecording() {
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
+             meta: Promise.resolve(), metaSeq: 0,
              stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
@@ -566,7 +583,7 @@ async function liveMark() {
   queueChunk(rec);                                     // the audio up to now, before the mark
   await drained(rec, LIVE_CALL_MS);
   if (LV.rec !== rec || rec.closing) return null;
-  const r = await callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS);
+  const r = await metaOp(rec, () => callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS));
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
   addMarker("★");
@@ -603,11 +620,23 @@ function markItem(rec, mark, at) {
   return li;
 }
 
+// The recording's marks, edits and questions reach the backend one at a time, in the order they were
+// made (a promise chain per recording), and Stop waits for them before the file is finished. Each
+// edit also carries a number that only grows: should a call that timed out still arrive late, the
+// backend ignores it rather than undo a newer change.
+function metaOp(rec, fn) {
+  const run = rec.meta.then(fn, fn);
+  rec.meta = run.catch(() => {});
+  return run;
+}
+
 async function editMark(rec, mark, change, done) {
   if (LV.rec !== rec || rec.closing) { liveStatus("The recording is saved: change the mark in the player.", "warn"); return; }
-  const r = await callWithTimeout(() => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null),
-                                  LIVE_CALL_MS);
+  const seq = ++rec.metaSeq;
+  const r = await metaOp(rec, () => callWithTimeout(
+    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), LIVE_CALL_MS));
   if (!r.ok) { liveStatus(r.error, "warn"); return; }
+  if (r.stale) return;                                  // a newer change already applied
   Object.assign(mark, change);
   if (done) done();
 }
@@ -618,7 +647,7 @@ async function logQuestion() {
   if (!rec || rec.closing || rec.ended) { liveStatus("Questions are logged while recording.", "warn"); return null; }
   if (!text) { box.focus(); return null; }
   const at = rec.frames / LV.rate;
-  const r = await callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS);
+  const r = await metaOp(rec, () => callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS));
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   box.value = "";
   rec.questions = (rec.questions || 0) + 1;
@@ -705,6 +734,9 @@ async function runStop(rec, opts) {
   let r;
   if (rec.stoppedBy) r = rec.stoppedBy.result;
   else {
+    // Marks, edits and questions made before Stop reach the backend first (bounded: a bridge that
+    // stopped answering does not hold Stop up; the backend ignores a late edit by its number).
+    await Promise.race([rec.meta, liveDelay(LIVE_CALL_MS)]);
     r = await callWithTimeout(() => api().live_stop(rec.session), LIVE_CALL_MS);
     if (r.timeout) r = { ok: false, error: STOP_NOT_ANSWERING };
   }
@@ -925,7 +957,9 @@ function splitEvent(event, p) {
   progress(0, null);
   status("");
   if (event === "import-split-done") {
-    banner(`✓ Split ${p.full} into ${plural(p.files.length, "recording")} in ${p.folder}. The whole import is kept too.`, "ok");
+    const later = (p.problems || []).join(" ");
+    banner(`✓ Split ${p.full} into ${plural(p.files.length, "recording")} in ${p.folder}. The whole import is kept too.` +
+           (later ? ` ${later}` : ""), later ? "warn" : "ok");
   } else banner(p.error, "warn");
   loadLibrary();
 }

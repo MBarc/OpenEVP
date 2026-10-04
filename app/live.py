@@ -98,6 +98,17 @@ class _Kept(Exception):
     """live_recover(): a leftover could not be read as audio and was kept under another name."""
 
 
+class _MetaPending(Exception):
+    """live_recover(): the audio is saved, but not all its marks and questions reached the
+    store; its journal and its place in the recovery list are kept, to try again."""
+
+
+def _meta_later(name, why):
+    """A finished file whose marks or questions could not all be stored yet (said to the user)."""
+    return (f"{name} is saved, but some of its marks or questions could not be stored yet: {why} "
+            "They are kept, and OpenEVP will try again the next time it starts.")
+
+
 def _stamp(now):
     return now.strftime("%Y-%m-%d %H-%M-%S")
 
@@ -211,6 +222,7 @@ class _Session:
         self.saved = []                          # the finished file: {"path", "fp", "frames", "marks"}
         self.problems = []
         self.dropped_marks = 0
+        self.edit_seq = {}                       # mark id -> the page's newest edit number applied
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
         self.full = False                        # the file reached livewav.MAX_DATA
         self.done = False
@@ -566,9 +578,13 @@ class LiveOps:
                 pass                             # kept in memory: stored when the file is finished
             return {"ok": True, "mark": {"at": at, "file": s.piece.name, **mark}}
 
-    def live_mark_update(self, sid, mark_id, cls=None, note=None):
+    def live_mark_update(self, sid, mark_id, cls=None, note=None, seq=None):
         """Change a mark made in this recording (the live marks list: its class, its note).
-        Kept in the sidecar; stored with the file when it is finished."""
+        Kept in the sidecar; stored with the file when it is finished. seq: the page's edit
+        number, which only grows; an edit older than one already applied to this mark (a call
+        that arrived late) is ignored: {"ok": True, "stale": True}."""
+        if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int) or seq < 0):
+            return _fail("Unknown edit.")
         with self._live_lock:
             s = self._session(sid)
             if s is None or s.piece is None:
@@ -580,6 +596,11 @@ class LiveOps:
             if note is not None and (not isinstance(note, str) or len(note) > MAX_NOTE):
                 return _fail(f"A note can be at most {MAX_NOTE} characters.")
             mark = s.piece.marks[mark_id]
+            if seq is not None:
+                applied = s.edit_seq.get(mark_id, -1)
+                if seq <= applied:
+                    return {"ok": True, "stale": True}
+                s.edit_seq[mark_id] = seq
             if cls is not None:
                 mark["cls"] = cls
             if note is not None:
@@ -677,18 +698,31 @@ class LiveOps:
                               "finished when OpenEVP starts again.")
             return
         seconds = frames / s.rate
-        stored = self._store_live_marks(fp, path, seconds, piece.marks, s)
-        self._store_live_questions(fp, path, seconds, piece.questions)
-        _remove(piece.sidecar)
-        self._unregister_part(piece.part)
+        stored, why = self._store_live_meta(fp, path, seconds, piece.marks, piece.questions, s)
+        if why is None:
+            _remove(piece.sidecar)
+            self._unregister_part(piece.part)
+        else:
+            # The journal (where the file went, its marks and questions) stays, and so does its
+            # place in the recovery list: the next start stores what is missing.
+            s.problems.append(_meta_later(os.path.basename(path), why))
         self._index_live(path, fp, seconds)
         s.saved.append({"path": path, "fp": fp, "frames": frames, "marks": stored})
+
+    def _store_live_meta(self, fp, path, seconds, marks, questions, s=None):
+        """Store a finished file's marks and questions: (marks stored, None) when all are
+        in the store, or (marks stored, why) when the store could not take some of them now
+        (then the journal must be kept, to try again). Safe to run again: nothing doubles."""
+        stored, why_marks = self._store_live_marks(fp, path, seconds, marks, s)
+        why_questions = self._store_live_questions(fp, path, seconds, questions)
+        return stored, why_marks or why_questions
 
     def _store_live_marks(self, fp, path, seconds, marks, s=None):
         """Store marks made while recording against the finished file. A mark already
         there (the same times, class and note: stored before a crash) is not added
-        again, so this can be run twice."""
-        stored = 0
+        again, so this can be run twice. (stored, why): why is the store's reason when
+        it could not take some marks now (read-only, or the file could not be written)."""
+        stored, why = 0, None
         have = {(m["start"], m["end"], m["cls"], m["note"]) for m in self._store.marks(fp)}
         for m in marks:
             m = _clamped(m, seconds)
@@ -703,15 +737,18 @@ class LiveOps:
                 self._store.add_mark(fp, m["start"], m["end"], m["cls"], m["note"],
                                      name=os.path.basename(path), duration=seconds)
                 stored += 1
-            except (StoreReadOnly, StoreUnavailable, ValueError):
+            except (StoreReadOnly, StoreUnavailable) as e:
+                why = why or (str(e) or "the marks could not be saved.")
+            except ValueError:
                 if s is not None:
                     s.dropped_marks += 1
-        return stored
+        return stored, why
 
     def _store_live_questions(self, fp, path, seconds, questions):
         """Store the questions logged while recording against the finished file (again:
-        the same question twice is one)."""
-        stored = 0
+        the same question twice is one). None, or the store's reason when it could not
+        take some of them now."""
+        why = None
         for q in questions:
             if not isinstance(q, dict) or not isinstance(q.get("text"), str):
                 continue
@@ -721,10 +758,11 @@ class LiveOps:
             try:
                 self._store.add_question(fp, min(float(at), seconds), q["text"], name=os.path.basename(path),
                                          duration=seconds)
-                stored += 1
-            except (StoreReadOnly, StoreUnavailable, ValueError):
-                pass
-        return stored
+            except (StoreReadOnly, StoreUnavailable) as e:
+                why = why or (str(e) or "the questions could not be saved.")
+            except ValueError:
+                pass                             # not a question (no text): nothing to keep
+        return why
 
     def _index_live(self, path, fp, seconds):
         """Put a finished file's fingerprint in the library's index: listing it never reads it again."""
@@ -944,7 +982,7 @@ class LiveOps:
                 raise silence.Cancelled()
             all_marks = self._store.marks(fp)
             all_questions = self._store.questions(fp)
-            files = []
+            files, problems = [], []
             for piece, (a, b) in zip(parts, bounds):
                 got, pfp = piece.result
                 target = livewav.publish(piece.part, folder, piece.name)
@@ -952,18 +990,26 @@ class LiveOps:
                 lo, hi = a / rate, b / rate
                 mine = [{**m, "start": m["start"] - lo, "end": m["end"] - lo} for m in all_marks
                         if (lo < m["end"] <= hi) or (a == 0 and m["end"] <= hi)]
-                stored = self._store_live_marks(pfp, target, seconds, mine)
-                self._store_live_questions(pfp, target, seconds, [
-                    {"at": q["at"] - lo, "text": q["text"]} for q in all_questions
-                    if (lo <= q["at"] < hi) or (b == n and q["at"] >= lo)])
-                _remove(piece.sidecar)
-                self._unregister_part(piece.part)
+                asked = [{"at": q["at"] - lo, "text": q["text"]} for q in all_questions
+                         if (lo <= q["at"] < hi) or (b == n and q["at"] >= lo)]
+                stored, why = self._store_live_meta(pfp, target, seconds, mine, asked)
+                if why is None:
+                    _remove(piece.sidecar)
+                    self._unregister_part(piece.part)
+                else:
+                    # A published piece: its sidecar becomes a journal like a finished recording's
+                    # (no longer "derived"), so the next start stores what is missing.
+                    _write_sidecar(piece.sidecar, {"version": 1, "name": piece.name, "rate": rate,
+                                                   "channels": channels, "mode": "import", "marks": mine,
+                                                   "questions": asked, "published": target, "fp": pfp,
+                                                   "frames": got})
+                    problems.append(_meta_later(os.path.basename(target), why))
                 piece.published = True
                 self._index_live(target, pfp, seconds)
                 files.append({"id": _file_id(target), "name": os.path.basename(target),
                               "seconds": round(seconds, 1), "marks": stored})
             self._emit("import-split-done", {"job": job, "files": files, "folder": os.path.basename(folder),
-                                             "full": os.path.basename(path)})
+                                             "full": os.path.basename(path), "problems": problems})
         except Exception as e:
             for piece in parts:
                 if getattr(piece, "published", False):
@@ -1001,6 +1047,9 @@ class LiveOps:
                     continue
                 try:
                     got = self._recover_part(part)
+                except _MetaPending as e:
+                    out["failed"].append(str(e))         # the audio is saved; kept in the list to try again
+                    continue
                 except Exception as e:
                     got = None
                     out["failed"].append(f"{os.path.basename(part)}: {_plain(e)}")
@@ -1032,12 +1081,17 @@ class LiveOps:
         with wave.open(target) as w:
             rate = w.getframerate()
         seconds = frames / rate
-        stored = self._store_live_marks(fp, target, seconds, _sidecar_marks(meta))
-        self._store_live_questions(fp, target, seconds, meta.get("questions") or [])
+        return self._recovered(sidecar, fp, target, seconds, meta)
+
+    def _recovered(self, sidecar, fp, path, seconds, meta):
+        """A recovered file: store its marks and questions; the journal goes only once all are stored."""
+        stored, why = self._store_live_meta(fp, path, seconds, _sidecar_marks(meta), meta.get("questions") or [])
+        self._index_live(path, fp, seconds)
+        if why is not None:
+            raise _MetaPending(_meta_later(os.path.basename(path), why))
         _remove(sidecar)
-        self._index_live(target, fp, seconds)
-        return {"name": os.path.basename(target), "folder": os.path.basename(os.path.dirname(target)),
-                "seconds": round(seconds, 1), "marks": stored, "id": _file_id(target)}
+        return {"name": os.path.basename(path), "folder": os.path.basename(os.path.dirname(path)),
+                "seconds": round(seconds, 1), "marks": stored, "id": _file_id(path)}
 
     def _recover_part(self, part):
         """Finish one leftover .part; None when there was nothing to keep."""
@@ -1088,9 +1142,4 @@ class LiveOps:
         fp = wavinfo.wav_fingerprint(part)
         path = livewav.publish(part, folder, name, before=lambda target: _journal(sidecar, meta, target, fp, frames))
         seconds = frames / rate
-        stored = self._store_live_marks(fp, path, seconds, _sidecar_marks(meta))
-        self._store_live_questions(fp, path, seconds, meta.get("questions") or [])
-        _remove(sidecar)
-        self._index_live(path, fp, seconds)
-        return {"name": os.path.basename(path), "folder": os.path.basename(folder), "seconds": round(seconds, 1),
-                "marks": stored, "id": _file_id(path)}
+        return self._recovered(sidecar, fp, path, seconds, meta)

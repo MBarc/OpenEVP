@@ -182,6 +182,14 @@ costs the same as a minute. Waveform and spectrogram share one time scale
   and storing the marks leaves the WAV and the sidecar; recovery checks the WAV
   is still that audio (fingerprint) and stores the marks. Storing marks is
   idempotent (a mark with the same times, class and note is not added twice).
+- **The journal goes only once everything is stored.** When the store refuses
+  a mark or a question (read-only, or its file could not be written), the WAV
+  is kept and named as usual, but the sidecar and the `live_parts` entry stay,
+  and the user is told ("... OpenEVP will try again the next time it starts").
+  Recovery tries again (`_MetaPending` keeps the entry) until all of it is
+  stored. A split piece in that state gets a journal sidecar (no longer
+  `derived`), so recovery stores its marks instead of deleting it. A mark the
+  store rejects as invalid (outside the file) is dropped and counted, as before.
 - Finishing: `close()` returns the frame count and the fingerprint, computed
   while writing (SHA-256 over `wavinfo.fingerprint_prefix` + the PCM, the same
   as `wavinfo.wav_fingerprint`). `publish()` renames without ever replacing a
@@ -346,15 +354,30 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   clears as soon as sound comes.
 - **Questions** (`Api.live_question`): logged at the moment Enter or Log
   question is pressed, kept in the sidecar (`questions`), stored at the finish
-  in the marks store as the recording's `questions` (`AppData.add_question`,
-  idempotent: never marks, never counted as EVPs), also on crash recovery and
-  mapped into the parts of a split import. They are drawn on the live waveform
+  in `questions.json` (`AppData.add_question`, idempotent: never marks, never
+  counted as EVPs), also on crash recovery and mapped into the parts of a split
+  import. `questions.json` is its own file, keyed by fingerprint, with the marks
+  store's rules (the folder lock, atomic writes, a second window read-only, a bad
+  or newer file set aside). It is never in `marks.json`: an older OpenEVP
+  rewrites `marks.json` with only the fields it knows, and must not be able to
+  drop them; older versions never open `questions.json`. Like marks, questions
+  stay when a recording is deleted, so it has them again when restored. They are drawn on the live waveform
   as labelled markers (kept in the history, so a resize keeps them) and shown
   in the player as markers (`q-` regions) and a list ("Questions asked:").
 - **The live marks list:** each mark as it is made, with its time, A/B/C
   buttons and a note; a change goes to `Api.live_mark_update` at once (the mark
   in the sidecar), and is stored with the file at the finish through the same
   journalled path as every mark.
+- **Order:** marks, edits and questions go to the backend one at a time, in the
+  order they were made (a promise chain per recording, `metaOp`), and Stop waits
+  for them (bounded by the call timeout) before `live_stop`. Each edit carries a
+  number that only grows; the backend ignores an edit older than one already
+  applied to that mark (`{"stale": true}`), so a call that timed out and arrives
+  late never undoes a newer change.
+- **Opening the input:** every open has a generation (`LV.gen`, only grows).
+  Leaving the view, closing the input or opening another calls it off; after
+  each await it checks its generation and that the Live view is still shown,
+  and a stream that arrives for an open called off is stopped at once.
 
 ## Smoke test
 

@@ -355,6 +355,22 @@ class LiveApiTests(Tmp):
         self.assertEqual(len(a.get_marks(stop["player"]["rec"])["questions"]), 2)
         self.assertFalse(a.live_question(sid, 1.0, "after Stop")["ok"])
 
+    def test_a_late_mark_edit_never_undoes_a_newer_one(self):
+        # The page numbers its edits; one that arrives after a newer edit of the same mark
+        # (a call that timed out, then got through) is ignored.
+        a = self.api()
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(3.0), 0)
+        a.live_mark(sid, 1.0)
+        a.live_mark(sid, 2.0)
+        self.assertTrue(a.live_mark_update(sid, 0, cls="B", seq=2)["ok"])
+        self.assertEqual(a.live_mark_update(sid, 0, cls="A", seq=1), {"ok": True, "stale": True})
+        self.assertTrue(a.live_mark_update(sid, 1, cls="A", seq=1)["ok"])      # another mark: its own order
+        self.assertFalse(a.live_mark_update(sid, 0, cls="A", seq="3")["ok"])
+        stop = a.live_stop(sid)
+        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, stop["files"][0]["name"]))
+        self.assertEqual([m["cls"] for m in self.store.marks(fp)], ["B", "A"])
+
     def test_questions_survive_a_crash(self):
         a = self.api()
         sid = self.start(a)["session"]
@@ -370,6 +386,46 @@ class LiveApiTests(Tmp):
         self.assertEqual([q["text"] for q in self.store.questions(fp)], ["Who is there?"])
         b.live_recover()
         self.assertEqual(len(self.store.questions(fp)), 1)
+
+    def test_metadata_the_store_refuses_keeps_the_journal_until_it_is_stored(self):
+        # Astra: a failed question save must not lose the journal. The audio is saved, the user is
+        # told, the sidecar and the recovery entry stay, and the next start stores what is missing.
+        from app.store import StoreUnavailable
+        for seconds, broken in ((4.0, "add_question"), (5.0, "add_mark")):   # other audio: another fp
+            with self.subTest(broken=broken):
+                a = self.api()
+                sid = self.start(a)["session"]
+                self.send(a, sid, tone(seconds), 0)
+                a.live_mark(sid, 2.0)
+                a.live_mark_update(sid, 0, cls="A", note="a whisper")
+                a.live_question(sid, 1.0, "Is anyone here?")
+                with mock.patch.object(self.store, broken, side_effect=StoreUnavailable("Could not save it.")):
+                    stop = a.live_stop(sid)
+                self.assertTrue(stop["ok"])
+                name = stop["files"][0]["name"]
+                path = os.path.join(self.lib, name)
+                self.assertTrue(os.path.isfile(path))
+                self.assertTrue(any("will try again" in p and name in p for p in stop["problems"]), stop["problems"])
+                self.assertTrue(os.path.isfile(path + ".part.json"), "the journal is kept")
+                self.assertEqual(len(self.store.get_setting(live.PARTS_SETTING)), 1, "still in the recovery list")
+                fp = wavinfo.wav_fingerprint(path)
+                # The store still refuses at the next start: kept again, said again.
+                b = self.api()
+                with mock.patch.object(self.store, broken, side_effect=StoreUnavailable("Could not save it.")):
+                    r = b.live_recover()
+                self.assertEqual(r["recovered"], [])
+                self.assertTrue(any(name in f and "will try again" in f for f in r["failed"]), r)
+                self.assertTrue(os.path.isfile(path + ".part.json"))
+                self.assertEqual(len(self.store.get_setting(live.PARTS_SETTING)), 1)
+                # Then it works: every mark (with its edit) and question is stored, once; the journal goes.
+                r = self.api().live_recover()
+                self.assertEqual([(f["name"], f["marks"]) for f in r["recovered"]], [(name, 1)])
+                self.assertEqual([(m["cls"], m["note"]) for m in self.store.marks(fp)], [("A", "a whisper")])
+                self.assertEqual([q["text"] for q in self.store.questions(fp)], ["Is anyone here?"])
+                self.assertFalse(os.path.exists(path + ".part.json"))
+                self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+                self.assertEqual(self.api().live_recover()["recovered"], [])
+                os.remove(path)
 
     def test_live_settings_remember_the_night_screen(self):
         a = self.api()
@@ -513,6 +569,26 @@ class LiveApiTests(Tmp):
         self.assertEqual([m["end"] for m in first], [4.5, 9.5])
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
         self.wait_idle(a)
+
+    def test_a_split_piece_whose_marks_the_store_refuses_is_journalled_for_the_next_start(self):
+        from app.store import StoreUnavailable
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream(), marks=(4.5, 9.5))
+        with mock.patch.object(self.store, "add_mark", side_effect=StoreUnavailable("Could not save marks.json.")):
+            done = self.split(a, stop["player"]["rec"], got["cuts"])
+        first = done["files"][0]["name"]
+        self.assertTrue(any(first in p and "will try again" in p for p in done["problems"]), done)
+        self.wait_idle(a)
+        sidecar = os.path.join(self.lib, first + ".part.json")
+        self.assertTrue(os.path.isfile(sidecar))
+        with open(sidecar, encoding="utf-8") as f:
+            self.assertNotIn("derived", json.load(f), "a published piece is never deleted at the next start")
+        r = self.api().live_recover()
+        self.assertEqual([(f["name"], f["marks"]) for f in r["recovered"]], [(first, 2)])
+        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, first))
+        self.assertEqual([m["end"] for m in self.store.marks(fp)], [4.5, 9.5])
+        self.assertFalse(os.path.exists(sidecar))
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
     def test_a_split_follows_the_cuts_the_user_confirmed(self):
         # The user removed the suggestion and put two cuts of their own: the split follows them.

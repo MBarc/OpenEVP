@@ -716,6 +716,7 @@ this PC in `%APPDATA%\OpenEVP\`. Paste that into File Explorer's address bar to
 get there.
 
 - `marks.json`: your EVP marks;
+- `questions.json`: the questions you logged while recording live;
 - `settings.json`: your settings;
 - `index.json`: OpenEVP's own list of files it has already checked.
 
