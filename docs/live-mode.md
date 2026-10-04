@@ -187,9 +187,14 @@ costs the same as a minute. Waveform and spectrogram share one time scale
   is kept and named as usual, but the sidecar and the `live_parts` entry stay,
   and the user is told ("... OpenEVP will try again the next time it starts").
   Recovery tries again (`_MetaPending` keeps the entry) until all of it is
-  stored. A split piece in that state gets a journal sidecar (no longer
-  `derived`), so recovery stores its marks instead of deleting it. A mark the
-  store rejects as invalid (outside the file) is dropped and counted, as before.
+  stored; so it does when the published WAV could not be read just now (the
+  entry stays while the `.part` or its journal is there). A split piece is
+  journalled before it is published (destination, fingerprint, frames, its
+  marks and questions; still `derived`, so a `.part` left by a crash is deleted
+  while a published piece has its metadata stored by recovery). If that journal
+  cannot be written the piece is not published and is cleaned up; if publishing
+  fails the piece is cleaned up. A mark the store rejects as invalid (outside the
+  file) is dropped and counted, as before.
 - Finishing: `close()` returns the frame count and the fingerprint, computed
   while writing (SHA-256 over `wavinfo.fingerprint_prefix` + the PCM, the same
   as `wavinfo.wav_fingerprint`). `publish()` renames without ever replacing a
@@ -361,7 +366,13 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   or newer file set aside). It is never in `marks.json`: an older OpenEVP
   rewrites `marks.json` with only the fields it knows, and must not be able to
   drop them; older versions never open `questions.json`. Like marks, questions
-  stay when a recording is deleted, so it has them again when restored. They are drawn on the live waveform
+  stay when a recording is deleted, so it has them again when restored.
+  A test build kept questions in `marks.json`: on load they are merged into
+  `questions.json` (the same time and text is one), which is written atomically
+  first; only then is `marks.json` rewritten without them. A crash between leaves
+  them in both and the next load merges again without doubling. While they
+  cannot be moved (a read-only window, or `questions.json` cannot be written),
+  they are shown from memory and every `marks.json` write keeps them. They are drawn on the live waveform
   as labelled markers (kept in the history, so a resize keeps them) and shown
   in the player as markers (`q-` regions) and a list ("Questions asked:").
 - **The live marks list:** each mark as it is made, with its time, A/B/C
@@ -369,11 +380,15 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   in the sidecar), and is stored with the file at the finish through the same
   journalled path as every mark.
 - **Order:** marks, edits and questions go to the backend one at a time, in the
-  order they were made (a promise chain per recording, `metaOp`), and Stop waits
-  for them (bounded by the call timeout) before `live_stop`. Each edit carries a
-  number that only grows; the backend ignores an edit older than one already
-  applied to that mark (`{"stale": true}`), so a call that timed out and arrives
-  late never undoes a newer change.
+  order they were made (a promise chain per recording, `metaOp`), each call with
+  its own time limit, and Stop waits for all of them before `live_stop`
+  (`drainMeta`). If one goes unanswered during Stop, or the whole wait passes
+  60 s, what is still queued is called off (never sent after the finish) and the
+  saved message lists the changes that may not have been saved. Each edit carries
+  a number that only grows; the backend keeps the newest number applied per mark
+  and field (class, note), so a late call never undoes a newer change of the
+  same field and never blocks a change of another (`"applied": [fields]`, or
+  `{"stale": true}`).
 - **Opening the input:** every open has a generation (`LV.gen`, only grows).
   Leaving the view, closing the input or opening another calls it off; after
   each await it checks its generation and that the Live view is still shown,

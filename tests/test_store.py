@@ -924,5 +924,94 @@ class QuestionsTests(unittest.TestCase):
             store.close()
 
 
+class LegacyQuestionsTests(unittest.TestCase):
+    """A test build of Live mode kept questions in marks.json. They are moved to questions.json,
+    durably: never dropped, never doubled, crash-safe."""
+
+    LEGACY = {"version": 1, "recordings": {
+        "fp1": {"marks": [{"id": "m1", "start": 1.0, "end": 2.0, "cls": "A", "note": "voice", "created": ""}],
+                "reviewed": False, "name": "Live x.wav", "duration": 10.0, "imported": False,
+                "backup": {"status": None, "detail": "", "paths": []},
+                "questions": [{"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""},
+                              {"id": "q2", "at": 4.0, "text": "Can you knock?", "created": ""}]}}}
+
+    def write(self, d, name, data):
+        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
+            json.dump(data, f)
+
+    def read(self, d, name):
+        with open(os.path.join(d, name), encoding="utf-8") as f:
+            return json.load(f)
+
+    def texts(self, store, fp="fp1"):
+        return [q["text"] for q in store.questions(fp)]
+
+    def test_moved_to_questions_json_then_taken_out_of_marks_json(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(d, "marks.json", self.LEGACY)
+            store = AppData(d)
+            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])
+            self.assertEqual(len(store.marks("fp1")), 1)
+            store.close()
+            self.assertEqual([q["id"] for q in self.read(d, "questions.json")["recordings"]["fp1"]["questions"]],
+                             ["q1", "q2"])
+            marks = self.read(d, "marks.json")
+            self.assertNotIn("questions", marks["recordings"]["fp1"])
+            self.assertEqual(marks["version"], 1)
+            again = AppData(d)                                    # idempotent
+            self.assertEqual(self.texts(again), ["Is anyone here?", "Can you knock?"])
+            again.close()
+
+    def test_merged_with_questions_json_without_doubling(self):
+        # Also what a crash between the two writes leaves: the questions in both files.
+        with tempfile.TemporaryDirectory() as d:
+            self.write(d, "marks.json", self.LEGACY)
+            self.write(d, "questions.json", {"version": 1, "recordings": {"fp1": {"name": "", "duration": 10.0, "questions": [
+                {"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""},
+                {"id": "q9", "at": 6.0, "text": "Who is there?", "created": ""}]}}})
+            store = AppData(d)
+            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?", "Who is there?"])
+            store.close()
+            self.assertNotIn("questions", self.read(d, "marks.json")["recordings"]["fp1"])
+            self.assertEqual(len(self.read(d, "questions.json")["recordings"]["fp1"]["questions"]), 3)
+
+    def test_kept_in_marks_json_until_questions_json_is_written(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.write(d, "marks.json", self.LEGACY)
+            real = store_module._write_json
+
+            def no_questions(path, obj):
+                if os.path.basename(path) == "questions.json":
+                    raise OSError("disk full")
+                return real(path, obj)
+            with mock.patch.object(store_module, "_write_json", side_effect=no_questions):
+                store = AppData(d)
+                self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])   # shown from memory
+                self.assertTrue(any("questions.json" in p for p in store.problems()))
+                self.assertEqual(len(self.read(d, "marks.json")["recordings"]["fp1"]["questions"]), 2)
+                store.add_mark("fp1", 5.0, 6.0, "B", "")           # a marks write keeps them
+                marks = self.read(d, "marks.json")["recordings"]["fp1"]
+                self.assertEqual((len(marks["marks"]), len(marks["questions"])), (2, 2))
+                store.close()
+            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
+            store = AppData(d)                                    # the disk works again: moved
+            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])
+            self.assertEqual(len(store.marks("fp1")), 2)
+            store.close()
+            self.assertNotIn("questions", self.read(d, "marks.json")["recordings"]["fp1"])
+
+    def test_a_second_window_shows_them_and_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            first = AppData(d)
+            self.write(d, "marks.json", self.LEGACY)             # (as if written before this version)
+            second = AppData(d)
+            self.assertTrue(second.read_only)
+            self.assertEqual(self.texts(second), ["Is anyone here?", "Can you knock?"])
+            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
+            self.assertEqual(len(self.read(d, "marks.json")["recordings"]["fp1"]["questions"]), 2)
+            second.close()
+            first.close()
+
+
 if __name__ == "__main__":
     unittest.main()

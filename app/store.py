@@ -497,9 +497,12 @@ class AppData:
         self._marks_blocked = False
         self._index_blocked = False
         self._questions_blocked = False
+        self._legacy_questions = {}              # fp -> (name, duration, [question]): found in marks.json
+        self._questions_unsaved = False          # self._qdata holds questions questions.json does not
         self._settings = self._load_settings()
         self._data = self._load_marks()
         self._qdata = self._load_questions()
+        self._migrate_questions()
         self._index = self._load_index()
         self._index_dirty = False
 
@@ -640,6 +643,13 @@ class AppData:
                 dropped += 1
                 continue
             cleaned[fp] = cleaned_rec
+            legacy = rec.get("questions")
+            if isinstance(legacy, list) and legacy:
+                # A test build of Live mode kept questions in marks.json: moved to questions.json
+                # by _migrate_questions (never just dropped).
+                qs = [q for q in (_clean_question(x, cleaned_rec["duration"]) for x in legacy) if q]
+                if qs:
+                    self._legacy_questions[fp] = (cleaned_rec["name"], cleaned_rec["duration"], qs)
         if dropped:
             self._problems.append(f"{dropped} invalid record(s) in marks.json were skipped.")
         return {"version": 1, "recordings": cleaned}
@@ -679,6 +689,46 @@ class AppData:
         if dropped:
             self._problems.append(f"{dropped} invalid record(s) in questions.json were skipped.")
         return {"version": 1, "recordings": cleaned}
+
+    def _migrate_questions(self):
+        """Questions found in marks.json (a test build kept them there) go to questions.json,
+        merged with what is there (the same time and text is one question). Durable and
+        crash-safe: questions.json is written (atomically) first, and only then marks.json
+        without them; a crash between leaves them in both, and the next load merges them
+        again without doubling. While they cannot be moved (read-only here, or questions.json
+        cannot be written), they are shown from memory and every marks.json write keeps them."""
+        if not self._legacy_questions:
+            return
+        merged = copy.deepcopy(self._qdata)
+        changed = False
+        for fp, (name, duration, qs) in self._legacy_questions.items():
+            rec = merged["recordings"].setdefault(fp, {"name": name, "duration": duration, "questions": []})
+            for q in qs:
+                if not any(abs(x["at"] - q["at"]) < 1e-6 and x["text"] == q["text"] for x in rec["questions"]):
+                    rec["questions"].append(dict(q))
+                    changed = True
+            if duration is not None and (rec["duration"] is None or rec["duration"] < duration):
+                rec["duration"] = duration
+            if name and not rec["name"]:
+                rec["name"] = name
+        self._qdata = merged                     # shown either way
+        self._questions_unsaved = self._questions_unsaved or changed
+        if self.read_only or self._questions_blocked:
+            return                               # the writing window moves them
+        if self._questions_unsaved:
+            try:
+                _write_json(self._questions_path, merged)
+                self._questions_unsaved = False
+            except OSError:
+                self._problems.append("Questions logged while recording could not be moved to questions.json "
+                                      "yet; they are kept in marks.json until they can be.")
+                return
+        self._legacy_questions = {}
+        if not self._marks_blocked:
+            try:
+                _write_json(self._marks_path, self._data)       # now without them
+            except OSError:
+                pass                             # they are in questions.json; the next marks write drops them
 
     def _load_index(self):
         path = self._index_path
@@ -739,8 +789,15 @@ class AppData:
     def _save_marks(self, new_data):
         if self._marks_blocked:
             raise StoreUnavailable(_unavailable_message("marks.json"))
+        self._migrate_questions()                # questions not moved yet: tried again first
+        on_disk = new_data
+        if self._legacy_questions:               # still not moved: kept in marks.json meanwhile
+            on_disk = copy.deepcopy(new_data)
+            for fp, (_name, _duration, qs) in self._legacy_questions.items():
+                if fp in on_disk["recordings"]:
+                    on_disk["recordings"][fp]["questions"] = [dict(q) for q in qs]
         try:
-            _write_json(self._marks_path, new_data)
+            _write_json(self._marks_path, on_disk)
         except OSError as e:
             raise StoreUnavailable(_unavailable_message("marks.json")) from e
         self._data = new_data
@@ -801,6 +858,7 @@ class AppData:
             except OSError as e:
                 raise StoreUnavailable(_unavailable_message("questions.json")) from e
             self._qdata = new_data
+            self._questions_unsaved = False      # all of it is in the file now
             return dict(q)
 
     def add_mark(self, fp, start, end, cls, note, name="", duration=None):

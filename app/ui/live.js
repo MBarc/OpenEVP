@@ -39,6 +39,7 @@ const LIVE_WIDE_PX = 1000;               // the session panel beside the scopes 
 const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by the backend, at most
 const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
 const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
+const LIVE_META_DRAIN_MS = 60000;        // Stop gives the marks, edits and questions still queued this long in all
 const LIVE_DRAIN_MS = 30000;             // Stop waits at most this long for the queued audio to be taken
 const QUEUE_FULL = "Recording stopped: OpenEVP could not save the audio as fast as it came in, so it stopped " +
                    "rather than hold more and more of it in memory. What was saved until then is kept.";
@@ -564,7 +565,7 @@ async function startRecording() {
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
-             meta: Promise.resolve(), metaSeq: 0,
+             meta: Promise.resolve(), metaSeq: 0, metaCancelled: false, unsaved: [],
              stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
@@ -583,7 +584,8 @@ async function liveMark() {
   queueChunk(rec);                                     // the audio up to now, before the mark
   await drained(rec, LIVE_CALL_MS);
   if (LV.rec !== rec || rec.closing) return null;
-  const r = await metaOp(rec, () => callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS));
+  const r = await metaOp(rec, () => callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS),
+                         `the mark at ${fmtTime(at)}`);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
   addMarker("★");
@@ -621,24 +623,50 @@ function markItem(rec, mark, at) {
 }
 
 // The recording's marks, edits and questions reach the backend one at a time, in the order they were
-// made (a promise chain per recording), and Stop waits for them before the file is finished. Each
-// edit also carries a number that only grows: should a call that timed out still arrive late, the
-// backend ignores it rather than undo a newer change.
-function metaOp(rec, fn) {
-  const run = rec.meta.then(fn, fn);
+// made (a promise chain per recording), each call with its own time limit, and Stop waits for all of
+// them before the file is finished (drainMeta). Each edit also carries a number that only grows:
+// should a call that timed out still arrive late, the backend ignores it for a field changed since.
+// Whatever did not get through is listed (rec.unsaved: `what`) and said when the recording is saved.
+function metaOp(rec, fn, what) {
+  const step = async () => {
+    if (rec.metaCancelled) {                            // Stop gave up waiting: never sent after the finish
+      rec.unsaved.push(what);
+      return { ok: false, cancelled: true, error: "The recording was saved before this change got through." };
+    }
+    const r = await fn();
+    if (!r || !r.ok) {
+      rec.unsaved.push(what);
+      if (r && r.timeout && rec.closing) rec.metaCancelled = true;   // not answering: the rest is not sent
+    }
+    return r;
+  };
+  const run = rec.meta.then(step, step);
   rec.meta = run.catch(() => {});
   return run;
+}
+
+// Stop: every queued mark, edit and question first. Should that take too long, or a call go
+// unanswered, what is still queued is called off (not sent after the finish) and the one under way
+// ends within its own time limit; recordingDone says which did not get through.
+async function drainMeta(rec) {
+  const all = await Promise.race([rec.meta.then(() => true), liveDelay(LIVE_META_DRAIN_MS).then(() => false)]);
+  if (all) return;
+  rec.metaCancelled = true;
+  await rec.meta;
 }
 
 async function editMark(rec, mark, change, done) {
   if (LV.rec !== rec || rec.closing) { liveStatus("The recording is saved: change the mark in the player.", "warn"); return; }
   const seq = ++rec.metaSeq;
+  const when = fmtTime(mark.at ?? mark.end ?? 0);
+  const what = change.cls ? `class ${change.cls} for the mark at ${when}` : `the note for the mark at ${when}`;
   const r = await metaOp(rec, () => callWithTimeout(
-    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), LIVE_CALL_MS));
+    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), LIVE_CALL_MS), what);
   if (!r.ok) { liveStatus(r.error, "warn"); return; }
-  if (r.stale) return;                                  // a newer change already applied
-  Object.assign(mark, change);
-  if (done) done();
+  if (r.stale) return;                                  // a newer change of it already applied
+  const applied = r.applied || Object.keys(change);     // only the fields not changed since
+  for (const k of applied) if (k in change) mark[k] = change[k];
+  if (done && applied.includes("cls")) done();
 }
 
 // Log the question just asked: Enter in the box, or Log question. Saved with the recording.
@@ -647,7 +675,8 @@ async function logQuestion() {
   if (!rec || rec.closing || rec.ended) { liveStatus("Questions are logged while recording.", "warn"); return null; }
   if (!text) { box.focus(); return null; }
   const at = rec.frames / LV.rate;
-  const r = await metaOp(rec, () => callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS));
+  const r = await metaOp(rec, () => callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS),
+                         `the question "${text}"`);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   box.value = "";
   rec.questions = (rec.questions || 0) + 1;
@@ -734,9 +763,8 @@ async function runStop(rec, opts) {
   let r;
   if (rec.stoppedBy) r = rec.stoppedBy.result;
   else {
-    // Marks, edits and questions made before Stop reach the backend first (bounded: a bridge that
-    // stopped answering does not hold Stop up; the backend ignores a late edit by its number).
-    await Promise.race([rec.meta, liveDelay(LIVE_CALL_MS)]);
+    // Marks, edits and questions made before Stop reach the backend first, all of them.
+    await drainMeta(rec);
     r = await callWithTimeout(() => api().live_stop(rec.session), LIVE_CALL_MS);
     if (r.timeout) r = { ok: false, error: STOP_NOT_ANSWERING };
   }
@@ -776,6 +804,8 @@ async function recordingDone(rec, r, reason, opts = {}) {
   r = { ...r, truncated };
   const files = r.files || [];
   const notes = [...(r.problems || [])];
+  if (rec.unsaved.length) notes.push(`These changes may not have been saved: ${rec.unsaved.join("; ")}. ` +
+                                     "Check them in the player.");
   if (r.dropped_marks) notes.push(`${plural(r.dropped_marks, "mark")} fell outside the saved audio and were left out.`);
   if (r.player_error) notes.push(`It could not be opened in the player (${r.player_error.replace(/[.\s]+$/, "")}); find it in the EVP Library.`);
   let msg;

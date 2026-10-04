@@ -371,6 +371,43 @@ class LiveApiTests(Tmp):
         fp = wavinfo.wav_fingerprint(os.path.join(self.lib, stop["files"][0]["name"]))
         self.assertEqual([m["cls"] for m in self.store.marks(fp)], ["B", "A"])
 
+    def test_edit_numbers_are_kept_per_field(self):
+        # Astra: a class edit (seq 1) that arrives after a note edit (seq 2) still applies: nothing
+        # newer changed the class. Both changes end in the recording.
+        a = self.api()
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(3.0), 0)
+        a.live_mark(sid, 2.0)
+        self.assertEqual(a.live_mark_update(sid, 0, note="get out", seq=2)["applied"], ["note"])
+        self.assertEqual(a.live_mark_update(sid, 0, cls="B", seq=1)["applied"], ["cls"])
+        self.assertEqual(a.live_mark_update(sid, 0, note="older", seq=1), {"ok": True, "stale": True})
+        stop = a.live_stop(sid)
+        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, stop["files"][0]["name"]))
+        self.assertEqual([(m["cls"], m["note"]) for m in self.store.marks(fp)], [("B", "get out")])
+
+    def test_a_published_wav_unreadable_just_now_is_tried_again(self):
+        # Recovery could not read the published WAV (a sharing violation, say): the journal and
+        # its place in the recovery list stay, and the next start stores the marks.
+        a = self.api()
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(3.5), 0)
+        a.live_mark(sid, 2.0)
+        with mock.patch.object(type(a), "_store_live_marks", side_effect=SystemExit("power cut")):
+            with self.assertRaises(SystemExit):
+                a._live_finish(a._live)
+        a._live = None
+        [part] = self.store.get_setting(live.PARTS_SETTING)
+        with mock.patch.object(live.wavinfo, "wav_fingerprint", side_effect=PermissionError("in use")):
+            r = self.api().live_recover()
+        self.assertEqual(r["recovered"], [])
+        self.assertEqual(len(r["failed"]), 1)
+        self.assertTrue(os.path.isfile(part + ".json"))
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [part])
+        r = self.api().live_recover()
+        self.assertEqual([f["marks"] for f in r["recovered"]], [1])
+        self.assertFalse(os.path.exists(part + ".json"))
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+
     def test_questions_survive_a_crash(self):
         a = self.api()
         sid = self.start(a)["session"]
@@ -582,12 +619,47 @@ class LiveApiTests(Tmp):
         sidecar = os.path.join(self.lib, first + ".part.json")
         self.assertTrue(os.path.isfile(sidecar))
         with open(sidecar, encoding="utf-8") as f:
-            self.assertNotIn("derived", json.load(f), "a published piece is never deleted at the next start")
+            journal = json.load(f)
+        self.assertEqual(os.path.basename(journal["published"]), first)   # a journal: stored by the next start
         r = self.api().live_recover()
         self.assertEqual([(f["name"], f["marks"]) for f in r["recovered"]], [(first, 2)])
         fp = wavinfo.wav_fingerprint(os.path.join(self.lib, first))
         self.assertEqual([m["end"] for m in self.store.marks(fp)], [4.5, 9.5])
         self.assertFalse(os.path.exists(sidecar))
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+
+    def test_a_split_piece_is_journalled_before_it_is_published(self):
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream(), marks=(4.5, 9.5))
+        seen = []
+        real = livewav.publish
+
+        def spy(part, folder, name, tries=1000, before=None):
+            def journalled(target):
+                before(target)
+                with open(part + ".json", encoding="utf-8") as f:
+                    seen.append((os.path.basename(target), json.load(f)))
+            return real(part, folder, name, tries, journalled if before else None)
+        with mock.patch.object(live.livewav, "publish", side_effect=spy):
+            done = self.split(a, stop["player"]["rec"], got["cuts"])
+        self.wait_idle(a)
+        self.assertEqual([n for n, _ in seen], [f["name"] for f in done["files"]])
+        for name, journal in seen:                       # where it goes, what it holds, and its marks
+            self.assertEqual(os.path.basename(journal["published"]), name)
+            self.assertTrue(journal["fp"] and journal["frames"] > 0)
+        self.assertEqual([m["end"] for m in seen[0][1]["marks"]], [4.5, 9.5])
+
+    def test_a_split_piece_whose_journal_cannot_be_written_is_not_published(self):
+        a = self.api()
+        r, stop, got = self.suggestions(a, self.import_stream())
+        full = "Import 2026-10-03 09-00-00 (full).wav"
+        with mock.patch.object(live, "_journal", side_effect=OSError("disk full")):
+            res = a.split_import(stop["player"]["rec"], got["cuts"])
+            self.assertTrue(res["ok"], res)
+            name, failed = self.wait_event({"import-split-done", "import-split-failed"})
+        self.wait_idle(a)
+        self.assertEqual(name, "import-split-failed", failed)
+        self.assertEqual(sorted(os.listdir(self.lib)), [full])    # no piece, no .part, no sidecar
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
     def test_a_split_follows_the_cuts_the_user_confirmed(self):

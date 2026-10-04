@@ -222,7 +222,7 @@ class _Session:
         self.saved = []                          # the finished file: {"path", "fp", "frames", "marks"}
         self.problems = []
         self.dropped_marks = 0
-        self.edit_seq = {}                       # mark id -> the page's newest edit number applied
+        self.edit_seq = {}                       # (mark id, field) -> the page's newest edit number applied
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
         self.full = False                        # the file reached livewav.MAX_DATA
         self.done = False
@@ -581,8 +581,10 @@ class LiveOps:
     def live_mark_update(self, sid, mark_id, cls=None, note=None, seq=None):
         """Change a mark made in this recording (the live marks list: its class, its note).
         Kept in the sidecar; stored with the file when it is finished. seq: the page's edit
-        number, which only grows; an edit older than one already applied to this mark (a call
-        that arrived late) is ignored: {"ok": True, "stale": True}."""
+        number, which only grows; a field (class, note) is changed only by an edit newer than
+        the last one applied to that field of this mark, so a call that arrived late never
+        undoes a newer change of the same field (and never blocks a change of another).
+        {"ok", "mark", "applied": [fields]}; {"ok": True, "stale": True} when nothing was newer."""
         if seq is not None and (isinstance(seq, bool) or not isinstance(seq, int) or seq < 0):
             return _fail("Unknown edit.")
         with self._live_lock:
@@ -596,20 +598,19 @@ class LiveOps:
             if note is not None and (not isinstance(note, str) or len(note) > MAX_NOTE):
                 return _fail(f"A note can be at most {MAX_NOTE} characters.")
             mark = s.piece.marks[mark_id]
+            change = {k: v for k, v in (("cls", cls), ("note", note)) if v is not None}
             if seq is not None:
-                applied = s.edit_seq.get(mark_id, -1)
-                if seq <= applied:
+                change = {k: v for k, v in change.items() if seq > s.edit_seq.get((mark_id, k), -1)}
+                if not change:
                     return {"ok": True, "stale": True}
-                s.edit_seq[mark_id] = seq
-            if cls is not None:
-                mark["cls"] = cls
-            if note is not None:
-                mark["note"] = note
+                for k in change:
+                    s.edit_seq[(mark_id, k)] = seq
+            mark.update(change)
             try:
                 s.piece.save_marks()
             except OSError:
                 pass
-            return {"ok": True, "mark": {"file": s.piece.name, **mark}}
+            return {"ok": True, "mark": {"file": s.piece.name, **mark}, "applied": sorted(change)}
 
     def live_question(self, sid, at, text):
         """Log a question asked at `at` (seconds since Record, as the page counts them):
@@ -985,26 +986,28 @@ class LiveOps:
             files, problems = [], []
             for piece, (a, b) in zip(parts, bounds):
                 got, pfp = piece.result
-                target = livewav.publish(piece.part, folder, piece.name)
                 seconds = got / rate
                 lo, hi = a / rate, b / rate
                 mine = [{**m, "start": m["start"] - lo, "end": m["end"] - lo} for m in all_marks
                         if (lo < m["end"] <= hi) or (a == 0 and m["end"] <= hi)]
+                piece.marks[:] = mine            # in its journal (piece.meta holds these lists)
+                piece.questions[:] = [{"at": q["at"] - lo, "text": q["text"]} for q in all_questions
+                                      if (lo <= q["at"] < hi) or (b == n and q["at"] >= lo)]
+                # Journalled before it is published (still "derived": a .part left by a crash is
+                # deleted, a published piece has its marks stored by the next start). If the journal
+                # cannot be written, the piece is not published (and is cleaned up below).
+                target = livewav.publish(piece.part, folder, piece.name,
+                                         before=lambda t, piece=piece, pfp=pfp, got=got:
+                                         _journal(piece.sidecar, piece.meta, t, pfp, got))
+                piece.published = True
                 asked = [{"at": q["at"] - lo, "text": q["text"]} for q in all_questions
                          if (lo <= q["at"] < hi) or (b == n and q["at"] >= lo)]
                 stored, why = self._store_live_meta(pfp, target, seconds, mine, asked)
                 if why is None:
                     _remove(piece.sidecar)
                     self._unregister_part(piece.part)
-                else:
-                    # A published piece: its sidecar becomes a journal like a finished recording's
-                    # (no longer "derived"), so the next start stores what is missing.
-                    _write_sidecar(piece.sidecar, {"version": 1, "name": piece.name, "rate": rate,
-                                                   "channels": channels, "mode": "import", "marks": mine,
-                                                   "questions": asked, "published": target, "fp": pfp,
-                                                   "frames": got})
+                else:                            # its journal stays: the next start stores what is missing
                     problems.append(_meta_later(os.path.basename(target), why))
-                piece.published = True
                 self._index_live(target, pfp, seconds)
                 files.append({"id": _file_id(target), "name": os.path.basename(target),
                               "seconds": round(seconds, 1), "marks": stored})
@@ -1053,8 +1056,9 @@ class LiveOps:
                 except Exception as e:
                     got = None
                     out["failed"].append(f"{os.path.basename(part)}: {_plain(e)}")
-                    # left in the list only while the file is there to try again
-                    if os.path.exists(part):
+                    # Left in the list while there is something to try again: the .part, or its
+                    # journal (a published WAV that could not be read just now, its marks not stored).
+                    if os.path.exists(part) or os.path.exists(part + ".json"):
                         continue
                 if got:
                     out["recovered"].append(got)
@@ -1104,12 +1108,13 @@ class LiveOps:
             pass
         if not isinstance(meta, dict):
             meta = {}
+        if not os.path.isfile(part):
+            # Published (a split piece too: journalled before it was), its marks maybe not stored.
+            return self._recover_published(part, sidecar, meta)
         if meta.get("derived"):                  # a piece being cut from a kept import: just deleted
             _remove(part)
             _remove(sidecar)
             return None
-        if not os.path.isfile(part):
-            return self._recover_published(part, sidecar, meta)
         folder = os.path.dirname(part)
         name = meta.get("name")
         base = os.path.basename(part)[:-len(livewav.PART)]

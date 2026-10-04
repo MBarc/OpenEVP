@@ -214,6 +214,20 @@ function audioChain(ctx) {
   return out;
 }
 
+// ---- a clock the test moves on by hand (fakeTimers ... realTimers): setTimeout otherwise never fires ----
+const clock = { now: 0, timers: [] };
+function fakeTimers() {
+  clock.timers = [];
+  context.setTimeout = (fn, ms) => { clock.timers.push({ fn, due: clock.now + (ms || 0) }); return clock.timers.length; };
+  context.clearTimeout = (id) => { const t = clock.timers[id - 1]; if (t) t.fn = null; };
+}
+function realTimers() { context.setTimeout = () => 0; context.clearTimeout = () => {}; }
+async function advance(ms) {
+  clock.now += ms;
+  for (const t of clock.timers) if (t.fn && t.due <= clock.now) { const f = t.fn; t.fn = null; f(); }
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
 // ---- a fake getUserMedia: the PC's inputs, and every request made ----------------------
 const mics = {
   requests: [], fail: null, hold: null,   // hold: an array; each request waits there until the test answers it
@@ -2680,22 +2694,34 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   batch(2048, 9);
   const tail = new Int16Array(100 * 2).fill(1234);         // held by the worklet: less than a batch
   tap2.port.tail = { pcm: tail.slice().buffer, frames: 100, peak: 0.04, sumsq: 0 };
-  // An edit still waiting for its answer when Stop is pressed: Stop finishes the file only after it.
-  let answerEdit;
+  // Astra: edits still queued when Stop is pressed, each answered within its own time limit but 30 s
+  // in all: Stop waits for every one of them, then finishes the file.
+  fakeTimers();
+  const heldEdits = [];
   api.live_mark_update = (sid, id, cls, note, seq) => new Promise((resolve) => {
-    lv.push(["edit", cls]); answerEdit = () => resolve({ ok: true, mark: {} });
+    lv.push(["edit", cls || note]); heldEdits.push(() => resolve({ ok: true, mark: {}, applied: cls ? ["cls"] : ["note"] }));
   });
-  const lateEdit = markLi.children[1].onclick();           // A
+  const e1 = markLi.children[1].onclick();                 // A
+  const e2 = markLi.children[2].onclick();                 // B
+  markLi.children[4].value = "louder";
+  const e3 = markLi.children[4].onchange();
   await settle();
-  const stopAfterEdit = $("live-record").onclick();
+  const stopAfterEdits = $("live-record").onclick();
   await settle();
-  assert.ok(!lv.some((c) => c[0] === "stop"), "Stop waits for the edit");
-  answerEdit();
-  await lateEdit;
-  await stopAfterEdit;
+  for (let i = 0; i < 3; i++) {
+    await advance(10000);
+    assert.ok(!lv.some((c) => c[0] === "stop"), `Stop waits for edit ${i + 1}`);
+    heldEdits.shift()();
+    await settle();
+  }
+  await Promise.all([e1, e2, e3]);
+  await stopAfterEdits;
   await settle();
-  assert.ok(lv.findIndex((c) => c[0] === "edit") < lv.findIndex((c) => c[0] === "stop"));
-  lv.splice(lv.findIndex((c) => c[0] === "edit"), 1);
+  realTimers();
+  const editsAt = lv.map((c, i) => (c[0] === "edit" ? i : -1)).filter((i) => i >= 0);
+  assert.deepStrictEqual(editsAt.map((i) => lv[i][1]), ["A", "B", "louder"]);
+  assert.ok(editsAt.every((i) => i < lv.findIndex((c) => c[0] === "stop")), "all before the finish");
+  for (const i of editsAt.reverse()) lv.splice(i, 1);
   assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
   assert.ok(tap2.port.posted.some((m) => m.flush !== undefined), "Stop asks the worklet for its last samples");
   const lastChunk = Buffer.from(lv[lv.length - 2][3], "base64");
@@ -3037,9 +3063,30 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual($("live-left").textContent, "about 9 h left");
     assert.ok(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length >= 35, "the waveform scrolls while recording");
     assert.ok(ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length >= 35, "so does the spectrogram");
-    stopAnswer = { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] };
-    await $("live-record").onclick();
+    // Astra: when Stop gives up on the edits (one goes unanswered), what is still queued is called
+    // off, never sent after the finish, and the user is told which changes may not be saved.
+    await context.liveMark();
     await settle();
+    const markLi2 = $("live-marks").children[$("live-marks").children.length - 1];
+    fakeTimers();
+    const from = lv.length;
+    api.live_mark_update = (sid, id, cls) => new Promise(() => { lv.push(["edit", cls]); });   // never answered
+    const c1 = markLi2.children[1].onclick();                // A
+    const c2 = markLi2.children[2].onclick();                // B: queued behind it
+    await settle();
+    stopAnswer = { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] };
+    const stopC = $("live-record").onclick();
+    await settle();
+    assert.ok(!lv.slice(from).some((c) => c[0] === "stop"));
+    await advance(15000);                                    // A's time limit
+    await Promise.all([c1, c2, stopC]);
+    await settle();
+    realTimers();
+    assert.deepStrictEqual(lv.slice(from).filter((c) => c[0] === "edit").map((c) => c[1]), ["A"], "B is never sent");
+    assert.ok(lv.slice(from).some((c) => c[0] === "stop"));
+    const said = $("banner-text").textContent;
+    assert.ok(/These changes may not have been saved: class A for the mark at \d+:\d\d; class B for the mark at \d+:\d\d\. Check them in the player\./
+      .test(said), said);
     byId.delete("live-wave"); byId.delete("live-spec");
     $("live-close").onclick();
     await settle();
