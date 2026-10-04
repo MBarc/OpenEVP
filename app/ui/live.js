@@ -637,7 +637,10 @@ async function logQuestion() {
 // again after a resize).
 function addMarker(label) {
   const h = LV.hist;
-  h.markers.push({ col: h.waveN + LV.wave.cols.length, label });
+  const col = h.waveN + LV.wave.cols.length, prev = h.markers[h.markers.length - 1];
+  // A label close after another goes a row lower, so a question and a mark together stay readable.
+  const row = prev && col - prev.col < 48 * (window.devicePixelRatio || 1) ? (prev.row + 1) % 3 : 0;
+  h.markers.push({ col, label, row });
   if (h.markers.length > 500) h.markers.shift();
 }
 
@@ -1032,7 +1035,7 @@ function drawMarkers(c, g, m) {
       const px = window.devicePixelRatio || 1;
       g.font = `bold ${Math.round(14 * px)}px sans-serif`;
       g.textAlign = "right";                          // left of the line: drawn while the line is at the edge
-      g.fillText(mk.label, x - 4 * px, 16 * px);
+      g.fillText(mk.label, x - 4 * px, (16 + 16 * (mk.row || 0)) * px);
     }
   }
 }

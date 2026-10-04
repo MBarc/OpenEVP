@@ -2637,6 +2637,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("live-q-text").value, "");
   assert.deepStrictEqual(texts($("live-questions")), ["0:01Q1. Is anyone here with us?"]);
   sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.label)", context), ["★", "Q1"]);
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.row)", context), [0, 1]);   // labels close together go a row lower
   $("live-q-text").value = "";
   await $("live-q-log").onclick();                         // nothing typed: nothing logged
   assert.strictEqual(asked.length, 1);
