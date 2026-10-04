@@ -296,22 +296,26 @@ test opens a real input):
     prompt appears (OpenEVP grants its own page the microphone). The Input list
     names the PC's inputs; the meter moves when you speak. Pick another input,
     close and reopen OpenEVP: the same input is chosen. Record 30 s, speaking
-    now and then, press **M** twice: Stop opens `Live <date> <time>.wav` in the
-    player with two class C marks "Marked while recording", each ending about
-    where M was pressed; the library lists it in the folder that was picked.
+    now and then, press **M** twice: a star appears on the waveform and
+    "Marked" shows for a moment each time. Stop opens `Live <date> <time>.wav`
+    in the player with two class C marks "Marked while recording, not graded
+    yet", each 3 s long and ending about where M was pressed; the library lists
+    it in the folder that was picked.
     The file plays in another program (Audacity, VLC) and its sample rate and
     channels match the input (Windows Sound settings, the input's Advanced tab).
-48. **Listen and Enhance.** Listen is off on opening the view. With headphones
-    on, tick it: you hear yourself, with a small delay. Open **Enhance what I
-    hear**: Boost, Leveler, Voice filter, Cut rumble, Cut hiss, Hum and Reset are
-    there (no noise reduction). Set Boost +12 dB: louder in the headphones at
+48. **Listen.** Listen is off on opening the view, and its panel is hidden. With
+    headphones on, tap it: you hear yourself, with a small delay, and the panel
+    shows Volume, Even out loud and quiet (Off, Light, Medium, Strong), Clean up
+    (Voice only, Cut rumble, Cut hiss), Hum (Off, 60 Hz, 50 Hz) and Reset, in that
+    order, all easy to tap. Set Volume to +12 dB: louder in the headphones at
     once; the saved file is not louder (compare its waveform with one recorded
-    without). Close the Live view: the player's Enhance tab shows +12 dB too;
-    change it there, go back to Live: the same. With a hum in the input, turn on
-    Hum 60 Hz: the hum lines go from the spectrogram at once (it always shows
-    what is heard), the waveform is unchanged; turn Enhance off (Reset): the hum
-    lines come back. There is no Show what I hear button. Resize the window while
-    recording: the waveform and spectrogram stay.
+    without). Close the Live view: the player's Enhance tab shows Boost +12 dB
+    too; change it there, go back to Live: the same. With a hum in the input,
+    turn on Hum 60 Hz: the hum lines go from the spectrogram at once, the
+    waveform is unchanged; turn Listen off: the hum lines come back (the
+    spectrogram shows what is heard). There is no Enhance what I hear or Show
+    what I hear button. Resize the window while recording: the waveform and
+    spectrogram stay.
 49. **Windows blocking the microphone.** In Settings, Privacy & security,
     Microphone, turn off "Let desktop apps access your microphone"; open Record
     live: OpenEVP says Windows is blocking it and **Open microphone settings**
@@ -365,16 +369,15 @@ test opens a real input):
     live: every button and toggle is easy to hit with a finger; MARK is bottom
     right under the thumb. Turn on **Night screen**: the whole window goes dark
     red; reopen OpenEVP: it is still on. Rotate or resize the window: the
-    session panel moves beside or under the scopes, and the scopes keep their
-    picture. Mute the microphone: within about 3 s the screen says "No sound
+    waveform and spectrogram fill the space and keep their picture. Mute the microphone: within about 3 s the screen says "No sound
     coming in…", the meter says Silent, the waveform shows a flat line and the
     spectrogram a dark band moving in; **Open sound settings** opens Windows'
     sound settings; unmute: the message goes. Shout into the mic: **Too loud**.
-59. **Questions and the live marks list.** While recording, type a question and
-    press Enter (or Log question): it is listed with its time and marked Q1 on
-    the waveform. Press MARK, tap B, type a note. Stop: in the player the mark
-    is class B with that note, and the questions are shown as Q markers and in
-    the list under the marks; clicking one plays from just before it. The
-    library's EVP counts do not include the questions. "about N h left" in the
-    status strip matches the free space on the drive.
+59. **Marking in the field.** While recording, tap MARK a few seconds in, then
+    again within a second: two stars, the second a row lower, and "Marked" each
+    time; there is no list, class or note on this screen. Stop: in the player
+    each mark is class C, "Marked while recording, not graded yet", 3 s long;
+    grade one in the EVP Library. A mark in the first second is shorter (it
+    starts at 0:00). "about N h left" in the status strip matches the free space
+    on the drive.
 

@@ -109,35 +109,35 @@
         </ol>
       </details>
     </div>
-    <div id="live-main">
-      <div id="live-scopes">
-        <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
-        <canvas id="live-spec" aria-label="Spectrogram of the input"></canvas>
-      </div>
-      <aside id="live-session" aria-label="Session">
-        <h3>Questions</h3>
-        <div id="live-q-row">
-          <input id="live-q-text" type="text" maxlength="300" enterkeyhint="send" autocomplete="off" placeholder="The question you just asked" aria-label="Question">
-          <button id="live-q-log" type="button" disabled title="Note the question you asked, at this moment (or press Enter)">Log question</button>
-        </div>
-        <ol id="live-questions" aria-label="Questions asked"></ol>
-        <h3>Marks</h3>
-        <p id="live-marks-empty" class="muted">Press MARK (or M) when you hear something.</p>
-        <ol id="live-marks" aria-label="Marks made while recording"></ol>
-      </aside>
+    <div id="live-scopes">
+      <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
+      <canvas id="live-spec" aria-label="Spectrogram of what is heard"></canvas>
     </div>
     <div id="live-controls">
       <button id="live-record" type="button" class="primary" disabled>● Record</button>
       <span id="live-file"></span>
       <span id="live-toggles">
-      <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones, with the Enhance settings. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
-      <label class="toggle" id="live-enhance-label" title="Show the Enhance controls: they change only what you hear"><input type="checkbox" id="live-enhance-open"> Enhance what I hear</label>
+      <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
       </span>
-      <button id="live-mark" type="button" disabled title="Mark this moment as an EVP (or press M). It becomes a 2-second mark ending now. Set its class and note in the list.">★ MARK</button>
+      <span id="live-mark-box">
+        <span id="live-marked" role="status" hidden>Marked</span>
+        <button id="live-mark" type="button" disabled title="Mark the last 3 seconds as a possible EVP (or press M). Grade it later in the EVP Library.">★ MARK</button>
+      </span>
     </div>
-    <div id="live-enhance-box" hidden>
-      <p class="live-enhance-note">These change what you hear while listening and what the spectrogram shows. The waveform and the saved recording always stay the input as it came in. They are the player's Enhance settings, so a change here changes them there too. Noise reduction is for recordings only.</p>
-      <div id="live-enhance-panel"></div>
+    <div id="live-listen" hidden aria-label="What you hear">
+      <p class="live-enhance-note">These change only what you hear, and the spectrogram with it. The waveform and the saved recording always stay the input as it came in. They are the player's Enhance settings too.</p>
+      <div class="live-ctl"><span class="live-ctl-name">Volume</span>
+        <input id="live-boost" type="range" min="0" max="24" step="1" value="0" aria-label="Volume boost">
+        <span id="live-boost-value">0 dB</span></div>
+      <div class="live-ctl"><span class="live-ctl-name">Even out loud and quiet</span>
+        <span class="live-seg" id="live-even" role="group" aria-label="Even out loud and quiet" title="Bring quiet parts up and loud ones down"></span></div>
+      <div class="live-ctl"><span class="live-ctl-name">Clean up</span>
+        <button type="button" class="live-opt" id="live-voice" title="Keep the voice band, about 300 to 3400 Hz, and lower what is below and above it">Voice only</button>
+        <button type="button" class="live-opt" id="live-rumble" title="Lower everything below about 120 Hz: handling noise, wind, traffic rumble">Cut rumble</button>
+        <button type="button" class="live-opt" id="live-hiss" title="Lower everything above 5 kHz (hiss)">Cut hiss</button></div>
+      <div class="live-ctl"><span class="live-ctl-name">Hum</span>
+        <span class="live-seg" id="live-hum" role="group" aria-label="Hum" title="Remove mains hum: 60 Hz in the Americas, 50 Hz in most other places"></span></div>
+      <div class="live-ctl"><button type="button" id="live-enh-reset" title="Turn every option off">Reset</button></div>
     </div>
     <p id="live-status" role="status"></p>
   </section>
@@ -194,7 +194,6 @@
       </div>
       <div id="marks" hidden>
         <div id="marks-list"></div>
-        <div id="questions-list" hidden></div>
         <div id="marks-footer">
           <span id="marks-empty">No EVPs marked yet. Select a part, then press M.</span>
           <span id="backup-status"></span>

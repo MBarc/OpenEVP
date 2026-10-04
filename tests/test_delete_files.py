@@ -85,18 +85,15 @@ class DeleteFilesTests(FolderApiBase):
         self.store.add_mark(fps["y.wav"], 0.1, 0.3, "A", "voice")
         self.store.add_mark(fps["y.wav"], 0.4, 0.5, "B", "")
         self.store.add_mark(fps["z.wav"], 0.1, 0.2, "C", "")
-        self.store.add_question(fps["y.wav"], 0.2, "Is anyone here?")   # Live's question log: kept the same way
         info = api.delete_info([self.file(r, "y.wav"), self.file(r, "z.wav")])
         self.assertEqual((info["marks"], info["with_evps"]), (3, 2))
         self.assertTrue(api.delete_files(info["ids"])["ok"])
         self.assertEqual(len(self.store.marks(fps["y.wav"])), 2)      # in marks.json still
         self.assertEqual(len(self.store.marks(fps["z.wav"])), 1)
-        self.assertEqual(len(self.store.questions(fps["y.wav"])), 1)
         # Restored from the Recycle Bin, the recording has its marks again.
         shutil.move(os.path.join(self.tmp, "bin-1"), os.path.join(self.lib, "y.wav"))
         r = self.index(api)
         self.assertEqual(r["files"][0]["marks"], {"A": 1, "B": 1, "C": 0})
-        self.assertEqual([q["text"] for q in self.store.questions(fps["y.wav"])], ["Is anyone here?"])
 
     def test_caches_are_dropped(self):
         path = self.write("y.wav", wav_bytes(b"y"))

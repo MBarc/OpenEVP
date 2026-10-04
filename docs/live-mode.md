@@ -136,7 +136,7 @@ after Stop (an import with a silence gap set): it opens in the player with
   own (pywebview's `evaluate_js` waits for the page with no time limit) and gets
   the first three quarters (52.5 s). It is told its budget, less a 3 s margin
   (`liveDrainForClose(49500)`), and fits its whole Stop in it: every wait
-  (flush, chunks, each mark/edit/question call, the queue as a whole) is cut to
+  (flush, chunks, each mark call, the queue of marks as a whole) is cut to
   what is left less 8 s kept for `live_stop`. The deadline is one value every
   wait reads (`liveWait`, re-armed by `setDeadline`), so a close that comes
   during a Stop already under way shrinks that Stop's remaining waits too. What
@@ -200,14 +200,14 @@ costs the same as a minute. Waveform and spectrogram share one time scale
   is still that audio (fingerprint) and stores the marks. Storing marks is
   idempotent (a mark with the same times, class and note is not added twice).
 - **The journal goes only once everything is stored.** When the store refuses
-  a mark or a question (read-only, or its file could not be written), the WAV
+  a mark (read-only, or its file could not be written), the WAV
   is kept and named as usual, but the sidecar and the `live_parts` entry stay,
   and the user is told ("... OpenEVP will try again the next time it starts").
   Recovery tries again (`_MetaPending` keeps the entry) until all of it is
   stored; so it does when the published WAV could not be read just now (the
   entry stays while the `.part` or its journal is there). A split piece is
   journalled before it is published (destination, fingerprint, frames, its
-  marks and questions; still `derived`, so a `.part` left by a crash is deleted
+  marks; still `derived`, so a `.part` left by a crash is deleted
   while a published piece has its metadata stored by recovery). If that journal
   cannot be written the piece is not published and is cleaned up; if publishing
   fails the piece is cleaned up. A mark the store rejects as invalid (outside the
@@ -329,21 +329,23 @@ candidates take milliseconds), cancellable throughout:
   private mode, so the page asks for the remembered id as `ideal`, then
   re-opens by **label** with `exact` if that is a different device.
 - Listening is never remembered: off whenever the view opens.
-- **Enhance in the Live view** is the player's own Enhance tab panel (`#panel-enhance`,
-  its handlers in app.js `setupEnhance`), moved into the Live view's "Enhance what I
-  hear" box while the view is open and back afterwards (live.js `borrowEnhance` /
-  `returnEnhance`): one implementation, one stored setting (`enhance`), so a change in
-  either place is the other's too (`setEnhance` also calls `liveEnhanceChanged`).
-  Noise reduction (learnt from a recording) and "Exports enhanced" are hidden there;
-  Cut hiss follows the input's rate (`enhRate` asks `liveRate`). The chain
-  (`applyMonitor`) is built only while Listen is on or Enhance changes anything (its
-  graph has stages): the source goes to the worklet and the raw analyser directly
-  (the saved file and the waveform are always the input) and, through the chain, to
-  the speakers (Listen) and, while Enhance is on, to a second analyser. The
-  spectrogram always shows what is heard (`specAnalyser`): that second analyser
-  while Enhance is on, the raw one while it is off. There is no setting for it (an
-  old `live.heard` from a test build is ignored and not written again). The nodes are Web Audio's own (biquads, compressor,
-  gain, wave shaper): a few, rebuilt only when a setting changes.
+- **Listening:** the Listen panel shows only while Listen is on. Its options are the
+  player's Enhance settings (one stored setting, `enhance`; `setEnhance` also calls
+  `liveEnhanceChanged`), under plainer names (live.js `showListen` / `setupListen`):
+  Volume is Boost; "Even out loud and quiet" Off / Light / Medium / Strong is the
+  Leveler off, or on at that strength; Clean up is Voice filter, Cut rumble and Cut
+  hiss; Hum is Off / 60 Hz / 50 Hz; Reset sets them all back. The player's tab
+  keeps its own layout. Noise reduction (learnt from a recording) is not offered
+  here; Cut hiss follows the input's rate (`enhRate` asks `liveRate`). The chain
+  (`applyMonitor`) exists only while Listen is on: the source goes to the worklet
+  and the raw analyser directly (the saved file and the waveform are always the
+  input) and, through the chain, to the speakers and, while an option is set, to a
+  second analyser. The spectrogram always shows what is heard (`specAnalyser`):
+  that second analyser while listening with an option set, else the raw one.
+  Nothing about it is stored in the Live settings (an old `live.heard` from a
+  test build is ignored and not written again). The nodes are Web Audio's own
+  (biquads, compressor, gain, wave shaper): a few, rebuilt only when a setting
+  changes.
 - If a saved Live recording cannot be opened in the player, Stop's result says
   why (`player_error`) and the page shows it; the file is saved either way.
 
@@ -355,17 +357,15 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   "Too loud" while it clips and "Silent" under -90 dB, its number the peak held
   for 1.5 s; the time left on the drive from the backend's `left_seconds`, in
   `live_start` and every `live_chunk` answer, as "about 9 h left"; the input and
-  its format), then the scopes and the Session panel. The scopes fill the space
-  that is left (spectrogram 7, waveform 3) and redraw from their history on any
-  resize. The Session panel sits beside them from 1000 px wide, under them
-  below that: `liveLayout()` sets `#live.wide` from a ResizeObserver, so it is
-  testable without a layout engine.
+  its format), then the scopes. The scopes fill the space that is left
+  (spectrogram 7, waveform 3) and redraw from their history on any resize.
 - **Touch:** every button, select and field on this screen is at least 48 px;
-  every on/off choice (Listen, Enhance what I hear, Night
-  screen, Suggest cuts, and the Enhance options inside the borrowed panel) is a
-  checkbox drawn as a big toggle button (CSS `label:has(input:checked)`, the
-  checkbox kept for keyboards and screen readers). Record is bottom left, MARK
-  bottom right under the thumb, with the toggles on the row below; M still works.
+  Listen, Night screen and Suggest cuts are checkboxes drawn as big toggle
+  buttons (CSS `label:has(input:checked)`, the checkbox kept for keyboards and
+  screen readers); the Listen panel's options are buttons showing their state
+  (`aria-pressed`), the segmented ones built by `segButtons`. Record is bottom
+  left, MARK bottom right under the thumb, with Listen on the row below; M still
+  works.
 - **Night screen** (`live.field`, remembered): dark red colours for the screen
   and the window around it while it is open (`body.live-night`), the waveform in
   red, the spectrogram dimmed and reddened by a CSS filter.
@@ -376,38 +376,19 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   sound coming in. Is the mic muted, or is the wrong input selected?" with
   **Open sound settings** (`Api.open_sound_settings`, `ms-settings:sound`); it
   clears as soon as sound comes.
-- **Questions** (`Api.live_question`): logged at the moment Enter or Log
-  question is pressed, kept in the sidecar (`questions`), stored at the finish
-  in `questions.json` (`AppData.add_question`, idempotent: never marks, never
-  counted as EVPs), also on crash recovery and mapped into the parts of a split
-  import. `questions.json` is its own file, keyed by fingerprint, with the marks
-  store's rules (the folder lock, atomic writes, a second window read-only, a bad
-  or newer file set aside). It is never in `marks.json`: an older OpenEVP
-  rewrites `marks.json` with only the fields it knows, and must not be able to
-  drop them; older versions never open `questions.json`. Like marks, questions
-  stay when a recording is deleted, so it has them again when restored.
-  A test build kept questions in `marks.json`: on load they are merged into
-  `questions.json` (the same time and text is one), which is written atomically
-  first; only then is `marks.json` rewritten without them. A crash between leaves
-  them in both and the next load merges again without doubling. While they
-  cannot be moved (a read-only window, or `questions.json` cannot be written),
-  they are shown from memory and every `marks.json` write keeps them. They are drawn on the live waveform
-  as labelled markers (kept in the history, so a resize keeps them) and shown
-  in the player as markers (`q-` regions) and a list ("Questions asked:").
-- **The live marks list:** each mark as it is made, with its time, A/B/C
-  buttons and a note; a change goes to `Api.live_mark_update` at once (the mark
-  in the sidecar), and is stored with the file at the finish through the same
-  journalled path as every mark.
-- **Order:** marks, edits and questions go to the backend one at a time, in the
-  order they were made (a promise chain per recording, `metaOp`), each call with
-  its own time limit, and Stop waits for all of them before `live_stop`
-  (`drainMeta`). If one goes unanswered during Stop, or the whole wait passes
-  60 s, what is still queued is called off (never sent after the finish) and the
-  saved message lists the changes that may not have been saved. Each edit carries
-  a number that only grows; the backend keeps the newest number applied per mark
-  and field (class, note), so a late call never undoes a newer change of the
-  same field and never blocks a change of another (`"applied": [fields]`, or
-  `{"stale": true}`).
+- **Marking:** M or MARK sends `Api.live_mark(at)`: the backend makes the last 3 s
+  ending at `at` a mark (clamped at the recording's start), class C, note "Marked
+  while recording, not graded yet", kept in the sidecar and stored with the file
+  at the finish through the journalled path. The page shows a star on the
+  waveform (kept in the history, so a resize keeps it; marks close together go a
+  row lower) and "Marked" for 1.2 s. There is no class or note on this screen:
+  marks are graded and adjusted later in the EVP Library.
+- **Order and Stop:** marks go to the backend one at a time (a promise chain per
+  recording, `markOp`), each call with its own time limit, and Stop waits for all
+  of them before `live_stop` (`drainMarks`). If one goes unanswered during Stop,
+  or the whole wait passes 60 s, what is still queued is called off (never sent
+  after the finish) and the saved message lists the marks that may not have been
+  saved; at a close they go to `live-unsaved.jsonl` (above).
 - **Opening the input:** every open has a generation (`LV.gen`, only grows).
   Leaving the view, closing the input or opening another calls it off; after
   each await it checks its generation and that the Live view is still shown,

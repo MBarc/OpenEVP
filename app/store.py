@@ -73,21 +73,6 @@ def _blank_recording():
             "imported": False, "backup": _blank_backup()}
 
 
-MAX_QUESTION_LENGTH = 300
-
-
-def _clean_question(q, duration):
-    """One question asked while recording ({"id", "at", "text", "created"}), or None."""
-    if not isinstance(q, dict) or not isinstance(q.get("text"), str) or not _finite_number(q.get("at")):
-        return None
-    at, text = float(q["at"]), q["text"].strip()[:MAX_QUESTION_LENGTH]
-    if at < 0 or not text or (duration is not None and at > duration + DURATION_EPSILON):
-        return None
-    qid = q.get("id") if isinstance(q.get("id"), str) and q.get("id") else uuid.uuid4().hex[:12]
-    created = q.get("created") if isinstance(q.get("created"), str) else ""
-    return {"id": qid, "at": at, "text": text, "created": created}
-
-
 def _blank_backup():
     return {"status": None, "detail": "", "paths": []}
 
@@ -474,10 +459,6 @@ class AppData:
         self._settings_path = os.path.join(folder, "settings.json")
         self._marks_path = os.path.join(folder, "marks.json")
         self._index_path = os.path.join(folder, "index.json")
-        # Questions asked while recording live have a file of their own, never marks.json:
-        # an older OpenEVP rewrites marks.json with only the fields it knows, so it must
-        # never hold them. Older versions do not know this file and never touch it.
-        self._questions_path = os.path.join(folder, "questions.json")
         # The lock is taken *before* anything is loaded: only the lock holder
         # (the single writer) may set a bad file aside. A read-only instance
         # that loaded first and renamed the writer's files out from under it
@@ -500,13 +481,8 @@ class AppData:
         self._settings_blocked = False
         self._marks_blocked = False
         self._index_blocked = False
-        self._questions_blocked = False
-        self._legacy_questions = {}              # fp -> (name, duration, [question]): found in marks.json
-        self._questions_unsaved = False          # self._qdata holds questions questions.json does not
         self._settings = self._load_settings()
         self._data = self._load_marks()
-        self._qdata = self._load_questions()
-        self._migrate_questions()
         self._index = self._load_index()
         self._index_dirty = False
 
@@ -661,92 +637,9 @@ class AppData:
                 dropped += 1
                 continue
             cleaned[fp] = cleaned_rec
-            legacy = rec.get("questions")
-            if isinstance(legacy, list) and legacy:
-                # A test build of Live mode kept questions in marks.json: moved to questions.json
-                # by _migrate_questions (never just dropped).
-                qs = [q for q in (_clean_question(x, cleaned_rec["duration"]) for x in legacy) if q]
-                if qs:
-                    self._legacy_questions[fp] = (cleaned_rec["name"], cleaned_rec["duration"], qs)
         if dropped:
             self._problems.append(f"{dropped} invalid record(s) in marks.json were skipped.")
         return {"version": 1, "recordings": cleaned}
-
-    def _load_questions(self):
-        path = self._questions_path
-        default = {"version": 1, "recordings": {}}
-        status, data = _read_json_raw(path)
-        if status == "missing":
-            return default
-        if status == "io_error":
-            self._handle_unavailable_file("questions.json", "the question log", "_questions_blocked")
-            return default
-        if status == "bad_json" or not isinstance(data, dict) or not isinstance(data.get("recordings"), dict):
-            self._handle_bad_file(path, "questions.json", "the question log", "_questions_blocked")
-            return default
-        if data.get("version") != 1:
-            self._handle_bad_file(path, "questions.json", "the question log", "_questions_blocked", tag="future",
-                                   label="is from a newer version of OpenEVP")
-            return default
-        cleaned, dropped = {}, 0
-        for fp, rec in data["recordings"].items():
-            if not isinstance(fp, str) or not isinstance(rec, dict) or not isinstance(rec.get("questions"), list):
-                dropped += 1
-                continue
-            duration = rec.get("duration")
-            duration = float(duration) if _finite_number(duration) else None
-            qs = []
-            for x in rec["questions"]:
-                q = _clean_question(x, duration)
-                if q is None:
-                    dropped += 1
-                else:
-                    qs.append(q)
-            name = rec.get("name") if isinstance(rec.get("name"), str) else ""
-            cleaned[fp] = {"name": name, "duration": duration, "questions": qs}
-        if dropped:
-            self._problems.append(f"{dropped} invalid record(s) in questions.json were skipped.")
-        return {"version": 1, "recordings": cleaned}
-
-    def _migrate_questions(self):
-        """Questions found in marks.json (a test build kept them there) go to questions.json,
-        merged with what is there (the same time and text is one question). Durable and
-        crash-safe: questions.json is written (atomically) first, and only then marks.json
-        without them; a crash between leaves them in both, and the next load merges them
-        again without doubling. While they cannot be moved (read-only here, or questions.json
-        cannot be written), they are shown from memory and every marks.json write keeps them."""
-        if not self._legacy_questions:
-            return
-        merged = copy.deepcopy(self._qdata)
-        changed = False
-        for fp, (name, duration, qs) in self._legacy_questions.items():
-            rec = merged["recordings"].setdefault(fp, {"name": name, "duration": duration, "questions": []})
-            for q in qs:
-                if not any(abs(x["at"] - q["at"]) < 1e-6 and x["text"] == q["text"] for x in rec["questions"]):
-                    rec["questions"].append(dict(q))
-                    changed = True
-            if duration is not None and (rec["duration"] is None or rec["duration"] < duration):
-                rec["duration"] = duration
-            if name and not rec["name"]:
-                rec["name"] = name
-        self._qdata = merged                     # shown either way
-        self._questions_unsaved = self._questions_unsaved or changed
-        if self.read_only or self._questions_blocked:
-            return                               # the writing window moves them
-        if self._questions_unsaved:
-            try:
-                _write_json(self._questions_path, merged)
-                self._questions_unsaved = False
-            except OSError:
-                self._problems.append("Questions logged while recording could not be moved to questions.json "
-                                      "yet; they are kept in marks.json until they can be.")
-                return
-        self._legacy_questions = {}
-        if not self._marks_blocked:
-            try:
-                _write_json(self._marks_path, self._data)       # now without them
-            except OSError:
-                pass                             # they are in questions.json; the next marks write drops them
 
     def _load_index(self):
         path = self._index_path
@@ -807,15 +700,8 @@ class AppData:
     def _save_marks(self, new_data):
         if self._marks_blocked:
             raise StoreUnavailable(_unavailable_message("marks.json"))
-        self._migrate_questions()                # questions not moved yet: tried again first
-        on_disk = new_data
-        if self._legacy_questions:               # still not moved: kept in marks.json meanwhile
-            on_disk = copy.deepcopy(new_data)
-            for fp, (_name, _duration, qs) in self._legacy_questions.items():
-                if fp in on_disk["recordings"]:
-                    on_disk["recordings"][fp]["questions"] = [dict(q) for q in qs]
         try:
-            _write_json(self._marks_path, on_disk)
+            _write_json(self._marks_path, new_data)
         except OSError as e:
             raise StoreUnavailable(_unavailable_message("marks.json")) from e
         self._data = new_data
@@ -840,44 +726,6 @@ class AppData:
                 "backup": {"status": rec["backup"]["status"], "detail": rec["backup"]["detail"]},
                 "marks": sorted((dict(m) for m in rec["marks"]), key=lambda m: m["start"]),
             }
-
-    # ---- questions (questions.json) ----------------------------------------------
-
-    def questions(self, fp):
-        """The questions asked while this recording was made (Live mode's question log).
-        Kept by fingerprint like marks, so a recording deleted and restored has them again."""
-        with self._lock:
-            rec = self._qdata["recordings"].get(fp)
-            return sorted((dict(q) for q in rec["questions"]), key=lambda q: q["at"]) if rec else []
-
-    def add_question(self, fp, at, text, name="", duration=None):
-        """Store a question asked at `at` seconds into the recording. The same question
-        (time and text) already there is not added again, so this can be run twice."""
-        with self._lock:
-            self._require_writable()
-            q = _clean_question({"at": at, "text": text, "created": _now_iso()}, duration)
-            if q is None:
-                raise ValueError("A question needs its text and a time inside the recording.")
-            existing = self._qdata["recordings"].get(fp)
-            if existing and any(abs(x["at"] - q["at"]) < 1e-6 and x["text"] == q["text"]
-                                for x in existing["questions"]):
-                return None
-            if self._questions_blocked:
-                raise StoreUnavailable(_unavailable_message("questions.json"))
-            new_data = copy.deepcopy(self._qdata)
-            rec = new_data["recordings"].setdefault(fp, {"name": "", "duration": None, "questions": []})
-            rec["questions"].append(q)
-            if name and not rec["name"]:
-                rec["name"] = name
-            if duration is not None and (rec["duration"] is None or rec["duration"] < duration):
-                rec["duration"] = float(duration)
-            try:
-                _write_json(self._questions_path, new_data)
-            except OSError as e:
-                raise StoreUnavailable(_unavailable_message("questions.json")) from e
-            self._qdata = new_data
-            self._questions_unsaved = False      # all of it is in the file now
-            return dict(q)
 
     def add_mark(self, fp, start, end, cls, note, name="", duration=None):
         with self._lock:

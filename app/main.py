@@ -164,7 +164,7 @@ _UNSAVED_JS = "JSON.stringify(liveUnsavedNow())"
 
 
 def _drain_start_js(page_seconds):
-    """The page's whole Stop (flush, chunks, marks and edits, the backend's finish) fits in this budget."""
+    """The page's whole Stop (flush, chunks, marks, the backend's finish) fits in this budget."""
     return _DRAIN_START_JS.format(ms=int(max(0.0, page_seconds - CLOSE_PAGE_MARGIN) * 1000))
 
 
@@ -193,7 +193,7 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
       the page without a time limit) and gets all but the last finalize_share of
       the time; it is told its budget (less CLOSE_PAGE_MARGIN) and fits every one
       of its waits into it;
-    - then the page's list of marks, edits and questions that may not have been
+    - then the page's list of marks that may not have been
       saved (liveUnsavedNow: called off, unanswered, or still waiting) is read,
       briefly, and given to report() (Api.log_unsaved: a plain append to a log
       file, flushed to the disk; never the store, whose lock a stalled write may

@@ -109,7 +109,7 @@ class BackendTests(unittest.TestCase):
         self.assertRegex(r.pop("rec"), r"^[0-9a-f]{16}$")
         self.assertEqual(r, {"ok": True, "name": "dr60.wav", "url": "http://x/f.wav", "peaks": [0.1], "duration": 2.0,
                              "imported": 0, "marks": [], "reviewed": False, "backup": {"status": None, "detail": ""},
-                             "backup_needed": False, "questions": []})
+                             "backup_needed": False})
         self.assertEqual(api_with(lambda start: None).open_wav(), {"ok": False, "cancelled": True})
         r = api_with(lambda start: r"C:\rec\bad.wav").open_wav()
         self.assertFalse(r["ok"])
@@ -235,7 +235,7 @@ class BackendTests(unittest.TestCase):
             self.assertRegex(r.pop("rec"), r"^[0-9a-f]{16}$")
             self.assertEqual(r, {"ok": True, "url": "http://x/A1.wav", "peaks": [0.5], "duration": 1.0,
                                  "marks": [], "reviewed": False, "backup": {"status": None, "detail": ""},
-                                 "backup_needed": False, "questions": []})
+                                 "backup_needed": False})
             self.assertEqual(self.server.prepared, [(ID, "A", 1)])
             self.assertEqual(backend.recording_wav(self.m, (ID, "A", 1))[:4], b"RIFF")
 

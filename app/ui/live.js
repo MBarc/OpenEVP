@@ -7,13 +7,13 @@
 // writes the WAV as it goes. An AnalyserNode feeds the scrolling spectrogram; the waveform and
 // the level meter come from the worklet's batches. Both draw on animation frames only, scrolling
 // what is already drawn, so an hour costs no more than a minute.
-// Listening (monitoring) is off whenever the view opens; with "Enhance what I hear" the player's
-// Enhance settings apply to what is heard only. The saved file is always the raw input.
+// Listening (monitoring) is off whenever the view opens; while it is on, its panel's options (the
+// player's Enhance settings, shared) apply to what is heard only. The saved file is always the raw input.
 const LV = {
   settings: null,                        // live_settings(): input, split, import
   mode: "live",                          // "live" or "import"
   stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0, gen: 0,
-  heardAnalyser: null, enhanced: false,  // the spectrogram of what is heard, while Enhance changes it
+  heardAnalyser: null, enhanced: false,  // the spectrogram of what is heard, while listening enhanced
   rate: 0, channels: 0, deviceId: "", label: "", devices: [],
   rec: null,                             // the recording (see startRecording)
   flushId: 0, flushWaiters: new Map(),   // worklet flushes waiting for their answer
@@ -22,9 +22,8 @@ const LV = {
   spec: { bins: null, last: 0, lut: null, img: null },
   raf: 0, lastStatus: 0, drawn: 0, color: "",
   hist: null, redrawTimer: 0, sizeWatch: null, ratioWatch: null,   // drawn columns kept for redrawing (historyReset)
-  enhanceHome: null,                     // where the player's Enhance panel goes back to (borrowEnhance)
   quietFrames: 0,                        // frames in a row under LIVE_SILENT_DB (the "no sound coming in" warning)
-  layoutWatch: null,                     // the ResizeObserver that picks the wide or narrow layout
+  markedTimer: 0,                        // the "Marked" flash
   cuts: null,                            // an import's cuts: {job, fp, cuts, suggested, looking, splitJob}
   cutRegions: [],                        // the cuts drawn on the waveform
   jobs: new Map(), jobEvents: new Map(), // import jobs the page knows (job -> handler); events of jobs it does not yet
@@ -35,13 +34,13 @@ const CUT_MIN = 0.5;                     // seconds: a cut needs this much on ea
 const LIVE_SILENT_DB = -80;              // under this for LIVE_SILENT_SEC: "No sound coming in"
 const LIVE_SILENT_SEC = 3;
 const LIVE_METER_SILENT_DB = -90;        // the meter says "Silent" under this, not a jittering number
-const LIVE_WIDE_PX = 1000;               // the session panel beside the scopes from this width, else under them
+const LIVE_MARKED_MS = 1200;             // how long "Marked" shows after a mark
 const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by the backend, at most
 const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
 const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
-const LIVE_META_DRAIN_MS = 60000;        // Stop gives the marks, edits and questions still queued this long in all
-const LIVE_DRAIN_MS = 30000;
-const LIVE_STOP_RESERVE_MS = 8000;       // of a close's budget, kept for the backend's finish at the end             // Stop waits at most this long for the queued audio to be taken
+const LIVE_MARK_DRAIN_MS = 60000;        // Stop gives the marks still queued this long in all
+const LIVE_DRAIN_MS = 30000;             // Stop waits at most this long for the queued audio to be taken
+const LIVE_STOP_RESERVE_MS = 8000;       // of a close's budget, kept for the backend's finish at the end
 const QUEUE_FULL = "Recording stopped: OpenEVP could not save the audio as fast as it came in, so it stopped " +
                    "rather than hold more and more of it in memory. What was saved until then is kept.";
 const NOT_ANSWERING = "OpenEVP stopped answering while saving the recording. What was saved until then is kept.";
@@ -77,9 +76,7 @@ async function openLive() {
   $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
   $("live-field").checked = !!LV.settings.field;
   applyField();
-  $("live-enhance-box").hidden = !$("live-enhance-open").checked;
-  borrowEnhance();
-  liveLayout();
+  showListen();
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
   renderLive();
@@ -87,43 +84,63 @@ async function openLive() {
   await openInput(LV.settings.input);
 }
 
-// Called by renderMain whenever another view is shown: the input is let go of, and the Enhance panel
-// goes back to the player.
+// Called by renderMain whenever another view is shown: the input is let go of.
 function liveViewLeft() {
-  returnEnhance();
   document.body.classList.remove("live-night");
   closeInput();                                     // always: an input still opening is called off too
-}
-
-// ---- the player's Enhance panel, in the Live view while it is open ----
-// One panel, one implementation: the player's own Enhance tab panel (index.html #panel-enhance, with
-// its handlers in app.js setupEnhance) is moved into the Live view and back. Its settings are the
-// player's, shared. Noise reduction (learnt from a recording) and "Exports enhanced" do not apply here.
-function borrowEnhance() {
-  const panel = $("panel-enhance");
-  if (LV.enhanceHome || !panel.parentNode) return;
-  LV.enhanceHome = { parent: panel.parentNode, next: panel.nextSibling, hidden: panel.hidden };
-  $("live-enhance-panel").appendChild(panel);
-  panel.hidden = false;
-  $("noise-row").hidden = true;
-  showEnhance();                                    // Cut hiss follows the input's rate here
-}
-
-function returnEnhance() {
-  const home = LV.enhanceHome, panel = $("panel-enhance");
-  if (!home) return;
-  LV.enhanceHome = null;
-  home.parent.insertBefore(panel, home.next && home.next.parentNode === home.parent ? home.next : null);
-  panel.hidden = home.hidden;
-  $("noise-row").hidden = false;
-  applyEnhance(); showEnhance();                    // the recording's rate again
 }
 
 // The rate Enhance works at while the Live view is open (app.js enhRate), else 0.
 function liveRate() { return liveOpen() && LV.rate ? LV.rate : 0; }
 
-// The Enhance settings changed (app.js setEnhance): what is heard follows at once.
-function liveEnhanceChanged() { if (LV.ctx) applyMonitor(); }
+// The Enhance settings changed (app.js setEnhance, here or in the player): what is heard follows at once.
+function liveEnhanceChanged() { if (LV.ctx) applyMonitor(); showListen(); }
+
+// ---- the Listen panel: what is heard, shown only while Listen is on ----
+// Its options are the player's Enhance settings (one setting, shared), under plainer names:
+// Volume is Boost; "Even out loud and quiet" is the Leveler (Off, or its strength); Clean up is the
+// voice filter, Cut rumble and Cut hiss; Hum is the hum remover. The player's tab keeps its own layout.
+function showListen() {
+  const on = $("live-monitor").checked, st = S.enh.settings;
+  $("live-listen").hidden = !on;
+  if (!st) return;
+  $("live-boost").value = String(st.boost);
+  $("live-boost-value").textContent = st.boost ? `+${st.boost} dB` : "0 dB";
+  const even = st.leveler ? st.strength : "off";
+  for (const b of $("live-even").children) b.setAttribute("aria-pressed", String(b.dataset.v === even));
+  for (const b of $("live-hum").children) b.setAttribute("aria-pressed", String(b.dataset.v === st.hum));
+  for (const [id, key] of [["live-voice", "voice"], ["live-rumble", "rumble"], ["live-hiss", "hiss"]]) {
+    $(id).setAttribute("aria-pressed", String(!!st[key]));
+  }
+  const hiss = hissAvailable(enhRate());
+  $("live-hiss").disabled = !hiss;
+  $("live-hiss").title = hiss ? "Lower everything above 5 kHz (hiss)"
+    : "This input has nothing above 4 kHz, so there is no hiss band to cut.";
+}
+
+// The segmented choices: [value, label]. "Even out" Off is the Leveler off; the others, its strength.
+const LIVE_EVEN = [["off", "Off"], ["light", "Light"], ["medium", "Medium"], ["strong", "Strong"]];
+const LIVE_HUM = [["off", "Off"], ["60", "60 Hz"], ["50", "50 Hz"]];
+
+function segButtons(box, choices, pick) {
+  box.textContent = "";
+  for (const [v, label] of choices) {
+    const b = document.createElement("button");
+    b.type = "button"; b.dataset.v = v; b.textContent = label;
+    b.onclick = () => pick(v);
+    box.appendChild(b);
+  }
+}
+
+function setupListen() {
+  $("live-boost").oninput = () => setEnhance({ boost: Number($("live-boost").value) });
+  segButtons($("live-even"), LIVE_EVEN, (v) => setEnhance(v === "off" ? { leveler: false } : { leveler: true, strength: v }));
+  segButtons($("live-hum"), LIVE_HUM, (v) => setEnhance({ hum: v }));
+  for (const [id, key] of [["live-voice", "voice"], ["live-rumble", "rumble"], ["live-hiss", "hiss"]]) {
+    $(id).onclick = () => setEnhance({ [key]: !(S.enh.settings && S.enh.settings[key]) });
+  }
+  $("live-enh-reset").onclick = () => setEnhance({ ...ENH_DEFAULT });
+}
 
 // The folders a recording can go into: the library's (not Clips folders), the one shown in the
 // library picked (else the library folder itself).
@@ -182,12 +199,6 @@ function applyField() {
   liveRedraw();
 }
 
-// The session panel beside the scopes on a wide screen, under them on a narrow one.
-function liveLayout() {
-  const live = $("live");
-  live.classList.toggle("wide", (live.clientWidth || 0) >= LIVE_WIDE_PX);
-}
-
 // "about 9 h left": recording time left before the drive is nearly full (or the file at 4 GB).
 function fmtLeft(seconds) {
   if (typeof seconds !== "number" || !isFinite(seconds)) return "";
@@ -203,8 +214,6 @@ function renderLive() {
   $("live-record").disabled = stopping || (!rec && !ready);
   $("live-record").classList.toggle("recording", rec);
   $("live-mark").disabled = !rec || stopping;
-  $("live-q-log").disabled = !rec || stopping;
-  $("live-marks-empty").hidden = $("live-marks").children.length > 0;
   for (const id of ["live-input", "live-folder", "live-mode-live", "live-mode-import", "live-split", "live-close"]) $(id).disabled = rec;
   $("live-gap").disabled = rec || !$("live-split").checked;
   document.body.classList.toggle("recording", rec);
@@ -373,12 +382,12 @@ async function inputEnded() {
 }
 
 // ---- listening ----
-// What is heard: the input through the Enhance chain (the player's settings), to the speakers with
-// Listen. The spectrogram always shows what is heard: while Enhance changes anything, it reads a
-// second analyser at the end of the chain; with Enhance off, the input itself. The capture never
-// goes through the chain: the worklet and the raw analyser take the source directly, so the saved
-// file and the waveform stay the input as it came in. With Listen off and Enhance off, no chain
-// exists at all (no CPU spent on it).
+// What is heard: with Listen on, the input through the Enhance chain (the Listen panel's options, the
+// player's settings) to the speakers. The spectrogram always shows what is heard: while listening
+// with any option set it reads a second analyser at the end of the chain; otherwise the input itself.
+// The capture never goes through the chain: the worklet and the raw analyser take the source
+// directly, so the saved file and the waveform stay the input as it came in. With Listen off, no
+// chain exists at all (no CPU spent on it).
 function applyMonitor() {
   const ctx = LV.ctx;
   if (!ctx) return;
@@ -387,13 +396,13 @@ function applyMonitor() {
   try { LV.src.disconnect(); } catch (e) { /* not connected */ }
   LV.src.connect(LV.node); LV.src.connect(LV.analyser);            // the capture: always raw
   const listen = $("live-monitor").checked;
-  const stages = S.enh.settings ? enhanceGraph(S.enh.settings, ctx.sampleRate) : [];
-  LV.enhanced = stages.length > 0;                    // Enhance changes what is heard
-  if (!listen && !LV.enhanced) return;
+  const stages = listen && S.enh.settings ? enhanceGraph(S.enh.settings, ctx.sampleRate) : [];
+  LV.enhanced = stages.length > 0;                    // listening, and an option changes what is heard
+  if (!listen) return;
   LV.monitor = stages.flatMap((st) => makeNodes(ctx, st));
   let at = LV.src;
   for (const n of LV.monitor) { at.connect(n); at = n; }
-  if (listen) at.connect(ctx.destination);
+  at.connect(ctx.destination);
   if (LV.enhanced) {
     if (!LV.heardAnalyser) {
       LV.heardAnalyser = ctx.createAnalyser();
@@ -404,7 +413,7 @@ function applyMonitor() {
   }
 }
 
-// The analyser the spectrogram reads: what is heard. Enhanced while Enhance changes anything, else the input.
+// The analyser the spectrogram reads: what is heard. Enhanced while listening with an option set, else the input.
 function specAnalyser() { return LV.enhanced && LV.heardAnalyser ? LV.heardAnalyser : LV.analyser; }
 
 // ---- audio from the worklet: meter, waveform, and the chunks a recording sends ----
@@ -604,19 +613,17 @@ async function startRecording() {
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
-             meta: Promise.resolve(), metaSeq: 0, metaCancelled: false, unsaved: [], metaPending: [],
-             metaInflight: null, deadline: null, waiters: new Set(), file: r.file,
+             markChain: Promise.resolve(), marksCancelled: false, unsaved: [], marksPending: [],
+             markInflight: null, deadline: null, waiters: new Set(), file: r.file,
              stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
-  $("live-marks").textContent = "";
-  $("live-questions").textContent = "";
   $("live-file").textContent = `Recording ${r.file}`;
   renderLive();
   return r;
 }
 
-// M: the moment heard now, as a mark (a 2-second region ending now; class and note can be changed
-// in the player afterwards).
+// M (or the MARK button): the last 3 seconds, ending now, as a mark (app/live.py: class C, "not graded
+// yet"; graded and adjusted later in the EVP Library). Shown by a star on the waveform and "Marked".
 async function liveMark() {
   const rec = LV.rec;
   if (!rec || rec.closing || rec.ended) return null;
@@ -624,115 +631,55 @@ async function liveMark() {
   queueChunk(rec);                                     // the audio up to now, before the mark
   await drained(rec, LIVE_CALL_MS);
   if (LV.rec !== rec || rec.closing) return null;
-  const r = await metaOp(rec, (ms) => callWithTimeout(() => api().live_mark(rec.session, at), ms),
+  const r = await markOp(rec, (ms) => callWithTimeout(() => api().live_mark(rec.session, at), ms),
                          `the mark at ${fmtTime(at)}`);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
   addMarker("★");
-  $("live-marks").appendChild(markItem(rec, r.mark, at));
-  renderLive();
+  flashMarked();
   return r;
 }
 
-// One mark in the live list: its time, big A/B/C buttons and a note. A change goes to the backend
-// at once (live_mark_update) and is stored with the file when it is finished.
-function markItem(rec, mark, at) {
-  const li = document.createElement("li");
-  const time = document.createElement("span");
-  time.className = "live-at"; time.textContent = `★ ${fmtTime(at)}`;
-  li.appendChild(time);
-  const buttons = [];
-  for (const cls of ["A", "B", "C"]) {
-    const b = document.createElement("button");
-    b.type = "button"; b.className = "live-cls"; b.textContent = cls;
-    b.title = { A: "Class A: clear, anyone hears the words", B: "Class B: fairly clear", C: "Class C: faint" }[cls];
-    b.setAttribute("aria-pressed", String(mark.cls === cls));
-    b.onclick = () => editMark(rec, mark, { cls }, () => {
-      for (const x of buttons) x.setAttribute("aria-pressed", String(x.textContent === cls));
-    });
-    buttons.push(b);
-    li.appendChild(b);
-  }
-  const note = document.createElement("input");
-  note.type = "text"; note.className = "live-note"; note.maxLength = 500; note.placeholder = "What did you hear?";
-  note.setAttribute("aria-label", `Note for the mark at ${fmtTime(at)}`);
-  note.onchange = () => editMark(rec, mark, { note: note.value });
-  note.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); note.blur(); note.onchange(); } };
-  li.appendChild(note);
-  return li;
+function flashMarked() {
+  const el = $("live-marked");
+  el.hidden = false;
+  clearTimeout(LV.markedTimer);
+  LV.markedTimer = setTimeout(() => { el.hidden = true; }, LIVE_MARKED_MS);
 }
 
-// The recording's marks, edits and questions reach the backend one at a time, in the order they were
-// made (a promise chain per recording), each call with its own time limit, and Stop waits for all of
-// them before the file is finished (drainMeta). Each edit also carries a number that only grows:
-// should a call that timed out still arrive late, the backend ignores it for a field changed since.
-// Whatever did not get through is listed (rec.unsaved: `what`) and said when the recording is saved.
-function metaOp(rec, fn, what) {
-  rec.metaPending.push(what);
+// The recording's marks reach the backend one at a time (a promise chain per recording), each call
+// with its own time limit, and Stop waits for all of them before the file is finished (drainMarks).
+// A mark that did not get through is listed (rec.unsaved: `what`) and said when the recording is saved.
+function markOp(rec, fn, what) {
+  rec.marksPending.push(what);
   const step = async () => {
-    rec.metaPending.splice(rec.metaPending.indexOf(what), 1);
-    if (rec.metaCancelled || timeLeft(rec) <= 0) {      // Stop gave up waiting: never sent after the finish
+    rec.marksPending.splice(rec.marksPending.indexOf(what), 1);
+    if (rec.marksCancelled || timeLeft(rec) <= 0) {     // Stop gave up waiting: never sent after the finish
       rec.unsaved.push(what);
-      return { ok: false, cancelled: true, error: "The recording was saved before this change got through." };
+      return { ok: false, cancelled: true, error: "The recording was saved before this mark got through." };
     }
-    rec.metaInflight = what;
+    rec.markInflight = what;
     const r = await fn(liveWait(rec, LIVE_CALL_MS));    // its own limit, shrunk if the window closes meanwhile
-    rec.metaInflight = null;
+    rec.markInflight = null;
     if (!r || !r.ok) {
       rec.unsaved.push(what);
-      if (r && r.timeout && rec.closing) rec.metaCancelled = true;   // not answering: the rest is not sent
+      if (r && r.timeout && rec.closing) rec.marksCancelled = true;  // not answering: the rest is not sent
     }
     return r;
   };
-  const run = rec.meta.then(step, step);
-  rec.meta = run.catch(() => {});
+  const run = rec.markChain.then(step, step);
+  rec.markChain = run.catch(() => {});
   return run;
 }
 
-// Stop: every queued mark, edit and question first. Should that take too long, or a call go
-// unanswered, what is still queued is called off (not sent after the finish) and the one under way
-// ends within its own time limit; recordingDone says which did not get through.
-async function drainMeta(rec) {
-  const all = await Promise.race([rec.meta.then(() => true), liveWait(rec, LIVE_META_DRAIN_MS).then(() => false)]);
+// Stop: every queued mark first. Should that take too long, or a call go unanswered, what is still
+// queued is called off (not sent after the finish) and the one under way ends within its own time
+// limit; recordingDone says which did not get through.
+async function drainMarks(rec) {
+  const all = await Promise.race([rec.markChain.then(() => true), liveWait(rec, LIVE_MARK_DRAIN_MS).then(() => false)]);
   if (all) return;
-  rec.metaCancelled = true;
-  await rec.meta;
-}
-
-async function editMark(rec, mark, change, done) {
-  if (LV.rec !== rec || rec.closing) { liveStatus("The recording is saved: change the mark in the player.", "warn"); return; }
-  const seq = ++rec.metaSeq;
-  const when = fmtTime(mark.at ?? mark.end ?? 0);
-  const what = change.cls ? `class ${change.cls} for the mark at ${when}` : `the note for the mark at ${when}`;
-  const r = await metaOp(rec, (ms) => callWithTimeout(
-    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), ms), what);
-  if (!r.ok) { liveStatus(r.error, "warn"); return; }
-  if (r.stale) return;                                  // a newer change of it already applied
-  const applied = r.applied || Object.keys(change);     // only the fields not changed since
-  for (const k of applied) if (k in change) mark[k] = change[k];
-  if (done && applied.includes("cls")) done();
-}
-
-// Log the question just asked: Enter in the box, or Log question. Saved with the recording.
-async function logQuestion() {
-  const rec = LV.rec, box = $("live-q-text"), text = box.value.trim();
-  if (!rec || rec.closing || rec.ended) { liveStatus("Questions are logged while recording.", "warn"); return null; }
-  if (!text) { box.focus(); return null; }
-  const at = rec.frames / LV.rate;
-  const r = await metaOp(rec, (ms) => callWithTimeout(() => api().live_question(rec.session, at, text), ms),
-                         `the question "${text}"`);
-  if (!r.ok) { liveStatus(r.error, "warn"); return r; }
-  box.value = "";
-  rec.questions = (rec.questions || 0) + 1;
-  addMarker(`Q${rec.questions}`);
-  const li = document.createElement("li");
-  const time = document.createElement("span");
-  time.className = "live-at"; time.textContent = fmtTime(at);
-  const words = document.createElement("span");
-  words.textContent = `Q${rec.questions}. ${r.question.text}`;
-  li.append(time, words);
-  $("live-questions").appendChild(li);
-  return r;
+  rec.marksCancelled = true;
+  await rec.markChain;
 }
 
 // A labelled marker on the live waveform at the newest column (kept in the history, so it is drawn
@@ -740,7 +687,7 @@ async function logQuestion() {
 function addMarker(label) {
   const h = LV.hist;
   const col = h.waveN + LV.wave.cols.length, prev = h.markers[h.markers.length - 1];
-  // A label close after another goes a row lower, so a question and a mark together stay readable.
+  // A label close after another goes a row lower, so marks made close together stay readable.
   const row = prev && col - prev.col < 48 * (window.devicePixelRatio || 1) ? (prev.row + 1) % 3 : 0;
   h.markers.push({ col, label, row });
   if (h.markers.length > 500) h.markers.shift();
@@ -808,8 +755,8 @@ async function runStop(rec, opts) {
   let r;
   if (rec.stoppedBy) r = rec.stoppedBy.result;
   else {
-    // Marks, edits and questions made before Stop reach the backend first, all of them.
-    await drainMeta(rec);
+    // Marks made before Stop reach the backend first, all of them.
+    await drainMarks(rec);
     // The finish: its own limit, or what is left of a close's budget (the reserve kept for it).
     r = await callWithTimeout(() => api().live_stop(rec.session), liveWait(rec, LIVE_CALL_MS, 0));
     if (r.timeout) r = { ok: false, error: STOP_NOT_ANSWERING };
@@ -835,7 +782,7 @@ async function liveDrainForClose(budgetMs) {
 function liveUnsavedNow() {
   const rec = LV.closingRec;
   if (!rec) return null;
-  const items = [...rec.unsaved, ...(rec.metaInflight ? [rec.metaInflight] : []), ...rec.metaPending];
+  const items = [...rec.unsaved, ...(rec.markInflight ? [rec.markInflight] : []), ...rec.marksPending];
   return items.length ? { file: rec.file || "", items } : null;
 }
 
@@ -863,7 +810,7 @@ async function recordingDone(rec, r, reason, opts = {}) {
   r = { ...r, truncated };
   const files = r.files || [];
   const notes = [...(r.problems || [])];
-  if (rec.unsaved.length) notes.push(`These changes may not have been saved: ${rec.unsaved.join("; ")}. ` +
+  if (rec.unsaved.length) notes.push(`These marks may not have been saved: ${rec.unsaved.join("; ")}. ` +
                                      "Check them in the player.");
   if (r.dropped_marks) notes.push(`${plural(r.dropped_marks, "mark")} fell outside the saved audio and were left out.`);
   if (r.player_error) notes.push(`It could not be opened in the player (${r.player_error.replace(/[.\s]+$/, "")}); find it in the EVP Library.`);
@@ -1146,7 +1093,7 @@ function emptyColor() {
   return LV.emptyColor;
 }
 
-// The markers (questions, marks) whose columns are among the last m drawn, at their place.
+// The marks whose columns are among the last m drawn, at their place.
 function drawMarkers(c, g, m) {
   const h = LV.hist, first = h.waveN - m;
   g.fillStyle = waveColor();
@@ -1310,7 +1257,7 @@ async function liveRecover() {
   }
   if (r.failed.length) parts.push(`Could not finish: ${r.failed.join(" · ")}`);
   for (const u of unsaved) {
-    parts.push(`OpenEVP closed while saving ${u.file || "a recording"}, and these changes may not have been saved: ` +
+    parts.push(`OpenEVP closed while saving ${u.file || "a recording"}, and these marks may not have been saved: ` +
                `${u.items.join("; ")}. Check them in the player.`);
   }
   banner(parts.join(" "), r.failed.length || unsaved.length ? "warn" : "ok");
@@ -1335,16 +1282,10 @@ function setupLive() {
   };
   $("live-split").onchange = splitChanged;
   $("live-gap").onchange = splitChanged;
-  $("live-monitor").onchange = () => { applyMonitor(); renderLive(); };
+  $("live-monitor").onchange = () => { applyMonitor(); showListen(); renderLive(); };
   $("live-field").onchange = () => { applyField(); saveLive({ field: $("live-field").checked }); };
-  $("live-enhance-open").onchange = () => { $("live-enhance-box").hidden = !$("live-enhance-open").checked; };
   $("live-sound-settings").onclick = () => api().open_sound_settings();
-  $("live-q-log").onclick = logQuestion;
-  $("live-q-text").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); logQuestion(); } };
-  if (typeof ResizeObserver !== "undefined" && !LV.layoutWatch) {
-    LV.layoutWatch = new ResizeObserver(liveLayout);
-    LV.layoutWatch.observe($("live"));
-  }
+  setupListen();
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());
   $("live-mark").onclick = liveMark;
   $("cut-add").onclick = addCut;

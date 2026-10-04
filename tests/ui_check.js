@@ -2509,8 +2509,6 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                     { id: "f1", name: "Old Mill", rel: ["Old Mill"], parent: "root", in_clips: false },
                                     { id: "c1", name: "Clips", rel: ["Old Mill", "Clips"], parent: "f1", in_clips: true }];
                    S.lib.folderById = new Map(S.lib.folders.map((d) => [d.id, d])); S.lib.folderId = "f1"; S.lib.flat = false;`, context);
-  $("player-tab-panels").appendChild($("panel-enhance"));        // its home in the player, as index.html has it
-  $("panel-enhance").hidden = true;
   mics.requests.length = 0;
   await context.openLive();
   await settle();
@@ -2536,57 +2534,89 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);   // not to the speakers
   assert.ok(!$("live-monitor").checked, "Listen is off when the view opens");
   assert.ok(!$("live-record").disabled && $("live-mark").disabled);
-  // The player's own Enhance panel is in the Live view (one implementation), without noise reduction.
-  assert.strictEqual($("panel-enhance").parentNode, $("live-enhance-panel"));
-  assert.ok(!$("panel-enhance").hidden && $("noise-row").hidden);
-  assert.ok(html.includes("Noise reduction is for recordings only.") && html.includes("Use headphones"));
-  // Listen: the input to the speakers, through the Enhance chain (the player's settings). A change in
-  // the panel is the player's setting (saved once for both) and is heard at once.
+  // The Listen panel: hidden until Listen is on; there is no separate Enhance toggle any more.
+  assert.ok(!html.includes("live-enhance-open") && !html.includes("Enhance what I hear"));
+  assert.ok($("live-listen").hidden, "no Listen, no panel");
+  assert.ok(html.includes("Use headphones"));
+  assert.strictEqual(vm.runInContext("typeof borrowEnhance", context), "undefined", "the player keeps its own Enhance tab");
+  // Listen: the input to the speakers, straight while no option is set; the panel shows.
   const liveEnhSaved = [];
   api.set_enhance = async (st) => { liveEnhSaved.push(st); return { ok: true, enhance: st, remembered: true }; };
   $("live-monitor").checked = true; $("live-monitor").onchange();
+  assert.ok(!$("live-listen").hidden, "Listen on: its panel shows");
   assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);   // nothing on: straight
-  $("boost").value = "6"; $("boost").oninput();
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context), "no option: the spectrogram is the input");
+  // The controls, in order: Volume, Even out loud and quiet, Clean up, Hum, Reset.
+  const order = ["Volume</span>", "Even out loud and quiet</span>", "Clean up</span>", "Hum</span>", ">Reset</button>"]
+    .map((t) => html.indexOf(t, html.indexOf('id="live-listen"')));
+  assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])), JSON.stringify(order));
+  assert.deepStrictEqual(texts($("live-even")), ["Off", "Light", "Medium", "Strong"]);
+  assert.deepStrictEqual(texts($("live-hum")), ["Off", "60 Hz", "50 Hz"]);
+  assert.ok(['id="live-voice"', ">Voice only<", 'id="live-rumble"', ">Cut rumble<", 'id="live-hiss"', ">Cut hiss<"].every((t) => html.includes(t)));
+  // They map onto the player's Enhance settings (saved once, for both), and are heard at once.
+  $("live-boost").value = "6"; $("live-boost").oninput();
   await settle();
   assert.strictEqual(vm.runInContext("S.enh.settings.boost", context), 6);
   assert.strictEqual(liveEnhSaved.pop().boost, 6, "saved as the player's Enhance setting");
+  assert.strictEqual($("live-boost-value").textContent, "+6 dB");
+  assert.strictEqual($("boost").value, "6", "the player's tab shows it too");
   const chainOut = stream.outs[2];
   assert.strictEqual(chainOut.kind, "gain");
   assert.strictEqual(chainOut.outs[0].kind, "gain");                                 // the limiter's pre-gain, then its curve
   // The capture never goes through it: the worklet (the saved file) and the waveform take the source.
   assert.strictEqual(stream.outs[0], tap, "the worklet gets the raw input");
   assert.ok(!ctxLive.nodes.filter((n) => n.kind === "gain").some((n) => n.outs.includes(tap)), "never the enhanced signal");
-  $("leveler").checked = true; $("leveler").onchange();
-  assert.ok(ctxLive.nodes.some((n) => n.kind === "compressor" && stream.outs.length === 3), "the Leveler is heard");
-  assert.strictEqual(stream.outs[0], tap);
-  // The spectrogram always shows what is heard: with Enhance on (Boost, the Leveler), the enhanced
-  // signal, read at the end of the chain; the waveform (and the saved file) stay raw. No toggle for it.
+  const even = (v) => $("live-even").children.find((b) => b.dataset.v === v);
+  even("strong").onclick();
+  await settle();
+  sameJSON(vm.runInContext("[S.enh.settings.leveler, S.enh.settings.strength]", context), [true, "strong"]);
+  assert.deepStrictEqual($("live-even").children.map((b) => b.getAttribute("aria-pressed")), ["false", "false", "false", "true"]);
+  assert.ok(ctxLive.nodes.some((n) => n.kind === "compressor" && stream.outs.length === 3), "evened out: the Leveler is heard");
+  assert.ok($("leveler").checked && $("leveler-strength").value === "strong", "the player's Leveler and strength");
+  even("off").onclick();
+  await settle();
+  sameJSON(vm.runInContext("[S.enh.settings.leveler, S.enh.settings.strength]", context), [false, "strong"]);
+  assert.deepStrictEqual($("live-even").children.map((b) => b.getAttribute("aria-pressed")), ["true", "false", "false", "false"]);
+  for (const [id, key] of [["live-voice", "voice"], ["live-rumble", "rumble"], ["live-hiss", "hiss"]]) {
+    $(id).onclick();
+    await settle();
+    assert.ok(vm.runInContext(`S.enh.settings.${key}`, context) === true && $(id).getAttribute("aria-pressed") === "true", key);
+    $(id).onclick();
+    await settle();
+    assert.ok(vm.runInContext(`S.enh.settings.${key}`, context) === false && $(id).getAttribute("aria-pressed") === "false", key);
+  }
+  $("live-hum").children.find((b) => b.dataset.v === "50").onclick();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.enh.settings.hum", context), "50");
+  assert.strictEqual($("hum").value, "50");
+  // The spectrogram follows what is heard: listening with an option set, the enhanced signal, read at
+  // the end of the chain; the waveform (and the saved file) stay raw.
   assert.ok(!html.includes("live-heard") && !html.includes("Show what I hear"));
   const heardA = vm.runInContext("LV.heardAnalyser", context);
   assert.ok(heardA && vm.runInContext("LV.enhanced && specAnalyser() === LV.heardAnalyser", context));
   assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA) && n !== stream), "fed from the end of the chain");
   assert.strictEqual(stream.outs[1].kind, "analyser", "the raw analyser still takes the source");
-  // Listen off, Enhance on: the chain still runs for the spectrogram, nothing to the speakers.
+  assert.strictEqual(stream.outs[0], tap);
+  // Listen off: no chain at all, the panel hides, and the spectrogram is the input (options or not).
   $("live-monitor").checked = false; $("live-monitor").onchange();
-  assert.ok(!ctxLive.nodes.some((n) => n.outs.some((o) => o.kind === "destination")), "nothing is heard");
-  assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA)));
-  assert.ok(vm.runInContext("specAnalyser() === LV.heardAnalyser", context));
-  // Enhance off: the spectrogram is the input as it comes in, and with Listen off no chain at all.
-  $("boost").value = "0"; $("boost").oninput();
-  $("leveler").checked = false; $("leveler").onchange();
-  await settle();
-  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "Listen off, Enhance off: no chain");
+  assert.ok($("live-listen").hidden);
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "Listen off: no chain");
   assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context));
-  // Listen on with Enhance off: heard straight, and the spectrogram is the input.
+  // Reset: every option off (here and in the player's tab).
   $("live-monitor").checked = true; $("live-monitor").onchange();
-  assert.ok(vm.runInContext("specAnalyser() === LV.analyser", context));
+  $("live-enh-reset").onclick();
+  await settle();
+  sameJSON(vm.runInContext("S.enh.settings", context), vm.runInContext("ENH_DEFAULT", context));
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context), "Reset: the spectrogram is the input");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);
   $("live-monitor").checked = false; $("live-monitor").onchange();
-  // Nothing about it is stored: the Live settings never carry it.
+  // Nothing about it is stored in the Live settings.
   assert.ok(!lv.some((c) => c[0] === "set" && "heard" in c[1]));
-  // Settings shared the other way: the player's Enhance (setEnhance) is what Live hears.
+  // Settings shared the other way: the player's Enhance (setEnhance) is what Live hears, and shows.
   vm.runInContext(`setEnhance({ boost: 0, leveler: false, hum: "60" });`, context);
   $("live-monitor").checked = true; $("live-monitor").onchange();
   assert.ok(stream.outs.length === 3 && stream.outs[2].kind === "biquad" && stream.outs[2].type === "notch");
+  assert.strictEqual($("live-hum").children.find((b) => b.getAttribute("aria-pressed") === "true").dataset.v, "60");
   $("live-monitor").checked = false; $("live-monitor").onchange();
   vm.runInContext(`setEnhance({ ...ENH_DEFAULT });`, context);
   await settle();
@@ -2631,68 +2661,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const mark = lv.filter((c) => c[0] === "mark").pop();
   assert.ok(Math.abs(mark[2] - 13 * 2048 / 48000) < 1e-9, String(mark[2]));
   assert.strictEqual(lv.filter((c) => c[0] === "chunk").pop()[2], 1);
-  // The live marks list: the mark with its time, big A/B/C buttons (C to start with) and a note; a
-  // change goes to the backend at once, to be stored when the file is finished.
-  const markLi = $("live-marks").children[0];
-  assert.strictEqual(markLi.children[0].textContent, "★ 0:01");
-  assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => [b.textContent, b.getAttribute("aria-pressed")]),
-                         [["A", "false"], ["B", "false"], ["C", "true"]]);
-  assert.ok($("live-marks-empty").hidden);
-  const edits = [];
-  api.live_mark_update = async (sid, id, cls, note) => { edits.push([sid, id, cls, note]); return { ok: true, mark: {} }; };
-  await markLi.children[2].onclick();                      // B
-  sameJSON(edits.pop(), ["s1", 0, "B", null]);
-  assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
-  markLi.children[4].value = "a whisper: get out";
-  await markLi.children[4].onchange();
-  sameJSON(edits.pop(), ["s1", 0, null, "a whisper: get out"]);
-  // Astra: edits apply in the order they were made, even when the backend answers out of order.
-  // A then B, with the answer to A held back: B is not even sent until A is answered, and the mark
-  // ends as B (in the list and in the backend's order). Each edit carries a growing number.
-  {
-    const held = [];
-    api.live_mark_update = (sid, id, cls, note, seq) => new Promise((resolve) => {
-      edits.push([sid, id, cls, note, seq]);
-      held.push(() => resolve({ ok: true, mark: {} }));
-    });
-    const doneA = markLi.children[1].onclick();            // A
-    await settle();
-    const doneB = markLi.children[2].onclick();            // B
-    await settle();
-    assert.strictEqual(edits.length, 1, "B waits for A's answer");
-    held.shift()();                                        // A answered
-    await doneA;
-    await settle();
-    assert.strictEqual(edits.length, 2);
-    assert.deepStrictEqual(edits.map((e) => e[2]), ["A", "B"]);
-    assert.ok(edits[1][4] > edits[0][4], "the edit numbers grow");
-    held.shift()();
-    await doneB;
-    assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
-    // A late answer the backend calls stale (a newer edit already applied) changes nothing here.
-    api.live_mark_update = async () => ({ ok: true, stale: true });
-    await markLi.children[3].onclick();                    // C, but stale
-    assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
-    edits.length = 0;
-  }
-  // The question log: Enter (or Log question) notes the question at this moment, saved with the
-  // recording; it is listed and marked on the waveform.
-  const asked = [];
-  api.live_question = async (sid, at, text) => { asked.push([sid, at, text]); return { ok: true, question: { id: 0, at, text } }; };
-  assert.ok(!$("live-q-log").disabled);
-  $("live-q-text").value = "  Is anyone here with us?  ";
-  fire([$("live-q-text")], "keydown", { key: "Enter" });
-  $("live-q-text").onkeydown({ key: "Enter", preventDefault() {} });
+  // The mark shows as a star on the waveform and "Marked" for a moment. There is no marks list, no
+  // class or note on this screen: marks are graded later in the EVP Library.
+  assert.ok(!$("live-marked").hidden, "Marked shows");
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.label)", context), ["★"]);
+  assert.ok(!html.includes('id="live-marks"') && !html.includes("live-q-") && !html.includes("Log question"));
+  assert.ok(html.includes("Mark the last 3 seconds"));
+  // Another right after: its star goes a row lower, so both stay readable.
+  fire([document], "keydown", { key: "M", target: document.body });
   await settle();
-  assert.strictEqual(asked.length, 1);
-  assert.deepStrictEqual([asked[0][0], asked[0][2]], ["s1", "Is anyone here with us?"]);
-  assert.strictEqual($("live-q-text").value, "");
-  assert.deepStrictEqual(texts($("live-questions")), ["0:01Q1. Is anyone here with us?"]);
-  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.label)", context), ["★", "Q1"]);
-  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.row)", context), [0, 1]);   // labels close together go a row lower
-  $("live-q-text").value = "";
-  await $("live-q-log").onclick();                         // nothing typed: nothing logged
-  assert.strictEqual(asked.length, 1);
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => [m.label, m.row])", context), [["★", 0], ["★", 1]]);
+  // "Marked" goes again after a moment.
+  fakeTimers();
+  context.flashMarked();
+  assert.ok(!$("live-marked").hidden);
+  await advance(1300);
+  assert.ok($("live-marked").hidden, "Marked is brief");
+  realTimers();
   // Stop: the rest is sent, then the recording is saved; it opens in the player, in its folder.
   stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0,
                  files: [{ id: "lf1", name: "Live 2026-10-03 21-05-09.wav", seconds: 0.6, marks: 1 }],
@@ -2702,34 +2687,32 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   batch(2048, 9);
   const tail = new Int16Array(100 * 2).fill(1234);         // held by the worklet: less than a batch
   tap2.port.tail = { pcm: tail.slice().buffer, frames: 100, peak: 0.04, sumsq: 0 };
-  // Astra: edits still queued when Stop is pressed, each answered within its own time limit but 30 s
-  // in all: Stop waits for every one of them, then finishes the file.
+  // Marks still waiting for the backend when Stop is pressed, each answered within its own time limit
+  // but 30 s in all: Stop waits for every one of them, then finishes the file.
   fakeTimers();
-  const heldEdits = [];
-  api.live_mark_update = (sid, id, cls, note, seq) => new Promise((resolve) => {
-    lv.push(["edit", cls || note]); heldEdits.push(() => resolve({ ok: true, mark: {}, applied: cls ? ["cls"] : ["note"] }));
+  const heldMarks = [], realMark = api.live_mark, fromMarks = lv.length;
+  api.live_mark = (sid, at) => new Promise((resolve) => {
+    lv.push(["slow-mark", at]); heldMarks.push(() => resolve({ ok: true, mark: { at, start: Math.max(0, at - 3), end: at, cls: "C" } }));
   });
-  const e1 = markLi.children[1].onclick();                 // A
-  const e2 = markLi.children[2].onclick();                 // B
-  markLi.children[4].value = "louder";
-  const e3 = markLi.children[4].onchange();
+  const marks3 = [context.liveMark(), context.liveMark(), context.liveMark()];
   await settle();
-  const stopAfterEdits = $("live-record").onclick();
+  const stopAfterMarks = $("live-record").onclick();
   await settle();
   for (let i = 0; i < 3; i++) {
     await advance(10000);
-    assert.ok(!lv.some((c) => c[0] === "stop"), `Stop waits for edit ${i + 1}`);
-    heldEdits.shift()();
+    assert.ok(!lv.slice(fromMarks).some((c) => c[0] === "stop"), `Stop waits for mark ${i + 1}`);
+    heldMarks.shift()();
     await settle();
   }
-  await Promise.all([e1, e2, e3]);
-  await stopAfterEdits;
+  await Promise.all(marks3);
+  await stopAfterMarks;
   await settle();
   realTimers();
-  const editsAt = lv.map((c, i) => (c[0] === "edit" ? i : -1)).filter((i) => i >= 0);
-  assert.deepStrictEqual(editsAt.map((i) => lv[i][1]), ["A", "B", "louder"]);
-  assert.ok(editsAt.every((i) => i < lv.findIndex((c) => c[0] === "stop")), "all before the finish");
-  for (const i of editsAt.reverse()) lv.splice(i, 1);
+  api.live_mark = realMark;
+  const marksAt = lv.map((c, i) => (c[0] === "slow-mark" ? i : -1)).filter((i) => i >= 0);
+  assert.strictEqual(marksAt.length, 3);
+  assert.ok(marksAt.every((i) => i < lv.findIndex((c) => c[0] === "stop")), "all before the finish");
+  for (const i of marksAt.reverse()) lv.splice(i, 1);
   assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
   assert.ok(tap2.port.posted.some((m) => m.flush !== undefined), "Stop asks the worklet for its last samples");
   const lastChunk = Buffer.from(lv[lv.length - 2][3], "base64");
@@ -2740,8 +2723,6 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok($("live").hidden && !$("player").hidden && !document.body.classList.contains("recording"));
   assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-05-09.wav in Old Mill.");
   assert.strictEqual(tap2.ctx.state, "closed", "the input is let go of");
-  assert.strictEqual($("panel-enhance").parentNode, $("player-tab-panels"), "the Enhance panel is back in the player");
-  assert.ok(!$("noise-row").hidden);
   assert.strictEqual(vm.runInContext("S.lib.folderId", context), "f1");
 
   // A recording that could not be opened in the player: saved, and said so.
@@ -2990,28 +2971,20 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     await settle();
     assert.ok(!$("live").classList.contains("field"));
     sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { field: false }]);
-    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen,
-    // Enhance what I hear, the night screen, Suggest cuts; and the Enhance options inside.
-    for (const id of ["live-monitor-label", "live-enhance-label", "live-field-label"]) {
+    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, the night screen,
+    // Suggest cuts; the Listen panel's options are buttons that show their state.
+    for (const id of ["live-monitor-label", "live-field-label"]) {
       assert.ok(html.includes(`<label class="toggle" id="${id}"`), id);
     }
     assert.ok(html.includes('<label class="toggle" title="After Stop, suggest cuts'));
     const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
-    assert.ok(css.includes("#live label.toggle:has(input:checked)") && css.includes('#live-enhance-panel label:has(> input[type="checkbox"])'));
+    assert.ok(css.includes("#live label.toggle:has(input:checked)") && css.includes('#live .live-opt[aria-pressed="true"]') &&
+              css.includes('#live .live-seg button[aria-pressed="true"]'));
     assert.ok(/#live button, #live select[^{]*\{[^}]*min-height: 48px/.test(css), "touch targets of 48 px, on the Live screen only");
     assert.ok(!/^button\s*\{[^}]*min-height/m.test(css), "the rest of the app keeps its sizes");
-    // Enhance what I hear: a toggle that shows the controls.
-    assert.ok($("live-enhance-box").hidden);
-    $("live-enhance-open").checked = true; $("live-enhance-open").onchange();
-    assert.ok(!$("live-enhance-box").hidden);
-    $("live-enhance-open").checked = false; $("live-enhance-open").onchange();
-    // The layout: the session panel beside the scopes when wide, under them when narrow.
-    Object.defineProperty($("live"), "clientWidth", { value: 1280, configurable: true });
-    context.liveLayout();
-    assert.ok($("live").classList.contains("wide"));
-    Object.defineProperty($("live"), "clientWidth", { value: 700, configurable: true });
-    context.liveLayout();
-    assert.ok(!$("live").classList.contains("wide"));
+    // The layout: no session panel; the waveform and spectrogram take the space.
+    assert.ok(!html.includes("live-session") && !css.includes("#live-session") && !css.includes("#live.wide"));
+    assert.ok(/#live-scopes \{ flex: 1;/.test(css));
     // The status strip: the input and its format; the time left on the drive.
     assert.strictEqual($("live-input-info").textContent, "Microphone (Realtek Audio) · 48 kHz stereo");
     for (const [sec, text] of [[9 * 3600 + 1800, "about 9 h left"], [45 * 60, "about 45 min left"], [30, "under a minute left"]]) {
@@ -3071,51 +3044,45 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual($("live-left").textContent, "about 9 h left");
     assert.ok(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length >= 35, "the waveform scrolls while recording");
     assert.ok(ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length >= 35, "so does the spectrogram");
-    // Astra: when Stop gives up on the edits (one goes unanswered), what is still queued is called
-    // off, never sent after the finish, and the user is told which changes may not be saved.
-    await context.liveMark();
-    await settle();
-    const markLi2 = $("live-marks").children[$("live-marks").children.length - 1];
+    // When Stop gives up on the marks (one goes unanswered), what is still queued is called off, never
+    // sent after the finish, and the user is told which marks may not be saved.
+    const realMark2 = api.live_mark;
     fakeTimers();
     const from = lv.length;
-    api.live_mark_update = (sid, id, cls) => new Promise(() => { lv.push(["edit", cls]); });   // never answered
-    const c1 = markLi2.children[1].onclick();                // A
-    const c2 = markLi2.children[2].onclick();                // B: queued behind it
+    api.live_mark = (sid, at) => new Promise(() => { lv.push(["slow-mark", at]); });   // never answered
+    const c1 = context.liveMark(), c2 = context.liveMark();  // the second queued behind the first
     await settle();
     stopAnswer = { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] };
     const stopC = $("live-record").onclick();
     await settle();
     assert.ok(!lv.slice(from).some((c) => c[0] === "stop"));
-    await advance(15000);                                    // A's time limit
+    await advance(15000);                                    // the first one's time limit
     await Promise.all([c1, c2, stopC]);
     await settle();
     realTimers();
-    assert.deepStrictEqual(lv.slice(from).filter((c) => c[0] === "edit").map((c) => c[1]), ["A"], "B is never sent");
+    assert.strictEqual(lv.slice(from).filter((c) => c[0] === "slow-mark").length, 1, "the second is never sent");
     assert.ok(lv.slice(from).some((c) => c[0] === "stop"));
     const said = $("banner-text").textContent;
-    assert.ok(/These changes may not have been saved: class A for the mark at \d+:\d\d; class B for the mark at \d+:\d\d\. Check them in the player\./
+    assert.ok(/These marks may not have been saved: the mark at \d+:\d\d; the mark at \d+:\d\d\. Check them in the player\./
       .test(said), said);
-    // Astra: closing the window with five edits queued, each answered 14 s after it is sent. The page
-    // has the budget app/main.py gives it (49.5 s of its 52.5 s); everything fits in it: the edits
-    // that make it are saved, the rest is called off and listed for the next start, and the finish
-    // is asked for, all before the window's own finish would take over.
+    // Closing the window with five marks queued, each answered 14 s after it is sent. The page has the
+    // budget app/main.py gives it (49.5 s of its 52.5 s); everything fits in it: the marks that make it
+    // are saved, the rest is called off and listed for the next start, and the finish is asked for,
+    // all before the window's own finish would take over.
+    const slowMarks = (into) => (sid, at) => new Promise((resolve) => {
+      lv.push(["slow-mark", at]);
+      context.setTimeout(() => { into.push(at); resolve({ ok: true, mark: { at, start: Math.max(0, at - 3), end: at, cls: "C" } }); }, 14000);
+    });
+    api.live_mark = realMark2;
     await context.openLive();                                // back to Live (Stop showed the library)
     await settle();
     assert.ok((await $("live-record").onclick()).ok);       // another recording
     await settle();
-    await context.liveMark();
-    await settle();
-    const markLi3 = $("live-marks").children[$("live-marks").children.length - 1];
     fakeTimers();
     context.liveNow = () => clock.now;
     const from3 = lv.length, answered = [];
-    api.live_mark_update = (sid, id, cls, note) => new Promise((resolve) => {
-      lv.push(["edit", cls || note]);
-      context.setTimeout(() => { answered.push(cls || note); resolve({ ok: true, mark: {}, applied: [cls ? "cls" : "note"] }); }, 14000);
-    });
-    markLi3.children[4].value = "louder";
-    const five = [markLi3.children[1].onclick(), markLi3.children[2].onclick(), markLi3.children[3].onclick(),
-                  markLi3.children[4].onchange(), markLi3.children[1].onclick()];
+    api.live_mark = slowMarks(answered);
+    const five = [0, 1, 2, 3, 4].map(() => context.liveMark());
     await settle();
     window.__liveDrained = false;
     const t0 = clock.now;                                    // (the clock goes on from earlier tests)
@@ -3130,34 +3097,26 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     await Promise.all(five);
     assert.ok(stoppedAt !== null && stoppedAt <= 49500, "the finish was asked for in time");
     const reported = context.liveUnsavedNow();
-    assert.deepStrictEqual(answered.slice(0, 2), ["A", "B"]);
-    assert.strictEqual(lv.slice(from3).filter((c) => c[0] === "edit").length, 3, "the called-off edits are never sent");
-    assert.deepStrictEqual(reported.items.length, 3);
-    assert.ok(reported.items[0].startsWith("class C for the mark at") && reported.items[1].startsWith("the note for the mark at") &&
-              reported.items[2].startsWith("class A for the mark at"), JSON.stringify(reported));
+    assert.strictEqual(answered.length >= 2, true);
+    assert.strictEqual(lv.slice(from3).filter((c) => c[0] === "slow-mark").length, 3, "the called-off marks are never sent");
+    assert.strictEqual(reported.items.length, 3);
+    assert.ok(reported.items.every((x) => /^the mark at \d+:\d\d$/.test(x)), JSON.stringify(reported));
     assert.strictEqual(reported.file, "Live x.wav");
-    // Astra: the window closes while a Stop the user pressed is already under way (five edits queued,
-    // 14 s each: on its own it would take over a minute). The close's budget reaches the Stop running
+    // The window closes while a Stop the user pressed is already under way (five marks queued, 14 s
+    // each: on its own it would take over a minute). The close's budget reaches the Stop running
     // (every wait reads the one deadline), so it all ends inside the budget, the rest reported.
     realTimers();
     context.liveNow = () => Date.now();
+    api.live_mark = realMark2;
     await context.openLive();
     await settle();
     assert.ok((await $("live-record").onclick()).ok);
     await settle();
-    await context.liveMark();
-    await settle();
-    const markLi4 = $("live-marks").children[$("live-marks").children.length - 1];
     fakeTimers();
     context.liveNow = () => clock.now;
     const from4 = lv.length, answered4 = [];
-    api.live_mark_update = (sid, id, cls, note) => new Promise((resolve) => {
-      lv.push(["edit", cls || note]);
-      context.setTimeout(() => { answered4.push(cls || note); resolve({ ok: true, mark: {}, applied: [cls ? "cls" : "note"] }); }, 14000);
-    });
-    markLi4.children[4].value = "louder";
-    const five4 = [markLi4.children[1].onclick(), markLi4.children[2].onclick(), markLi4.children[3].onclick(),
-                   markLi4.children[4].onchange(), markLi4.children[1].onclick()];
+    api.live_mark = slowMarks(answered4);
+    const five4 = [0, 1, 2, 3, 4].map(() => context.liveMark());
     await settle();
     const manual = $("live-record").onclick();               // the user's Stop
     await settle();
@@ -3175,12 +3134,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     await closing4;
     await manual;
     await Promise.all(five4);
-    const reported4 = context.liveUnsavedNow();
-    assert.deepStrictEqual(answered4.slice(0, 3), ["A", "B", "C"]);
-    assert.strictEqual(lv.slice(from4).filter((c) => c[0] === "edit").length, 4, "the called-off edit is never sent");
-    sameJSON(reported4.items.map((x) => x.split(" for ")[0]), ["the note", "class A"]);
+    assert.strictEqual(lv.slice(from4).filter((c) => c[0] === "slow-mark").length, 4, "the called-off mark is never sent");
+    assert.strictEqual(context.liveUnsavedNow().items.length, 2);
     context.liveNow = () => Date.now();
     realTimers();
+    api.live_mark = realMark2;
     byId.delete("live-wave"); byId.delete("live-spec");
     $("live-close").onclick();
     await settle();
@@ -3230,27 +3188,6 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     $("live-close").onclick();
     await settle();
     assert.ok(late[2].track.stopped, "closing the view lets the input go");
-  }
-  // The player shows the questions asked while recording: markers and a list.
-  {
-    const qRegions = [];
-    const qWs = new Proxy({ getDuration: () => 30, setTime() {}, play() {} }, { get: (t2, k) => (k in t2 ? t2[k] : anything) });
-    const qReg = new Proxy({ addRegion(o) { qRegions.push(o); return { id: o.id, remove() {} }; }, getRegions: () => [] },
-                           { get: (t2, k) => (k in t2 ? t2[k] : anything) });
-    context.__qws = qWs; context.__qreg = qReg;
-    vm.runInContext("S.ws = __qws; S.regions = __qreg;", context);
-    await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Live q.wav",
-                                 { ok: true, rec: "rq", url: "http://a/q.wav", peaks: [0.1], duration: 30, rate: 48000, channels: 1,
-                                   fp: "fpq", marks: [], reviewed: false, backup: { status: null, detail: "" },
-                                   questions: [{ id: "b", at: 20.5, text: "Can you knock?" }, { id: "a", at: 4, text: "Is anyone here?" }] }, false);
-    await settle();
-    assert.ok(!$("questions-list").hidden);
-    assert.deepStrictEqual(texts($("questions-list")), ["Questions asked:", "Q1 0:04 Is anyone here?", "Q2 0:21 Can you knock?"]);
-    sameJSON(qRegions.filter((o) => o.id.startsWith("q-")).map((o) => [o.id, o.start, o.content]), [["q-0", 4, "Q1"], ["q-1", 20.5, "Q2"]]);
-    vm.runInContext(`setCurrent(null);`, context);
-    assert.ok($("questions-list").hidden);
-    context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
-    vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   }
   // ---- A bridge that stalls: the audio waiting for it is bounded, and Stop never waits forever ----
   const liveTimers = [];

@@ -375,6 +375,26 @@ class StoreTests(unittest.TestCase):
             with self.assertRaises(StoreUnavailable):
                 store.add_mark("fp1", 3.0, 4.0, "B", "")
 
+    def test_questions_a_test_build_left_in_marks_json_are_dropped_like_any_unknown_field(self):
+        # A test build of Live mode kept questions in marks.json; that feature is gone. They are
+        # read past like any unknown field, and the next write leaves them out. Marks are kept.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "recordings": {"fp1": {
+                    "marks": [{"id": "m1", "start": 1.0, "end": 2.0, "cls": "A", "note": "voice", "created": ""}],
+                    "reviewed": False, "name": "Live x.wav", "duration": 10.0, "imported": False,
+                    "backup": {"status": None, "detail": "", "paths": []},
+                    "questions": [{"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""}]}}}, f)
+            store = AppData(d)
+            self.assertEqual(store.problems(), [])
+            self.assertEqual([m["note"] for m in store.marks("fp1")], ["voice"])
+            self.assertNotIn("questions", store.recording("fp1"))
+            store.add_mark("fp1", 3.0, 4.0, "B", "")
+            store.close()
+            with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
+                self.assertNotIn("questions", json.load(f)["recordings"]["fp1"])
+            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
+
     def test_second_appdata_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             first = AppData(d)
@@ -870,176 +890,6 @@ class StoreMultiprocessTests(unittest.TestCase):
                 p.join(timeout=15)
             store.close()
             self.assertTrue(result)
-
-
-
-class QuestionsTests(unittest.TestCase):
-    """Questions asked while recording (Live mode's question log), kept per recording in
-    questions.json: never in marks.json, which an older OpenEVP rewrites with only the
-    fields it knows."""
-
-    def test_added_once_kept_and_never_marks(self):
-        with tempfile.TemporaryDirectory() as d:
-            store = AppData(d)
-            q = store.add_question("fp1", 3.5, " Is anyone here? ", name="x.wav", duration=10.0)
-            self.assertEqual(q["text"], "Is anyone here?")
-            self.assertIsNone(store.add_question("fp1", 3.5, "Is anyone here?"))      # the same: not twice
-            store.add_question("fp1", 1.0, "Who is there?")
-            self.assertEqual([x["at"] for x in store.questions("fp1")], [1.0, 3.5])
-            self.assertEqual(store.marks("fp1"), [])
-            self.assertNotIn("fp1", store.summary(), "questions never count as EVPs")
-            for bad in ((-1, "x"), (11.0, "x"), (2.0, "   "), (float("nan"), "x")):
-                with self.assertRaises(ValueError):
-                    store.add_question("fp1", *bad, duration=10.0)
-            store.close()
-            again = AppData(d)
-            self.assertEqual([x["text"] for x in again.questions("fp1")], ["Who is there?", "Is anyone here?"])
-            again.close()
-
-    def test_kept_out_of_marks_json(self):
-        # marks.json stays exactly the version-1 schema every older OpenEVP reads and rewrites:
-        # rewriting it (as v0.9.10 does on its next mark) cannot drop a question.
-        with tempfile.TemporaryDirectory() as d:
-            store = AppData(d)
-            store.add_mark("fp1", 1.0, 2.0, "A", "voice", name="x.wav", duration=10.0)
-            store.add_question("fp1", 0.5, "Is anyone here?", duration=10.0)
-            store.close()
-            with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
-                marks = json.load(f)
-            self.assertEqual(marks["version"], 1)
-            self.assertNotIn("questions", json.dumps(marks))
-            # An older OpenEVP: it knows marks.json only, and rewrites it from what it read.
-            marks["recordings"]["fp1"]["marks"].append({"id": "old1", "start": 3.0, "end": 4.0, "cls": "B",
-                                                        "note": "", "created": ""})
-            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
-                json.dump(marks, f)
-            again = AppData(d)
-            self.assertEqual([q["text"] for q in again.questions("fp1")], ["Is anyone here?"])
-            self.assertEqual(len(again.marks("fp1")), 2)
-            again.close()
-
-    def test_a_second_window_reads_them_and_cannot_write(self):
-        with tempfile.TemporaryDirectory() as d:
-            first = AppData(d)
-            first.add_question("fp1", 1.0, "Who is there?")
-            second = AppData(d)
-            self.assertTrue(second.read_only)
-            self.assertEqual([q["text"] for q in second.questions("fp1")], ["Who is there?"])
-            with self.assertRaises(StoreReadOnly):
-                second.add_question("fp1", 2.0, "Can you knock?")
-            second.close()
-            first.close()
-            with open(os.path.join(d, "questions.json"), encoding="utf-8") as f:
-                self.assertEqual(len(json.load(f)["recordings"]["fp1"]["questions"]), 1)
-
-    def test_a_bad_or_newer_file_is_set_aside_and_an_unwritable_one_refused(self):
-        for content, tag in (("{not json", "corrupt"), (json.dumps({"version": 2, "recordings": {}}), "future")):
-            with tempfile.TemporaryDirectory() as d:
-                with open(os.path.join(d, "questions.json"), "w", encoding="utf-8") as f:
-                    f.write(content)
-                store = AppData(d)
-                self.assertTrue(any("questions.json" in p for p in store.problems()))
-                self.assertTrue(any(n.startswith(f"questions.json.{tag}-") for n in os.listdir(d)), os.listdir(d))
-                self.assertEqual(store.questions("fp1"), [])
-                store.add_question("fp1", 1.0, "Who is there?")         # starts fresh
-                store.close()
-        with tempfile.TemporaryDirectory() as d:
-            store = AppData(d)
-            with mock.patch.object(store_module, "_write_json", side_effect=OSError("disk full")):
-                with self.assertRaises(StoreUnavailable):
-                    store.add_question("fp1", 1.0, "Who is there?")
-            self.assertEqual(store.questions("fp1"), [])
-            self.assertFalse(os.path.exists(os.path.join(d, "marks.json")))
-            store.close()
-
-
-class LegacyQuestionsTests(unittest.TestCase):
-    """A test build of Live mode kept questions in marks.json. They are moved to questions.json,
-    durably: never dropped, never doubled, crash-safe."""
-
-    LEGACY = {"version": 1, "recordings": {
-        "fp1": {"marks": [{"id": "m1", "start": 1.0, "end": 2.0, "cls": "A", "note": "voice", "created": ""}],
-                "reviewed": False, "name": "Live x.wav", "duration": 10.0, "imported": False,
-                "backup": {"status": None, "detail": "", "paths": []},
-                "questions": [{"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""},
-                              {"id": "q2", "at": 4.0, "text": "Can you knock?", "created": ""}]}}}
-
-    def write(self, d, name, data):
-        with open(os.path.join(d, name), "w", encoding="utf-8") as f:
-            json.dump(data, f)
-
-    def read(self, d, name):
-        with open(os.path.join(d, name), encoding="utf-8") as f:
-            return json.load(f)
-
-    def texts(self, store, fp="fp1"):
-        return [q["text"] for q in store.questions(fp)]
-
-    def test_moved_to_questions_json_then_taken_out_of_marks_json(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.write(d, "marks.json", self.LEGACY)
-            store = AppData(d)
-            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])
-            self.assertEqual(len(store.marks("fp1")), 1)
-            store.close()
-            self.assertEqual([q["id"] for q in self.read(d, "questions.json")["recordings"]["fp1"]["questions"]],
-                             ["q1", "q2"])
-            marks = self.read(d, "marks.json")
-            self.assertNotIn("questions", marks["recordings"]["fp1"])
-            self.assertEqual(marks["version"], 1)
-            again = AppData(d)                                    # idempotent
-            self.assertEqual(self.texts(again), ["Is anyone here?", "Can you knock?"])
-            again.close()
-
-    def test_merged_with_questions_json_without_doubling(self):
-        # Also what a crash between the two writes leaves: the questions in both files.
-        with tempfile.TemporaryDirectory() as d:
-            self.write(d, "marks.json", self.LEGACY)
-            self.write(d, "questions.json", {"version": 1, "recordings": {"fp1": {"name": "", "duration": 10.0, "questions": [
-                {"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""},
-                {"id": "q9", "at": 6.0, "text": "Who is there?", "created": ""}]}}})
-            store = AppData(d)
-            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?", "Who is there?"])
-            store.close()
-            self.assertNotIn("questions", self.read(d, "marks.json")["recordings"]["fp1"])
-            self.assertEqual(len(self.read(d, "questions.json")["recordings"]["fp1"]["questions"]), 3)
-
-    def test_kept_in_marks_json_until_questions_json_is_written(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.write(d, "marks.json", self.LEGACY)
-            real = store_module._write_json
-
-            def no_questions(path, obj):
-                if os.path.basename(path) == "questions.json":
-                    raise OSError("disk full")
-                return real(path, obj)
-            with mock.patch.object(store_module, "_write_json", side_effect=no_questions):
-                store = AppData(d)
-                self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])   # shown from memory
-                self.assertTrue(any("questions.json" in p for p in store.problems()))
-                self.assertEqual(len(self.read(d, "marks.json")["recordings"]["fp1"]["questions"]), 2)
-                store.add_mark("fp1", 5.0, 6.0, "B", "")           # a marks write keeps them
-                marks = self.read(d, "marks.json")["recordings"]["fp1"]
-                self.assertEqual((len(marks["marks"]), len(marks["questions"])), (2, 2))
-                store.close()
-            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
-            store = AppData(d)                                    # the disk works again: moved
-            self.assertEqual(self.texts(store), ["Is anyone here?", "Can you knock?"])
-            self.assertEqual(len(store.marks("fp1")), 2)
-            store.close()
-            self.assertNotIn("questions", self.read(d, "marks.json")["recordings"]["fp1"])
-
-    def test_a_second_window_shows_them_and_writes_nothing(self):
-        with tempfile.TemporaryDirectory() as d:
-            first = AppData(d)
-            self.write(d, "marks.json", self.LEGACY)             # (as if written before this version)
-            second = AppData(d)
-            self.assertTrue(second.read_only)
-            self.assertEqual(self.texts(second), ["Is anyone here?", "Can you knock?"])
-            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
-            self.assertEqual(len(self.read(d, "marks.json")["recordings"]["fp1"]["questions"]), 2)
-            second.close()
-            first.close()
 
 
 if __name__ == "__main__":

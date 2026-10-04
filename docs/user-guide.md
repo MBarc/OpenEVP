@@ -163,24 +163,20 @@ browser's "improvements" (echo cancelling, noise suppression, automatic
 volume) are turned off, because they can wipe out the very sounds you're
 looking for.
 
-### Recording, marking and logging questions
+### Recording and marking
 
 1. Under **Save into**, pick the library folder for the recording. It starts
    on the folder the EVP Library was showing.
 2. Tap **● Record**. The waveform and spectrogram scroll by as it records,
    and the time counts up.
 3. When you hear something, tap **★ MARK** (bottom right, under your thumb),
-   or press **M** on a keyboard. OpenEVP marks the two seconds just before that
-   moment. The mark appears in the **Marks** list beside the waveform (under
-   it on a narrow screen), class C to start with: tap **A**, **B** or **C** to
-   change it, and type what you heard in its note box.
-4. After asking a question during an EVP session, type it in the
-   **Questions** box and tap **Log question** (or press Enter). It's noted at
-   that moment, listed, and marked on the waveform as Q1, Q2 and so on. Later
-   the player shows the questions too, so you can see what was asked just
-   before a reply. Questions are never counted as EVPs.
-5. Tap **■ Stop**. The recording is saved and opens in the player, with its
-   marks and questions, and the EVP Library shows the folder it's in.
+   or press **M** on a keyboard. OpenEVP marks the last three seconds, ending
+   at that moment. A star appears on the waveform and **Marked** shows for a
+   moment. That's all there is to do while recording: every mark is class C,
+   with the note "Marked while recording, not graded yet". Listen to it, grade
+   it and adjust it later in the EVP Library.
+4. Tap **■ Stop**. The recording is saved and opens in the player, with its
+   marks, and the EVP Library shows the folder it's in.
 
 Recordings are named after the moment you pressed Record, for example
 `Live 2026-10-03 21-05-09.wav`. OpenEVP never overwrites a file: if that
@@ -211,16 +207,24 @@ Tap **Listen** to hear the input through your speakers or headphones. It's
 off every time you open the screen, and it's best used with headphones: a
 microphone near speakers picks up its own sound and squeals.
 
-Tap **Enhance what I hear** to show the controls that change what you hear:
-Boost, the Leveler and its strength, Voice filter, Cut rumble, Cut hiss, the
-Hum remover, and Reset. They're the same controls, and the same settings, as
-the player's Enhance tab, so a change here is there too, and the other way
-round. Noise reduction isn't here: it learns the noise from a recording, so
-it's for recordings only.
+While Listen is on, its options show under it:
 
-The spectrogram always shows what you hear. With Enhance on, it shows the
-sound with those settings applied; with Enhance off, the input as it comes in.
-The waveform always shows the input.
+- **Volume**: makes what you hear louder.
+- **Even out loud and quiet**: Off, Light, Medium or Strong. Quiet sounds come
+  up and loud ones go down.
+- **Clean up**: **Voice only** keeps the voice band, **Cut rumble** lowers
+  handling noise, wind and traffic, **Cut hiss** lowers hiss.
+- **Hum**: removes mains hum at 60 Hz (the Americas) or 50 Hz (most other
+  places).
+- **Reset** turns them all off.
+
+They're the player's Enhance settings too, so a change here is there as well,
+and the other way round. Noise reduction isn't here: it learns the noise from
+a recording, so it's for recordings only.
+
+The spectrogram always shows what you hear: with Listen on and any option set,
+the sound as you hear it; otherwise the input as it comes in. The waveform
+always shows the input.
 
 None of this touches the recording. The saved file is always the input as it
 came in.
@@ -716,7 +720,6 @@ this PC in `%APPDATA%\OpenEVP\`. Paste that into File Explorer's address bar to
 get there.
 
 - `marks.json`: your EVP marks;
-- `questions.json`: the questions you logged while recording live;
 - `settings.json`: your settings;
 - `index.json`: OpenEVP's own list of files it has already checked.
 

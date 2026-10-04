@@ -750,14 +750,13 @@ class Api(ShareOps, LibraryOps, LiveOps):
         recording whose backup is not saved (never queued, refused, or failed), so
         the page can offer Retry backup even when no backup event will come."""
         r = self._store.recording(fp) if self._store is not None and fp else None
-        questions = self._store.questions(fp) if self._store is not None and fp else []   # questions.json
         if r is None:
             return {"marks": [], "reviewed": False, "backup": {"status": None, "detail": ""},
-                    "backup_needed": False, "questions": questions}
+                    "backup_needed": False}
         needed = bool(source is not None and source.get("kind") == "device" and r["marks"]
                       and r["backup"]["status"] != "saved")
         return {"marks": r["marks"], "reviewed": r["reviewed"], "backup": r["backup"],
-                "backup_needed": needed, "questions": questions}
+                "backup_needed": needed}
 
     def _entry(self, rec):
         if not isinstance(rec, str):

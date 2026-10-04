@@ -303,87 +303,27 @@ class LiveApiTests(Tmp):
         part = os.path.join(self.lib, "Live 2026-10-03 21-05-09.wav.part")
         self.assertTrue(os.path.isfile(part))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [part])
-        x = tone(3.0)
+        x = tone(5.0)
         self.send(a, sid, x[:RATE], 0)
         m = a.live_mark(sid, 1.0)
         self.assertEqual((m["ok"], m["mark"]["start"], m["mark"]["end"]), (True, 0.0, 1.0))   # cut at the start
         self.send(a, sid, x[RATE:], 1)
-        m2 = a.live_mark(sid, 2.5)
-        self.assertEqual((m2["mark"]["start"], m2["mark"]["end"], m2["mark"]["cls"]), (0.5, 2.5, "C"))
+        m2 = a.live_mark(sid, 4.5)                        # the last 3 seconds, ending now
+        self.assertEqual((m2["mark"]["start"], m2["mark"]["end"], m2["mark"]["cls"]), (1.5, 4.5, "C"))
         self.assertFalse(a.live_chunk(sid, 5, "AAAA")["ok"] and a.recording())   # out of order: stopped and saved
         self.assertFalse(a.recording())
         path = os.path.join(self.lib, "Live 2026-10-03 21-05-09.wav")
         with wave.open(path) as w:
-            self.assertEqual((w.getframerate(), w.getnchannels(), w.getnframes()), (RATE, 1, 3 * RATE))
+            self.assertEqual((w.getframerate(), w.getnchannels(), w.getnframes()), (RATE, 1, 5 * RATE))
         fp = wavinfo.wav_fingerprint(path)
         marks = self.store.marks(fp)
         self.assertEqual([(m["start"], m["end"], m["cls"], m["note"]) for m in marks],
-                         [(0.0, 1.0, "C", live.MARK_NOTE), (0.5, 2.5, "C", live.MARK_NOTE)])
+                         [(0.0, 1.0, "C", live.MARK_NOTE), (1.5, 4.5, "C", live.MARK_NOTE)])
+        self.assertEqual(live.MARK_NOTE, "Marked while recording, not graded yet")
         self.assertFalse(os.path.exists(part) or os.path.exists(part + ".json"))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
         st = os.stat(path)                                # the library never reads it again to list it
         self.assertEqual(self.store.cached_fp(path, st.st_size, st.st_mtime_ns)["fp"], fp)
-
-    def test_questions_and_mark_edits_are_saved_with_the_recording(self):
-        # The live screen's question log and its marks list: questions are stored against the
-        # finished file (never as marks), and a mark's class and note as changed while recording.
-        a = self.api()
-        r = self.start(a)
-        sid = r["session"]
-        self.assertGreater(r["left_seconds"], 0)                 # the status strip's time left
-        x = tone(4.0)
-        self.send(a, sid, x[:2 * RATE], 0)
-        self.assertEqual(a.live_question(sid, 1.25, "  Is anyone here?  ")["question"]["text"], "Is anyone here?")
-        m = a.live_mark(sid, 1.8)["mark"]
-        self.assertEqual(m["id"], 0)
-        self.assertTrue(a.live_mark_update(sid, 0, cls="A", note="a whisper")["ok"])
-        for bad in ((5, "A", None), (0, "D", None), (0, None, "x" * 501), ("0", "A", None)):
-            self.assertFalse(a.live_mark_update(sid, *bad)["ok"], bad)
-        self.assertFalse(a.live_question(sid, 1.0, "   ")["ok"])
-        status = self.send(a, sid, x[2 * RATE:], 1)
-        self.assertIn("left_seconds", status)
-        self.assertTrue(a.live_question(sid, 3.5, "Can you knock?")["ok"])
-        stop = a.live_stop(sid)
-        path = os.path.join(self.lib, stop["files"][0]["name"])
-        fp = wavinfo.wav_fingerprint(path)
-        self.assertEqual([(q["at"], q["text"]) for q in self.store.questions(fp)],
-                         [(1.25, "Is anyone here?"), (3.5, "Can you knock?")])
-        marks = self.store.marks(fp)
-        self.assertEqual([(m["cls"], m["note"]) for m in marks], [("A", "a whisper")])
-        self.assertEqual(self.store.summary()[fp]["A"], 1, "questions never count as EVPs")
-        self.assertEqual(len(stop["player"]["questions"]), 2)    # the player shows them
-        self.assertEqual(len(a.get_marks(stop["player"]["rec"])["questions"]), 2)
-        self.assertFalse(a.live_question(sid, 1.0, "after Stop")["ok"])
-
-    def test_a_late_mark_edit_never_undoes_a_newer_one(self):
-        # The page numbers its edits; one that arrives after a newer edit of the same mark
-        # (a call that timed out, then got through) is ignored.
-        a = self.api()
-        sid = self.start(a)["session"]
-        self.send(a, sid, tone(3.0), 0)
-        a.live_mark(sid, 1.0)
-        a.live_mark(sid, 2.0)
-        self.assertTrue(a.live_mark_update(sid, 0, cls="B", seq=2)["ok"])
-        self.assertEqual(a.live_mark_update(sid, 0, cls="A", seq=1), {"ok": True, "stale": True})
-        self.assertTrue(a.live_mark_update(sid, 1, cls="A", seq=1)["ok"])      # another mark: its own order
-        self.assertFalse(a.live_mark_update(sid, 0, cls="A", seq="3")["ok"])
-        stop = a.live_stop(sid)
-        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, stop["files"][0]["name"]))
-        self.assertEqual([m["cls"] for m in self.store.marks(fp)], ["B", "A"])
-
-    def test_edit_numbers_are_kept_per_field(self):
-        # Astra: a class edit (seq 1) that arrives after a note edit (seq 2) still applies: nothing
-        # newer changed the class. Both changes end in the recording.
-        a = self.api()
-        sid = self.start(a)["session"]
-        self.send(a, sid, tone(3.0), 0)
-        a.live_mark(sid, 2.0)
-        self.assertEqual(a.live_mark_update(sid, 0, note="get out", seq=2)["applied"], ["note"])
-        self.assertEqual(a.live_mark_update(sid, 0, cls="B", seq=1)["applied"], ["cls"])
-        self.assertEqual(a.live_mark_update(sid, 0, note="older", seq=1), {"ok": True, "stale": True})
-        stop = a.live_stop(sid)
-        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, stop["files"][0]["name"]))
-        self.assertEqual([(m["cls"], m["note"]) for m in self.store.marks(fp)], [("B", "get out")])
 
     def test_a_published_wav_unreadable_just_now_is_tried_again(self):
         # Recovery could not read the published WAV (a sharing violation, say): the journal and
@@ -410,41 +350,23 @@ class LiveApiTests(Tmp):
 
     def test_unsaved_changes_logged_at_close_are_said_once_at_the_next_start(self):
         a = self.api()
-        self.assertTrue(a.log_unsaved({"file": "Live x.wav", "items": ["the question \"Who?\"", 3]}))
+        self.assertTrue(a.log_unsaved({"file": "Live x.wav", "items": ["the mark at 0:02", 3]}))
         self.assertTrue(a.log_unsaved({"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}))
         got = self.api().live_recover()["unsaved"]
-        self.assertEqual(got, [{"file": "Live x.wav", "items": ["the question \"Who?\""]},
+        self.assertEqual(got, [{"file": "Live x.wav", "items": ["the mark at 0:02"]},
                                {"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}])
         self.assertEqual(self.api().live_recover()["unsaved"], [])
 
-    def test_questions_survive_a_crash(self):
-        a = self.api()
-        sid = self.start(a)["session"]
-        self.send(a, sid, tone(6.0), 0)
-        a.live_question(sid, 2.0, "Who is there?")
-        s = a._live
-        s.piece.writer._f.close()
-        s.pins.close()
-        a._live = None
-        b = self.api()
-        got = b.live_recover()["recovered"][0]
-        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, got["name"]))
-        self.assertEqual([q["text"] for q in self.store.questions(fp)], ["Who is there?"])
-        b.live_recover()
-        self.assertEqual(len(self.store.questions(fp)), 1)
-
-    def test_metadata_the_store_refuses_keeps_the_journal_until_it_is_stored(self):
-        # Astra: a failed question save must not lose the journal. The audio is saved, the user is
-        # told, the sidecar and the recovery entry stay, and the next start stores what is missing.
+    def test_marks_the_store_refuses_keep_the_journal_until_they_are_stored(self):
+        # A failed mark save must not lose the journal. The audio is saved, the user is told, the
+        # sidecar and the recovery entry stay, and the next start stores what is missing.
         from app.store import StoreUnavailable
-        for seconds, broken in ((4.0, "add_question"), (5.0, "add_mark")):   # other audio: another fp
+        for seconds, broken in ((5.0, "add_mark"),):
             with self.subTest(broken=broken):
                 a = self.api()
                 sid = self.start(a)["session"]
                 self.send(a, sid, tone(seconds), 0)
-                a.live_mark(sid, 2.0)
-                a.live_mark_update(sid, 0, cls="A", note="a whisper")
-                a.live_question(sid, 1.0, "Is anyone here?")
+                a.live_mark(sid, 4.0)
                 with mock.patch.object(self.store, broken, side_effect=StoreUnavailable("Could not save it.")):
                     stop = a.live_stop(sid)
                 self.assertTrue(stop["ok"])
@@ -463,11 +385,11 @@ class LiveApiTests(Tmp):
                 self.assertTrue(any(name in f and "will try again" in f for f in r["failed"]), r)
                 self.assertTrue(os.path.isfile(path + ".part.json"))
                 self.assertEqual(len(self.store.get_setting(live.PARTS_SETTING)), 1)
-                # Then it works: every mark (with its edit) and question is stored, once; the journal goes.
+                # Then it works: every mark is stored, once; the journal goes.
                 r = self.api().live_recover()
                 self.assertEqual([(f["name"], f["marks"]) for f in r["recovered"]], [(name, 1)])
-                self.assertEqual([(m["cls"], m["note"]) for m in self.store.marks(fp)], [("A", "a whisper")])
-                self.assertEqual([q["text"] for q in self.store.questions(fp)], ["Is anyone here?"])
+                self.assertEqual([(m["start"], m["end"], m["cls"], m["note"]) for m in self.store.marks(fp)],
+                                 [(1.0, 4.0, "C", live.MARK_NOTE)])
                 self.assertFalse(os.path.exists(path + ".part.json"))
                 self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
                 self.assertEqual(self.api().live_recover()["recovered"], [])
@@ -1070,7 +992,7 @@ class LiveApiTests(Tmp):
         self.assertFalse(os.path.exists(part + ".json"))
         # Run again (say the crash came after some marks were stored): nothing is doubled.
         meta = {"name": "Live 2026-05-06 07-08-09.wav", "rate": RATE, "channels": 1, "published": path, "fp": fp,
-                "frames": 3 * RATE, "marks": [{"start": 0.5, "end": 2.5, "cls": "C", "note": live.MARK_NOTE}]}
+                "frames": 3 * RATE, "marks": [{"start": 0.0, "end": 2.5, "cls": "C", "note": live.MARK_NOTE}]}
         with open(part + ".json", "w", encoding="utf-8") as f:
             json.dump(meta, f)
         self.store.set_setting(live.PARTS_SETTING, [part])
@@ -1405,7 +1327,7 @@ class CloseDrainTests(unittest.TestCase):
         import json as js
         from app import main
         order = []
-        listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}
+        listed = {"file": "Live x.wav", "items": ["the mark at 0:04"]}
 
         class Page(self.Window):
             def evaluate_js(self, code):
@@ -1432,7 +1354,7 @@ class CloseDrainTests(unittest.TestCase):
         import time as clock
         from app import main
         never = threading.Event()
-        listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}
+        listed = {"file": "Live x.wav", "items": ["the mark at 0:04"]}
         order = []
 
         class Page(self.Window):
@@ -1493,7 +1415,7 @@ class CloseDrainTests(unittest.TestCase):
                         threading.Event().wait()
                     threading.Thread(target=stuck_write, daemon=True).start()
                     held.wait()
-                    listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04", "the question \\"Who?\\""]}
+                    listed = {"file": "Live x.wav", "items": ["the mark at 0:04", "the mark at 0:07"]}
                     class Window:
                         def evaluate_js(self, js):
                             if js == main._UNSAVED_JS:
@@ -1516,7 +1438,7 @@ class CloseDrainTests(unittest.TestCase):
             self.assertIn("closing without the last write", run.stderr)          # logged
             with open(os.path.join(d, "appdata", live.UNSAVED_LOG), encoding="utf-8") as f:
                 self.assertEqual(json.loads(f.read().splitlines()[0])["items"],
-                                 ["class B for the mark at 0:04", 'the question "Who?"'])
+                                 ["the mark at 0:04", "the mark at 0:07"])
             # The next start (the folder lock was let go): said once.
             store = AppData(os.path.join(d, "appdata"))
             try:
