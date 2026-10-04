@@ -2559,22 +2559,30 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("leveler").checked = true; $("leveler").onchange();
   assert.ok(ctxLive.nodes.some((n) => n.kind === "compressor" && stream.outs.length === 3), "the Leveler is heard");
   assert.strictEqual(stream.outs[0], tap);
-  // Show what I hear: the spectrogram reads the enhanced signal (remembered); the waveform stays raw.
-  assert.ok(!$("live-heard").checked);
-  $("live-heard").checked = true; $("live-heard").onchange();
-  await settle();
-  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { heard: true }]);
+  // The spectrogram always shows what is heard: with Enhance on (Boost, the Leveler), the enhanced
+  // signal, read at the end of the chain; the waveform (and the saved file) stay raw. No toggle for it.
+  assert.ok(!html.includes("live-heard") && !html.includes("Show what I hear"));
   const heardA = vm.runInContext("LV.heardAnalyser", context);
-  assert.ok(heardA && vm.runInContext("specAnalyser() === LV.heardAnalyser", context));
+  assert.ok(heardA && vm.runInContext("LV.enhanced && specAnalyser() === LV.heardAnalyser", context));
   assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA) && n !== stream), "fed from the end of the chain");
-  // Listen off, Show what I hear on: the chain still runs for the spectrogram, nothing to the speakers.
+  assert.strictEqual(stream.outs[1].kind, "analyser", "the raw analyser still takes the source");
+  // Listen off, Enhance on: the chain still runs for the spectrogram, nothing to the speakers.
   $("live-monitor").checked = false; $("live-monitor").onchange();
   assert.ok(!ctxLive.nodes.some((n) => n.outs.some((o) => o.kind === "destination")), "nothing is heard");
   assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA)));
-  $("live-heard").checked = false; $("live-heard").onchange();
+  assert.ok(vm.runInContext("specAnalyser() === LV.heardAnalyser", context));
+  // Enhance off: the spectrogram is the input as it comes in, and with Listen off no chain at all.
+  $("boost").value = "0"; $("boost").oninput();
+  $("leveler").checked = false; $("leveler").onchange();
   await settle();
-  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "with neither, no chain at all");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "Listen off, Enhance off: no chain");
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context));
+  // Listen on with Enhance off: heard straight, and the spectrogram is the input.
+  $("live-monitor").checked = true; $("live-monitor").onchange();
   assert.ok(vm.runInContext("specAnalyser() === LV.analyser", context));
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  // Nothing about it is stored: the Live settings never carry it.
+  assert.ok(!lv.some((c) => c[0] === "set" && "heard" in c[1]));
   // Settings shared the other way: the player's Enhance (setEnhance) is what Live hears.
   vm.runInContext(`setEnhance({ boost: 0, leveler: false, hum: "60" });`, context);
   $("live-monitor").checked = true; $("live-monitor").onchange();
@@ -2982,9 +2990,9 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     await settle();
     assert.ok(!$("live").classList.contains("field"));
     sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { field: false }]);
-    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, Show what I hear,
+    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen,
     // Enhance what I hear, the night screen, Suggest cuts; and the Enhance options inside.
-    for (const id of ["live-monitor-label", "live-heard-label", "live-enhance-label", "live-field-label"]) {
+    for (const id of ["live-monitor-label", "live-enhance-label", "live-field-label"]) {
       assert.ok(html.includes(`<label class="toggle" id="${id}"`), id);
     }
     assert.ok(html.includes('<label class="toggle" title="After Stop, suggest cuts'));

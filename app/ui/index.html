@@ -131,13 +131,12 @@
       <span id="live-file"></span>
       <span id="live-toggles">
       <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones, with the Enhance settings. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
-      <label class="toggle" id="live-heard-label" title="Draw the spectrogram of what you hear, with the Enhance settings applied, instead of the input as it comes in. The waveform and the saved file stay the input as it came in."><input type="checkbox" id="live-heard"> Show what I hear</label>
       <label class="toggle" id="live-enhance-label" title="Show the Enhance controls: they change only what you hear"><input type="checkbox" id="live-enhance-open"> Enhance what I hear</label>
       </span>
       <button id="live-mark" type="button" disabled title="Mark this moment as an EVP (or press M). It becomes a 2-second mark ending now. Set its class and note in the list.">★ MARK</button>
     </div>
     <div id="live-enhance-box" hidden>
-      <p class="live-enhance-note">These change only what you hear while listening, and the spectrogram with Show what I hear. The saved recording is always the input as it came in. They are the player's Enhance settings, so a change here changes them there too. Noise reduction is for recordings only.</p>
+      <p class="live-enhance-note">These change what you hear while listening and what the spectrogram shows. The waveform and the saved recording always stay the input as it came in. They are the player's Enhance settings, so a change here changes them there too. Noise reduction is for recordings only.</p>
       <div id="live-enhance-panel"></div>
     </div>
     <p id="live-status" role="status"></p>

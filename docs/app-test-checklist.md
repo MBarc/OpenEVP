@@ -307,10 +307,11 @@ test opens a real input):
     there (no noise reduction). Set Boost +12 dB: louder in the headphones at
     once; the saved file is not louder (compare its waveform with one recorded
     without). Close the Live view: the player's Enhance tab shows +12 dB too;
-    change it there, go back to Live: the same. Tick **Show what I hear** with Hum
-    60 Hz on: the hum lines go from the spectrogram, the waveform is unchanged;
-    reopen OpenEVP: it is still ticked. Resize the window while recording: the
-    waveform and spectrogram stay.
+    change it there, go back to Live: the same. With a hum in the input, turn on
+    Hum 60 Hz: the hum lines go from the spectrogram at once (it always shows
+    what is heard), the waveform is unchanged; turn Enhance off (Reset): the hum
+    lines come back. There is no Show what I hear button. Resize the window while
+    recording: the waveform and spectrogram stay.
 49. **Windows blocking the microphone.** In Settings, Privacy & security,
     Microphone, turn off "Let desktop apps access your microphone"; open Record
     live: OpenEVP says Windows is blocking it and **Open microphone settings**

@@ -218,8 +218,8 @@ the player's Enhance tab, so a change here is there too, and the other way
 round. Noise reduction isn't here: it learns the noise from a recording, so
 it's for recordings only.
 
-Tap **Show what I hear** to draw the spectrogram of what you hear, with those
-settings applied, instead of the input as it comes in. OpenEVP remembers it.
+The spectrogram always shows what you hear. With Enhance on, it shows the
+sound with those settings applied; with Enhance off, the input as it comes in.
 The waveform always shows the input.
 
 None of this touches the recording. The saved file is always the input as it

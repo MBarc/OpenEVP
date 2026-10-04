@@ -99,8 +99,8 @@ input -> getUserMedia (EC/NS/AGC off, channelCount ideal 2)
             (x * 32768, rounded: exact for a 16-bit source), batches of 2048 frames
             with peak and sum of squares -> port.postMessage (transferred)
          -> AnalyserNode (fftSize 2048, -100..-25 dB) -> spectrogram
-         -> [Listen or Show what I hear] -> Enhance nodes (the player's settings)
-               -> destination (Listen, off by default) / a second AnalyserNode (Show what I hear)
+         -> [Listen, or Enhance on] -> Enhance nodes (the player's settings)
+               -> destination (Listen, off by default) / a second AnalyserNode (Enhance on)
 page:  batches -> meter + waveform columns; while recording, ~0.5 s of PCM ->
        base64 -> a queue -> one sender: Api.live_chunk(session, seq, data)
 backend (app/live.py): seq checked, base64 decoded, disk space checked,
@@ -336,11 +336,13 @@ candidates take milliseconds), cancellable throughout:
   either place is the other's too (`setEnhance` also calls `liveEnhanceChanged`).
   Noise reduction (learnt from a recording) and "Exports enhanced" are hidden there;
   Cut hiss follows the input's rate (`enhRate` asks `liveRate`). The chain
-  (`applyMonitor`) is built only while Listen or Show what I hear is on: the source
-  goes to the worklet and the raw analyser directly (the saved file and the waveform
-  are always the input) and, through the chain, to the speakers (Listen) and to a
-  second analyser (Show what I hear, remembered as the setting `live.heard`), which
-  the spectrogram then reads. The nodes are Web Audio's own (biquads, compressor,
+  (`applyMonitor`) is built only while Listen is on or Enhance changes anything (its
+  graph has stages): the source goes to the worklet and the raw analyser directly
+  (the saved file and the waveform are always the input) and, through the chain, to
+  the speakers (Listen) and, while Enhance is on, to a second analyser. The
+  spectrogram always shows what is heard (`specAnalyser`): that second analyser
+  while Enhance is on, the raw one while it is off. There is no setting for it (an
+  old `live.heard` from a test build is ignored and not written again). The nodes are Web Audio's own (biquads, compressor,
   gain, wave shaper): a few, rebuilt only when a setting changes.
 - If a saved Live recording cannot be opened in the player, Stop's result says
   why (`player_error`) and the page shows it; the file is saved either way.
@@ -359,7 +361,7 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
   below that: `liveLayout()` sets `#live.wide` from a ResizeObserver, so it is
   testable without a layout engine.
 - **Touch:** every button, select and field on this screen is at least 48 px;
-  every on/off choice (Listen, Show what I hear, Enhance what I hear, Night
+  every on/off choice (Listen, Enhance what I hear, Night
   screen, Suggest cuts, and the Enhance options inside the borrowed panel) is a
   checkbox drawn as a big toggle button (CSS `label:has(input:checked)`, the
   checkbox kept for keyboards and screen readers). Record is bottom left, MARK

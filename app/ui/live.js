@@ -13,7 +13,7 @@ const LV = {
   settings: null,                        // live_settings(): input, split, import
   mode: "live",                          // "live" or "import"
   stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0, gen: 0,
-  heardAnalyser: null,                   // the spectrogram of what is heard (Show what I hear)
+  heardAnalyser: null, enhanced: false,  // the spectrogram of what is heard, while Enhance changes it
   rate: 0, channels: 0, deviceId: "", label: "", devices: [],
   rec: null,                             // the recording (see startRecording)
   flushId: 0, flushWaiters: new Map(),   // worklet flushes waiting for their answer
@@ -75,7 +75,6 @@ async function openLive() {
   $("live-gap").value = String(LV.settings.split > 0 ? LV.settings.split : 3);
   $("live-gap").disabled = !$("live-split").checked;
   $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
-  $("live-heard").checked = !!LV.settings.heard;
   $("live-field").checked = !!LV.settings.field;
   applyField();
   $("live-enhance-box").hidden = !$("live-enhance-open").checked;
@@ -359,7 +358,7 @@ function closeInput(keepSeq = false) {
   if (LV.node) { LV.node.port.onmessage = null; try { LV.node.disconnect(); } catch (e) { /* gone */ } }
   if (LV.stream) for (const t of LV.stream.getTracks()) { t.onended = null; t.stop(); }
   if (LV.ctx) { try { LV.ctx.close(); } catch (e) { /* gone */ } }
-  Object.assign(LV, { stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], heardAnalyser: null });
+  Object.assign(LV, { stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], heardAnalyser: null, enhanced: false });
   LV.meter.peak = LV.meter.rms = LV.meter.held = 0;
   if (LV.raf) { cancelAnimationFrame(LV.raf); LV.raf = 0; }
 }
@@ -375,9 +374,11 @@ async function inputEnded() {
 
 // ---- listening ----
 // What is heard: the input through the Enhance chain (the player's settings), to the speakers with
-// Listen, and to a second analyser with Show what I hear. The capture never goes through it: the
-// worklet and the raw analyser take the source directly, so the saved file and the waveform stay
-// the input as it came in. With neither on, no chain exists at all (no CPU spent on it).
+// Listen. The spectrogram always shows what is heard: while Enhance changes anything, it reads a
+// second analyser at the end of the chain; with Enhance off, the input itself. The capture never
+// goes through the chain: the worklet and the raw analyser take the source directly, so the saved
+// file and the waveform stay the input as it came in. With Listen off and Enhance off, no chain
+// exists at all (no CPU spent on it).
 function applyMonitor() {
   const ctx = LV.ctx;
   if (!ctx) return;
@@ -385,14 +386,15 @@ function applyMonitor() {
   LV.monitor = [];
   try { LV.src.disconnect(); } catch (e) { /* not connected */ }
   LV.src.connect(LV.node); LV.src.connect(LV.analyser);            // the capture: always raw
-  const listen = $("live-monitor").checked, heard = $("live-heard").checked;
-  if (!listen && !heard) return;
+  const listen = $("live-monitor").checked;
   const stages = S.enh.settings ? enhanceGraph(S.enh.settings, ctx.sampleRate) : [];
+  LV.enhanced = stages.length > 0;                    // Enhance changes what is heard
+  if (!listen && !LV.enhanced) return;
   LV.monitor = stages.flatMap((st) => makeNodes(ctx, st));
   let at = LV.src;
   for (const n of LV.monitor) { at.connect(n); at = n; }
   if (listen) at.connect(ctx.destination);
-  if (heard) {
+  if (LV.enhanced) {
     if (!LV.heardAnalyser) {
       LV.heardAnalyser = ctx.createAnalyser();
       LV.heardAnalyser.fftSize = 2048; LV.heardAnalyser.smoothingTimeConstant = 0;
@@ -402,8 +404,8 @@ function applyMonitor() {
   }
 }
 
-// The analyser the spectrogram reads: what is heard with Show what I hear, else the input.
-function specAnalyser() { return $("live-heard").checked && LV.heardAnalyser ? LV.heardAnalyser : LV.analyser; }
+// The analyser the spectrogram reads: what is heard. Enhanced while Enhance changes anything, else the input.
+function specAnalyser() { return LV.enhanced && LV.heardAnalyser ? LV.heardAnalyser : LV.analyser; }
 
 // ---- audio from the worklet: meter, waveform, and the chunks a recording sends ----
 function liveAudio(m) {
@@ -1334,7 +1336,6 @@ function setupLive() {
   $("live-split").onchange = splitChanged;
   $("live-gap").onchange = splitChanged;
   $("live-monitor").onchange = () => { applyMonitor(); renderLive(); };
-  $("live-heard").onchange = () => { applyMonitor(); saveLive({ heard: $("live-heard").checked }); };
   $("live-field").onchange = () => { applyField(); saveLive({ field: $("live-field").checked }); };
   $("live-enhance-open").onchange = () => { $("live-enhance-box").hidden = !$("live-enhance-open").checked; };
   $("live-sound-settings").onclick = () => api().open_sound_settings();

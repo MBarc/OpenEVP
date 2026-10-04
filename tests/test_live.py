@@ -473,6 +473,16 @@ class LiveApiTests(Tmp):
                 self.assertEqual(self.api().live_recover()["recovered"], [])
                 os.remove(path)
 
+    def test_an_old_show_what_i_hear_setting_is_ignored(self):
+        # A test build stored "heard" (the removed Show what I hear): read past, never written again.
+        self.store.set_setting(live.LIVE_SETTING, {"split": 4, "heard": True, "field": True})
+        a = self.api()
+        got = a.live_settings()
+        self.assertNotIn("heard", got)
+        self.assertEqual((got["split"], got["field"]), (4, True))
+        self.assertTrue(a.set_live_settings({"split": 5})["ok"])
+        self.assertNotIn("heard", self.store.get_setting(live.LIVE_SETTING))
+
     def test_live_settings_remember_the_night_screen(self):
         a = self.api()
         self.assertFalse(a.live_settings()["field"])
@@ -1135,17 +1145,16 @@ class LiveApiTests(Tmp):
     def test_settings_are_remembered(self):
         a = self.api()
         self.assertEqual((a.live_settings()["split"], a.live_settings()["input"]), (3.0, None))
-        self.assertFalse(a.live_settings()["heard"])
-        r = a.set_live_settings({"input": {"id": "abc", "label": "USB Audio (Line)"}, "split": 5, "import": True,
-                                 "heard": True})
+        self.assertNotIn("heard", a.live_settings())        # the spectrogram always shows what is heard
+        r = a.set_live_settings({"input": {"id": "abc", "label": "USB Audio (Line)"}, "split": 5, "import": True})
         self.assertTrue(r["ok"])
         b = self.api()
         got = b.live_settings()
-        self.assertEqual((got["input"], got["split"], got["import"], got["heard"]),
-                         ({"id": "abc", "label": "USB Audio (Line)"}, 5, True, True))
+        self.assertEqual((got["input"], got["split"], got["import"]),
+                         ({"id": "abc", "label": "USB Audio (Line)"}, 5, True))
         self.assertTrue(b.set_live_settings({"split": 0})["ok"])
         self.assertEqual(b.live_settings()["split"], 0)
-        for bad in ({"split": 0.1}, {"split": True}, {"input": {"id": 1}}, {"import": "yes"}, {"heard": 1}, {"other": 1}, []):
+        for bad in ({"split": 0.1}, {"split": True}, {"input": {"id": 1}}, {"import": "yes"}, {"heard": True}, {"other": 1}, []):
             self.assertFalse(b.set_live_settings(bad)["ok"], bad)
 
 
