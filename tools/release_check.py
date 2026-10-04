@@ -97,6 +97,7 @@ Record live and Import (docs/app-test-checklist.md 47-60):
 Updater:
   [ ] From an installed v0.7.2, "Check for updates" finds this release, downloads it
       (signature verified) and installs it; the app restarts on the new version.
+      It reopens only after setup's progress window has closed (driver step done).
 """
 
 
