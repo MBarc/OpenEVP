@@ -87,9 +87,18 @@ Name: "{autoprograms}\OpenEVP"; Filename: "{app}\OpenEVP.exe"; AppUserModelID: "
 Name: "{autodesktop}\OpenEVP"; Filename: "{app}\OpenEVP.exe"; AppUserModelID: "MBarc.OpenEVP"; Tasks: desktopicon
 
 [Run]
+; Both entries must be postinstall: Inno runs [Run] entries without it BEFORE CurStepChanged(ssPostInstall),
+; i.e. while the WebView2 and driver steps below have not run yet. postinstall entries run after
+; ssPostInstall (their Check is evaluated then too), when Setup finishes: in a normal install the ones
+; ticked on the last page, in a silent install every one that is not "unchecked" (Inno 6.7 source:
+; Setup.MainForm.pas, TMainForm.Install/Finish). tests/test_installer.py pins this.
 Filename: "{app}\OpenEVP.exe"; Description: "Start OpenEVP"; Flags: postinstall nowait skipifsilent; Check: HasWebView2
-; An update started from the app (/SILENT /RELAUNCH) reopens it, as the signed-in user, not as admin.
-Filename: "{app}\OpenEVP.exe"; Flags: nowait runasoriginaluser skipifnotsilent; Check: HasWebView2 and IsRelaunch
+; An update started from the app (/SILENT /RELAUNCH) reopens it, as the signed-in user, not as admin,
+; once setup has completely finished. It also reopens when the driver step returned 3010 (restart
+; wanted): the app works without the driver, and the update runs with /SUPPRESSMSGBOXES /NORESTART, so
+; not reopening would leave the user with no app and no message. (NeedRestart below cannot stop it:
+; Inno calls NeedRestart before ssPostInstall, so it never sees DriverWantsRestart.)
+Filename: "{app}\OpenEVP.exe"; Flags: postinstall nowait runasoriginaluser skipifnotsilent; Check: HasWebView2 and IsRelaunch
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\driver-setup"
