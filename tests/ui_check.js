@@ -13,6 +13,18 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const assert = require("assert");
+// If the run stops before its end (something it waited for never happened, so Node runs out of work
+// and exits quietly), say so and fail, with the last check that passed.
+let lastAssert = "", finished = false;
+for (const k of ["ok", "strictEqual", "deepStrictEqual", "notStrictEqual", "throws", "rejects"]) {
+  const f = assert[k];
+  assert[k] = (...a) => { lastAssert = (new Error().stack.split(String.fromCharCode(10))[2] || "").trim(); return f(...a); };
+}
+process.on("beforeExit", () => {
+  if (finished) return;
+  console.error(`ui_check stopped before its end: something it waited for never happened. Last check passed ${lastAssert}`);
+  process.exitCode = 1;
+});
 
 // ---- a small DOM: enough of it for app.js ------------------------------------------
 class ClassList {
@@ -3441,5 +3453,6 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("live-close").onclick();
   await settle();
   assert.strictEqual(vm.runInContext("S.view", context), "library");
+  finished = true;
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });
