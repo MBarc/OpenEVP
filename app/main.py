@@ -315,6 +315,7 @@ _SMOKE_STATE_JS = """JSON.stringify({
   style_css: Array.from(document.styleSheets).some(s => (s.href || "").endsWith("/style.css") && s.cssRules.length > 0),
   bridge: !!(window.pywebview && window.pywebview.api && window.pywebview.api.capabilities),
   version_shown: (document.getElementById("version") || {}).textContent || "",
+  started: window.__openevpStarted === true,
   smoke: window.__openevpSmoke === undefined ? null : window.__openevpSmoke
 })"""
 
@@ -410,7 +411,7 @@ def _smoke_check(window, report, home=None):
             if state["bridge"] and not started:
                 window.evaluate_js(_SMOKE_START_JS % json.dumps(files))
                 started = True
-            elif started and state["smoke"] and state["version_shown"] == want_version:
+            elif started and state["smoke"] and state["version_shown"] == want_version and state["started"]:
                 break
             time.sleep(0.2)
         report["page"] = {k: v for k, v in state.items() if k != "smoke"}
@@ -422,6 +423,8 @@ def _smoke_check(window, report, home=None):
                           ("bridge", "the JS bridge (window.pywebview.api)")):
             if not state.get(key):
                 problems.append(f"{what} did not load in the page")
+        if not state.get("started"):
+            problems.append("the page did not finish starting (an error stopped its startup)")
         if state.get("version_shown") != want_version:
             problems.append(f"app.js did not start up through the bridge (version shown "
                             f"{state.get('version_shown')!r}, not {want_version!r})")

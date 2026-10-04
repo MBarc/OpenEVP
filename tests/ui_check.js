@@ -2259,7 +2259,23 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("tab-view").onclick();
   context.__ws = wsBeforeTabs;
   vm.runInContext("S.ws = __ws;", context);
+  assert.strictEqual(window.__openevpStarted, true, "the startup ran to its end");
   // ---- The night screen: before the first paint, and on every view ----
+  // At startup the theme is applied before the Live screen is set up (app.js setupNight runs before
+  // setupLive): redrawing scopes that have no history yet must be a no-op, never an error that would
+  // stop the rest of the start. (A real canvas, as in the browser.)
+  {
+    const realWave = byId.get("live-wave");
+    byId.set("live-wave", { id: "live-wave", tagName: "CANVAS", clientWidth: 300, clientHeight: 80, width: 300, height: 80, style: {},
+                            getContext: () => ({ clearRect() {}, fillRect() {}, fillText() {} }) });
+    vm.runInContext("var __hist = LV.hist; LV.hist = null;", context);
+    try {
+      vm.runInContext("applyNight(true); applyNight(false);", context);
+    } finally {
+      vm.runInContext("LV.hist = __hist;", context);
+      if (realWave) byId.set("live-wave", realWave); else byId.delete("live-wave");
+    }
+  }
   assert.ok(runNightScript(html, "?night=1") && !runNightScript(html, "") && !runNightScript(html, "?nightly=1"));
   {
     const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");

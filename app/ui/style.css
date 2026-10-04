@@ -12,12 +12,12 @@
 /* The night screen (app.js applyNight; index.html sets html.night before these styles load): the whole
    app dark red on black, for the dark. Contrast against the black: text 5.9:1, muted 4.9:1, accent 4.8:1;
    on an accent fill the text is dark (4.8:1). Mark classes: red, amber and a dusky rose, with their letters. */
-html.night { color-scheme: dark; scrollbar-color: #4a2020 #0a0505;
+html.night { color-scheme: dark; scrollbar-color: #4a2020 #0a0505; accent-color: #d05050;
              --bg: #0a0505; --panel: #140909; --text: #d36b6b; --muted: #c06060; --line: #3a1a1a;
              --accent: #d05050; --accent-soft: #3a1414; --warn-bg: #2a1405; --warn: #e0a060;
              --ok-bg: #1f0b0b; --ok: #d36b6b; --on-accent: #0a0505;
              --mark-a: rgba(235, 80, 80, .42); --mark-b: rgba(215, 140, 40, .38); --mark-c: rgba(150, 70, 110, .45); }
-html.night body { background: var(--bg); }
+html.night body { background: var(--bg); font-variant-emoji: text; }   /* emoji icons as text, in the theme's red */
 html.night ::selection { background: #3a1414; color: #e08080; }
 :where(html.night) :is(button, input, select, textarea) { background-color: var(--panel); color: var(--text); border-color: var(--line); }
 html.night ::-webkit-scrollbar { width: 12px; height: 12px; background: #0a0505; }

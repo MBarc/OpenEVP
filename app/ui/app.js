@@ -128,6 +128,7 @@ window.addEventListener("pywebviewready", async () => {
   poll();
   checkForUpdate(false);                   // quietly: only speaks up if there is an update
   if (S.caps.marks && !S.caps.marks_read_only) liveRecover();   // recordings a crash cut off (live.js)
+  window.__openevpStarted = true;            // the whole startup ran (the frozen app's --smoke checks this)
 });
 
 // ---- Updates: a newer GitHub release is offered in a dialog; the user decides ----

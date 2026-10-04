@@ -1155,6 +1155,7 @@ function redrawSpec(c, g) {
 // fires many times while the window is dragged).
 function liveRedraw() {
   LV.redrawTimer = 0;
+  if (!LV.hist) return;                             // nothing drawn yet (the page is still starting)
   for (const [id, redraw] of [["live-wave", redrawWave], ["live-spec", redrawSpec]]) {
     const c = $(id);
     if (!c.getContext || (id === "live-spec" && !LV.analyser)) continue;
