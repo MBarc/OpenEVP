@@ -68,7 +68,22 @@ def _index_key(path):
 
 def _blank_recording():
     return {"marks": [], "reviewed": False, "name": "", "duration": None,
-            "imported": False, "backup": _blank_backup()}
+            "imported": False, "backup": _blank_backup(), "questions": []}
+
+
+MAX_QUESTION_LENGTH = 300
+
+
+def _clean_question(q, duration):
+    """One question asked while recording ({"id", "at", "text", "created"}), or None."""
+    if not isinstance(q, dict) or not isinstance(q.get("text"), str) or not _finite_number(q.get("at")):
+        return None
+    at, text = float(q["at"]), q["text"].strip()[:MAX_QUESTION_LENGTH]
+    if at < 0 or not text or (duration is not None and at > duration + DURATION_EPSILON):
+        return None
+    qid = q.get("id") if isinstance(q.get("id"), str) and q.get("id") else uuid.uuid4().hex[:12]
+    created = q.get("created") if isinstance(q.get("created"), str) else ""
+    return {"id": qid, "at": at, "text": text, "created": created}
 
 
 def _blank_backup():
@@ -251,9 +266,11 @@ def _clean_recording(rec):
             dropped += 1
         else:
             cleaned_marks.append(cm)
+    questions = rec.get("questions", [])
+    questions = [q for q in (_clean_question(x, duration) for x in questions) if q] if isinstance(questions, list) else []
     cleaned = {"marks": cleaned_marks, "reviewed": reviewed, "name": name,
                "duration": float(duration) if duration is not None else None,
-               "imported": imported, "backup": backup}
+               "imported": imported, "backup": backup, "questions": questions}
     return True, cleaned, dropped
 
 
@@ -707,7 +724,36 @@ class AppData:
                 "imported": rec["imported"],
                 "backup": {"status": rec["backup"]["status"], "detail": rec["backup"]["detail"]},
                 "marks": sorted((dict(m) for m in rec["marks"]), key=lambda m: m["start"]),
+                "questions": sorted((dict(q) for q in rec.get("questions", [])), key=lambda q: q["at"]),
             }
+
+    def questions(self, fp):
+        """The questions asked while this recording was made (Live mode's question log)."""
+        with self._lock:
+            rec = self._data["recordings"].get(fp)
+            return sorted((dict(q) for q in rec.get("questions", [])), key=lambda q: q["at"]) if rec else []
+
+    def add_question(self, fp, at, text, name="", duration=None):
+        """Store a question asked at `at` seconds into the recording. The same question
+        (time and text) already there is not added again, so this can be run twice."""
+        with self._lock:
+            self._require_writable()
+            q = _clean_question({"at": at, "text": text, "created": _now_iso()}, duration)
+            if q is None:
+                raise ValueError("A question needs its text and a time inside the recording.")
+            existing = self._data["recordings"].get(fp)
+            if existing and any(abs(x["at"] - q["at"]) < 1e-6 and x["text"] == q["text"]
+                                for x in existing.get("questions", [])):
+                return None
+            new_data = copy.deepcopy(self._data)
+            rec = new_data["recordings"].setdefault(fp, _blank_recording())
+            rec.setdefault("questions", []).append(q)
+            if name and not rec["name"]:
+                rec["name"] = name
+            if duration is not None and rec["duration"] is None:
+                rec["duration"] = float(duration)
+            self._save_marks(new_data)
+            return dict(q)
 
     def add_mark(self, fp, start, end, cls, note, name="", duration=None):
         with self._lock:

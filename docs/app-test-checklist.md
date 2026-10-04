@@ -360,3 +360,20 @@ test opens a real input):
     OpenEVP: it closes within a few seconds; the full file is there, no
     half-written parts are left (after the next start), and nothing hangs in
     Task Manager.
+58. **Touch screen in the field.** On a tablet or touchscreen laptop, open Record
+    live: every button and toggle is easy to hit with a finger; MARK is bottom
+    right under the thumb. Turn on **Night screen**: the whole window goes dark
+    red; reopen OpenEVP: it is still on. Rotate or resize the window: the
+    session panel moves beside or under the scopes, and the scopes keep their
+    picture. Mute the microphone: within about 3 s the screen says "No sound
+    coming in…", the meter says Silent, the waveform shows a flat line and the
+    spectrogram a dark band moving in; **Open sound settings** opens Windows'
+    sound settings; unmute: the message goes. Shout into the mic: **Too loud**.
+59. **Questions and the live marks list.** While recording, type a question and
+    press Enter (or Log question): it is listed with its time and marked Q1 on
+    the waveform. Press MARK, tap B, type a note. Stop: in the player the mark
+    is class B with that note, and the questions are shown as Q markers and in
+    the list under the marks; clicking one plays from just before it. The
+    library's EVP counts do not include the questions. "about N h left" in the
+    status strip matches the free space on the drive.
+

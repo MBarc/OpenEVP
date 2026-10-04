@@ -324,6 +324,60 @@ class LiveApiTests(Tmp):
         st = os.stat(path)                                # the library never reads it again to list it
         self.assertEqual(self.store.cached_fp(path, st.st_size, st.st_mtime_ns)["fp"], fp)
 
+    def test_questions_and_mark_edits_are_saved_with_the_recording(self):
+        # The live screen's question log and its marks list: questions are stored against the
+        # finished file (never as marks), and a mark's class and note as changed while recording.
+        a = self.api()
+        r = self.start(a)
+        sid = r["session"]
+        self.assertGreater(r["left_seconds"], 0)                 # the status strip's time left
+        x = tone(4.0)
+        self.send(a, sid, x[:2 * RATE], 0)
+        self.assertEqual(a.live_question(sid, 1.25, "  Is anyone here?  ")["question"]["text"], "Is anyone here?")
+        m = a.live_mark(sid, 1.8)["mark"]
+        self.assertEqual(m["id"], 0)
+        self.assertTrue(a.live_mark_update(sid, 0, cls="A", note="a whisper")["ok"])
+        for bad in ((5, "A", None), (0, "D", None), (0, None, "x" * 501), ("0", "A", None)):
+            self.assertFalse(a.live_mark_update(sid, *bad)["ok"], bad)
+        self.assertFalse(a.live_question(sid, 1.0, "   ")["ok"])
+        status = self.send(a, sid, x[2 * RATE:], 1)
+        self.assertIn("left_seconds", status)
+        self.assertTrue(a.live_question(sid, 3.5, "Can you knock?")["ok"])
+        stop = a.live_stop(sid)
+        path = os.path.join(self.lib, stop["files"][0]["name"])
+        fp = wavinfo.wav_fingerprint(path)
+        self.assertEqual([(q["at"], q["text"]) for q in self.store.questions(fp)],
+                         [(1.25, "Is anyone here?"), (3.5, "Can you knock?")])
+        marks = self.store.marks(fp)
+        self.assertEqual([(m["cls"], m["note"]) for m in marks], [("A", "a whisper")])
+        self.assertEqual(self.store.summary()[fp]["A"], 1, "questions never count as EVPs")
+        self.assertEqual(len(stop["player"]["questions"]), 2)    # the player shows them
+        self.assertEqual(len(a.get_marks(stop["player"]["rec"])["questions"]), 2)
+        self.assertFalse(a.live_question(sid, 1.0, "after Stop")["ok"])
+
+    def test_questions_survive_a_crash(self):
+        a = self.api()
+        sid = self.start(a)["session"]
+        self.send(a, sid, tone(6.0), 0)
+        a.live_question(sid, 2.0, "Who is there?")
+        s = a._live
+        s.piece.writer._f.close()
+        s.pins.close()
+        a._live = None
+        b = self.api()
+        got = b.live_recover()["recovered"][0]
+        fp = wavinfo.wav_fingerprint(os.path.join(self.lib, got["name"]))
+        self.assertEqual([q["text"] for q in self.store.questions(fp)], ["Who is there?"])
+        b.live_recover()
+        self.assertEqual(len(self.store.questions(fp)), 1)
+
+    def test_live_settings_remember_the_night_screen(self):
+        a = self.api()
+        self.assertFalse(a.live_settings()["field"])
+        self.assertTrue(a.set_live_settings({"field": True})["ok"])
+        self.assertTrue(self.api().live_settings()["field"])
+        self.assertFalse(a.set_live_settings({"field": "dark"})["ok"])
+
     def test_a_mark_at_the_very_last_sample_is_kept(self):
         # M just before Stop: the mark ends at the last sample received, a time with many
         # decimals; rounding it to milliseconds must not put it past the end of the file.

@@ -843,5 +843,28 @@ class StoreMultiprocessTests(unittest.TestCase):
             self.assertTrue(result)
 
 
+
+class QuestionsTests(unittest.TestCase):
+    """Questions asked while recording (Live mode's question log), kept per recording."""
+
+    def test_added_once_kept_and_never_marks(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            q = store.add_question("fp1", 3.5, " Is anyone here? ", name="x.wav", duration=10.0)
+            self.assertEqual(q["text"], "Is anyone here?")
+            self.assertIsNone(store.add_question("fp1", 3.5, "Is anyone here?"))      # the same: not twice
+            store.add_question("fp1", 1.0, "Who is there?")
+            self.assertEqual([x["at"] for x in store.questions("fp1")], [1.0, 3.5])
+            self.assertEqual(store.marks("fp1"), [])
+            self.assertEqual(store.summary()["fp1"]["A"] + store.summary()["fp1"]["B"] + store.summary()["fp1"]["C"], 0)
+            for bad in ((-1, "x"), (11.0, "x"), (2.0, "   "), (float("nan"), "x")):
+                with self.assertRaises(ValueError):
+                    store.add_question("fp1", *bad, duration=10.0)
+            store.close()
+            again = AppData(d)
+            self.assertEqual([x["text"] for x in again.recording("fp1")["questions"]], ["Who is there?", "Is anyone here?"])
+            again.close()
+
+
 if __name__ == "__main__":
     unittest.main()

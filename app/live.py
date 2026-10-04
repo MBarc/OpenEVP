@@ -52,12 +52,15 @@ from .library_ops import CLOSING, ROOT_CHANGED, _fail, _file_id, _plain, _root_i
 from .store import MIN_MARK_LENGTH, StoreReadOnly, StoreUnavailable
 
 PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute paths)
-LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool}
+LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool,
+                                 #  "field": bool (the dark night screen)}
 RESERVE_BYTES = 500 << 20        # recording stops before the disk has less than this free
 WARN_SECONDS = 15 * 60           # ... and warns once less than this much audio still fits
 MARK_SECONDS = 2.0               # a mark: this long, ending when M was pressed
 MARK_CLASS = "C"
 MARK_NOTE = "Marked while recording"
+MAX_NOTE = 500                   # characters in a mark's note (app/store.py MAX_NOTE_LENGTH)
+MAX_QUESTION = 300               # characters in a question (app/store.py MAX_QUESTION_LENGTH)
 MAX_CHUNK = 8 << 20              # bytes of PCM in one live_chunk (half a second is under 400 KB)
 MARK_SLACK = 2.0                 # seconds a mark may be ahead of the audio received (the page's own buffer)
 RATES = (8000, 192000)
@@ -173,8 +176,10 @@ class _Piece:
         self.part = os.path.join(folder, name + livewav.PART)
         self.sidecar = self.part + ".json"
         self.marks = []
+        self.questions = []                      # asked while recording: {"at", "text"} (the question log)
         self.meta = {"version": 1, "name": name, "rate": rate, "channels": channels, "mode": mode,
-                     "started": datetime.datetime.now().isoformat(timespec="seconds"), "marks": self.marks}
+                     "started": datetime.datetime.now().isoformat(timespec="seconds"), "marks": self.marks,
+                     "questions": self.questions}
         if derived:                              # a piece cut from a kept file: never recovered, just deleted
             self.meta["derived"] = True
         _write_sidecar(self.sidecar, self.meta)
@@ -293,15 +298,16 @@ class LiveOps:
         return {"ok": True, "input": _clean_input(saved.get("input")),
                 "split": silence.DEFAULT_GAP if split is None else split,
                 "import": saved.get("import") is True, "heard": saved.get("heard") is True,
+                "field": saved.get("field") is True,
                 "max_split": silence.MAX_GAP,
                 "reserve_mb": RESERVE_BYTES >> 20}
 
     def set_live_settings(self, changes):
-        if not isinstance(changes, dict) or set(changes) - {"input", "split", "import", "heard"}:
+        if not isinstance(changes, dict) or set(changes) - {"input", "split", "import", "heard", "field"}:
             return _fail("Unknown Live settings.")
         current = self.live_settings()
         new = {"input": current["input"], "split": current["split"], "import": current["import"],
-               "heard": current["heard"]}
+               "heard": current["heard"], "field": current["field"]}
         if "input" in changes:
             new["input"] = _clean_input(changes["input"]) if changes["input"] is not None else None
             if changes["input"] is not None and new["input"] is None:
@@ -310,7 +316,7 @@ class LiveOps:
             if _split(changes["split"]) is None:
                 return _fail(f"The silence gap must be between 0.5 and {silence.MAX_GAP:g} seconds.")
             new["split"] = _split(changes["split"])
-        for key in ("import", "heard"):
+        for key in ("import", "heard", "field"):
             if key in changes:
                 if not isinstance(changes[key], bool):
                     return _fail("Unknown Live settings.")
@@ -322,6 +328,14 @@ class LiveOps:
             except (StoreReadOnly, StoreUnavailable):
                 pass
         return {"ok": True, **self.live_settings()}
+
+    def open_sound_settings(self):
+        """Windows' sound settings (no sound coming in: a muted microphone, the wrong input)."""
+        try:
+            os.startfile("ms-settings:sound")
+            return {"ok": True}
+        except (OSError, AttributeError) as e:
+            return _fail(f"Windows Settings could not be opened: {_plain(e)}")
 
     def open_mic_settings(self):
         """Windows' microphone privacy page (when Windows blocks desktop apps from the microphone)."""
@@ -453,6 +467,8 @@ class LiveOps:
                 self._live = session
         threading.Thread(target=self._live_watch, args=(session,), name="live-watch", daemon=True).start()
         return {"ok": True, "session": session.id, "file": session.piece.name,
+                "left_seconds": max(0, int(min((free - RESERVE_BYTES) / session.byte_rate,
+                                               session.piece.writer.room() / session.byte_rate))),
                 "folder": os.path.basename(os.path.normpath(folder)), "rate": rate, "channels": channels}
 
     def _session(self, sid):
@@ -513,6 +529,8 @@ class LiveOps:
             if s.piece is not None:
                 room = s.piece.writer.room() / s.byte_rate
                 left = room if left is None else min(left, room)
+            if left is not None:
+                out["left_seconds"] = max(0, int(left))      # the status strip: "about 9 h left"
             if left is not None and left < WARN_SECONDS:
                 minutes = max(1, int(left // 60))
                 out["warning"] = (f"Only about {minutes} minute{'s' if minutes != 1 else ''} of recording "
@@ -540,12 +558,58 @@ class LiveOps:
                     "cls": MARK_CLASS, "note": MARK_NOTE}
             if mark["end"] - mark["start"] < MIN_MARK_LENGTH:
                 mark["end"] = round(mark["start"] + MIN_MARK_LENGTH, 3)
+            mark["id"] = len(s.piece.marks)          # its place in the list: the page edits it by this
             s.piece.marks.append(mark)
             try:
                 s.piece.save_marks()
             except OSError:
                 pass                             # kept in memory: stored when the file is finished
             return {"ok": True, "mark": {"at": at, "file": s.piece.name, **mark}}
+
+    def live_mark_update(self, sid, mark_id, cls=None, note=None):
+        """Change a mark made in this recording (the live marks list: its class, its note).
+        Kept in the sidecar; stored with the file when it is finished."""
+        with self._live_lock:
+            s = self._session(sid)
+            if s is None or s.piece is None:
+                return _fail(NOT_RECORDING)
+            if isinstance(mark_id, bool) or not isinstance(mark_id, int) or not 0 <= mark_id < len(s.piece.marks):
+                return _fail("No such mark.")
+            if cls is not None and cls not in ("A", "B", "C"):
+                return _fail("Unknown class.")
+            if note is not None and (not isinstance(note, str) or len(note) > MAX_NOTE):
+                return _fail(f"A note can be at most {MAX_NOTE} characters.")
+            mark = s.piece.marks[mark_id]
+            if cls is not None:
+                mark["cls"] = cls
+            if note is not None:
+                mark["note"] = note
+            try:
+                s.piece.save_marks()
+            except OSError:
+                pass
+            return {"ok": True, "mark": {"file": s.piece.name, **mark}}
+
+    def live_question(self, sid, at, text):
+        """Log a question asked at `at` (seconds since Record, as the page counts them):
+        stored with the recording when it is finished (never as an EVP mark)."""
+        if isinstance(at, bool) or not isinstance(at, (int, float)) or at != at or at < 0:
+            return _fail("Unknown moment.")
+        if not isinstance(text, str) or not text.strip():
+            return _fail("Type the question first.")
+        text = text.strip()[:MAX_QUESTION]
+        with self._live_lock:
+            s = self._session(sid)
+            if s is None or s.piece is None:
+                return _fail(NOT_RECORDING)
+            at = round(min(float(at), s.frames / s.rate + MARK_SLACK), 3)
+            q = {"id": len(s.piece.questions), "at": at, "text": text}
+            s.piece.questions.append(q)
+            try:
+                s.piece.save_marks()
+            except OSError:
+                pass
+            return {"ok": True, "question": q}
 
     def live_stop(self, sid):
         """Stop and save: {"ok", "files": [{"id", "name", "seconds", "marks"}], "folder",
@@ -614,6 +678,7 @@ class LiveOps:
             return
         seconds = frames / s.rate
         stored = self._store_live_marks(fp, path, seconds, piece.marks, s)
+        self._store_live_questions(fp, path, seconds, piece.questions)
         _remove(piece.sidecar)
         self._unregister_part(piece.part)
         self._index_live(path, fp, seconds)
@@ -641,6 +706,24 @@ class LiveOps:
             except (StoreReadOnly, StoreUnavailable, ValueError):
                 if s is not None:
                     s.dropped_marks += 1
+        return stored
+
+    def _store_live_questions(self, fp, path, seconds, questions):
+        """Store the questions logged while recording against the finished file (again:
+        the same question twice is one)."""
+        stored = 0
+        for q in questions:
+            if not isinstance(q, dict) or not isinstance(q.get("text"), str):
+                continue
+            at = q.get("at")
+            if isinstance(at, bool) or not isinstance(at, (int, float)):
+                continue
+            try:
+                self._store.add_question(fp, min(float(at), seconds), q["text"], name=os.path.basename(path),
+                                         duration=seconds)
+                stored += 1
+            except (StoreReadOnly, StoreUnavailable, ValueError):
+                pass
         return stored
 
     def _index_live(self, path, fp, seconds):
@@ -860,6 +943,7 @@ class LiveOps:
             if stopped():
                 raise silence.Cancelled()
             all_marks = self._store.marks(fp)
+            all_questions = self._store.questions(fp)
             files = []
             for piece, (a, b) in zip(parts, bounds):
                 got, pfp = piece.result
@@ -869,6 +953,9 @@ class LiveOps:
                 mine = [{**m, "start": m["start"] - lo, "end": m["end"] - lo} for m in all_marks
                         if (lo < m["end"] <= hi) or (a == 0 and m["end"] <= hi)]
                 stored = self._store_live_marks(pfp, target, seconds, mine)
+                self._store_live_questions(pfp, target, seconds, [
+                    {"at": q["at"] - lo, "text": q["text"]} for q in all_questions
+                    if (lo <= q["at"] < hi) or (b == n and q["at"] >= lo)])
                 _remove(piece.sidecar)
                 self._unregister_part(piece.part)
                 piece.published = True
@@ -946,6 +1033,7 @@ class LiveOps:
             rate = w.getframerate()
         seconds = frames / rate
         stored = self._store_live_marks(fp, target, seconds, _sidecar_marks(meta))
+        self._store_live_questions(fp, target, seconds, meta.get("questions") or [])
         _remove(sidecar)
         self._index_live(target, fp, seconds)
         return {"name": os.path.basename(target), "folder": os.path.basename(os.path.dirname(target)),
@@ -1001,6 +1089,7 @@ class LiveOps:
         path = livewav.publish(part, folder, name, before=lambda target: _journal(sidecar, meta, target, fp, frames))
         seconds = frames / rate
         stored = self._store_live_marks(fp, path, seconds, _sidecar_marks(meta))
+        self._store_live_questions(fp, path, seconds, meta.get("questions") or [])
         _remove(sidecar)
         self._index_live(path, fp, seconds)
         return {"name": os.path.basename(path), "folder": os.path.basename(folder), "seconds": round(seconds, 1),

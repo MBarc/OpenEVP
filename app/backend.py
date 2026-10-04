@@ -752,11 +752,11 @@ class Api(ShareOps, LibraryOps, LiveOps):
         r = self._store.recording(fp) if self._store is not None and fp else None
         if r is None:
             return {"marks": [], "reviewed": False, "backup": {"status": None, "detail": ""},
-                    "backup_needed": False}
+                    "backup_needed": False, "questions": []}
         needed = bool(source is not None and source.get("kind") == "device" and r["marks"]
                       and r["backup"]["status"] != "saved")
         return {"marks": r["marks"], "reviewed": r["reviewed"], "backup": r["backup"],
-                "backup_needed": needed}
+                "backup_needed": needed, "questions": r.get("questions", [])}
 
     def _entry(self, rec):
         if not isinstance(rec, str):

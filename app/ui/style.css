@@ -221,40 +221,116 @@ td.note { color: var(--warn); }
 .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 button.primary { background: var(--accent); color: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 14px; cursor: pointer; }
 button.primary:disabled { opacity: .5; cursor: default; }
-/* Live mode and analog import (live.js): the view takes the recordings area and the player's place */
+/* Live mode and analog import (live.js): the view takes the recordings area and the player's place.
+   It is meant for touchscreens in the field: everything here (and only here) is big enough to tap
+   (48 px), the scopes fill the space, and a dark red night screen can be turned on. */
 #list[hidden], #live[hidden], #player[hidden] { display: none; }
-#live { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; padding: 10px 14px; overflow: auto; }
-#live-bar, #live-settings, #live-controls, #live-split-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
-#live-title { font-size: 16px; margin: 0; }
-#live-modes { display: inline-flex; gap: 4px; }
-#live-modes button { border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 12px; padding: 2px 12px; cursor: pointer; }
-#live-modes button[aria-pressed="true"] { border-color: var(--text); background: var(--accent-soft); font-weight: 600; }
-#live-modes button:disabled { opacity: .6; cursor: default; }
-#live-input, #live-folder { max-width: 32ch; }
-#live-meter { position: relative; display: inline-block; width: 180px; height: 10px; border-radius: 5px; overflow: hidden;
-              background: linear-gradient(90deg, var(--line) 0 80%, var(--warn-bg) 80% 95%, rgba(220, 60, 60, .35) 95%); }
-#live-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--accent); }
-#live-meter-peak { position: absolute; top: 0; bottom: 0; width: 2px; left: 0; background: var(--text); }
+#live { --live-bg: var(--bg); --live-panel: var(--panel); --live-text: var(--text); --live-muted: var(--muted);
+        --live-line: var(--line); --live-accent: var(--accent); --live-accent-soft: var(--accent-soft); --live-empty: #2b2b2b;
+        display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; padding: 10px 14px; overflow: auto;
+        background: var(--live-bg); color: var(--live-text); font-size: 16px; }
+#live.field { --live-bg: #0a0505; --live-panel: #140909; --live-text: #d36b6b; --live-muted: #9c4f4f; --live-line: #3a1a1a;
+              --live-accent: #b33a3a; --live-accent-soft: #3a1414; --live-empty: #1c0d0d; }
+#live-bar, #live-settings, #live-controls, #live-split-row, #live-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+#live-title { font-size: 20px; margin: 0; }
+#live button, #live select, #live input[type="text"], #live input[type="number"] {
+  min-height: 48px; font: inherit; border-radius: 8px; border: 1px solid var(--live-line);
+  background: var(--live-panel); color: var(--live-text); padding: 0 16px; }
+#live button { cursor: pointer; }
+#live button:disabled { opacity: .5; cursor: default; }
+#live select { padding: 0 10px; max-width: 32ch; }
+#live-modes { display: inline-flex; gap: 6px; }
+#live-modes button[aria-pressed="true"], #live label.toggle:has(input:checked) {
+  background: var(--live-accent); border-color: var(--live-accent); color: #fff; font-weight: 600; }
+/* Every on/off choice here is a big toggle button: the checkbox is kept (for the keyboard and screen
+   readers) but drawn as the button's state. */
+#live label.toggle, #live-enhance-panel label:has(> input[type="checkbox"]) {
+  display: inline-flex; align-items: center; min-height: 48px; padding: 0 18px; border: 1px solid var(--live-line);
+  border-radius: 24px; background: var(--live-panel); cursor: pointer; user-select: none; position: relative; }
+#live label.toggle input, #live-enhance-panel label > input[type="checkbox"] {
+  position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+#live label.toggle:has(input:focus-visible), #live-enhance-panel label:has(> input:focus-visible) { outline: 3px solid var(--live-accent); outline-offset: 2px; }
+#live-enhance-panel label:has(> input[type="checkbox"]:checked) { background: var(--live-accent); border-color: var(--live-accent); color: #fff; font-weight: 600; }
+#live-enhance-panel label:has(> input[type="checkbox"]:disabled) { opacity: .5; cursor: default; }
+#live-enhance-panel input[type="range"] { height: 40px; width: 180px; }
+#live-enhance-panel select { min-height: 48px; }
+#live-enhance-panel #enhance-reset { min-height: 48px; font-size: 16px; padding: 0 16px; }
+#live-enhance-panel .tab-panel { display: flex; flex-direction: row; flex-wrap: wrap; gap: 10px 16px; align-items: center; padding: 6px 0; }
+#live-enhance-panel .enhance-row { justify-content: flex-start; gap: 10px; }
+.enhance-tab .enhance-row[hidden] { display: none; }
+#live-enhance-box { background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 8px; padding: 8px 14px; }
+#live-enhance-box[hidden] { display: none; }
+.live-enhance-note { padding: 4px 0; margin: 0; font-size: 14px; color: var(--live-muted); }
+/* The status strip: readable at arm's length */
+#live-strip { padding: 6px 12px; background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 8px; }
+#live-time { font-variant-numeric: tabular-nums; font-size: 44px; font-weight: 700; line-height: 1; min-width: 4ch; }
+#live-meter-box { display: inline-flex; align-items: center; gap: 10px; }
+#live-meter { position: relative; display: inline-block; width: 260px; height: 22px; border-radius: 11px; overflow: hidden;
+              background: linear-gradient(90deg, var(--live-line) 0 80%, #6d5a12 80% 95%, rgba(220, 60, 60, .6) 95%); }
+#live-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--live-accent); }
+#live-meter-peak { position: absolute; top: 0; bottom: 0; width: 3px; left: 0; background: var(--live-text); }
 #live-meter.clip #live-meter-fill { background: rgb(220, 60, 60); }
-#live-level { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 6ch; }
+#live-level { font-variant-numeric: tabular-nums; font-size: 18px; min-width: 7ch; }
+#live-clip { background: rgb(210, 40, 40); color: #fff; font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 18px; }
+#live-clip[hidden] { display: none; }
+#live-left { font-size: 18px; font-weight: 600; }
+#live-input-info { color: var(--live-muted); overflow-wrap: anywhere; }
+#live-silent { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 8px 12px; border-radius: 8px;
+               background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+#live-silent[hidden] { display: none; }
 #live-import[hidden] { display: none; }
-#live-gap { width: 6ch; font: inherit; }
-#live-guide { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; margin-top: 6px; }
-#live-guide summary { cursor: pointer; font-weight: 600; }
+#live-gap { width: 7ch; }
+#live-guide { background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 8px; padding: 6px 12px; margin-top: 6px; }
+#live-guide summary { cursor: pointer; font-weight: 600; min-height: 40px; display: flex; align-items: center; }
 #live-guide ol { margin: 6px 0; padding-left: 20px; }
-#live-guide li { margin: 3px 0; }
-#live-record { min-width: 110px; font-weight: 600; }
-#live-record.recording { background: rgb(200, 50, 50); color: #fff; border-color: rgb(200, 50, 50); }
-#live-time { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
-#live-file { color: var(--muted); overflow-wrap: anywhere; }
+#live-guide li { margin: 4px 0; }
+/* The scopes fill what is left, the spectrogram most of it; the session panel beside them on a wide
+   screen, under them on a narrow one (live.js sets .wide) */
+#live-main { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 360px; }
+#live.wide #live-main { flex-direction: row; min-height: 300px; }
+#live-scopes { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 260px; min-width: 0; }
+#live-wave { flex: 3 1 0; height: 0; width: 100%; min-height: 70px; background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 6px; }
+#live-spec { flex: 7 1 0; height: 0; width: 100%; min-height: 140px; background: var(--live-empty); border-radius: 6px; }
+#live.field #live-spec { filter: brightness(.55) sepia(.4) hue-rotate(-30deg); }
+#live-session { display: flex; flex-direction: column; gap: 8px; background: var(--live-panel); border: 1px solid var(--live-line);
+                border-radius: 8px; padding: 10px 12px; overflow: auto; max-height: 50vh; }
+#live.wide #live-session { width: 340px; flex: none; max-height: none; }
+#live-session h3 { margin: 4px 0 0; font-size: 16px; }
+#live-q-row { display: flex; gap: 8px; }
+#live-q-text { flex: 1; min-width: 0; }
+#live-questions, #live-marks { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+#live-questions li { display: flex; gap: 10px; overflow-wrap: anywhere; }
+.live-at { font-variant-numeric: tabular-nums; color: var(--live-muted); min-width: 5ch; }
+#live-marks li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding-bottom: 6px; border-bottom: 1px solid var(--live-line); }
+#live-marks .live-cls { min-width: 48px; padding: 0; font-weight: 700; }
+#live-marks .live-cls[aria-pressed="true"] { background: var(--live-accent); border-color: var(--live-accent); color: #fff; }
+#live-marks .live-note { flex: 1 1 140px; min-width: 0; }
+#live-marks-empty { margin: 0; padding: 0; color: var(--live-muted); }
+#live-marks-empty[hidden] { display: none; }
+/* The bottom row: Record on the left, MARK on the right, under the thumb */
+#live-controls { position: sticky; bottom: 0; padding: 8px 0; background: var(--live-bg); display: grid; align-items: center;
+                 grid-template-columns: auto 1fr auto; grid-template-areas: "rec file mark" "toggles toggles toggles"; }
+#live-record { grid-area: rec; }
+#live-file { grid-area: file; }
+#live-mark { grid-area: mark; }
+#live-toggles { grid-area: toggles; display: flex; flex-wrap: wrap; gap: 10px; }
+#live-record { min-width: 160px; min-height: 64px !important; font-size: 20px; font-weight: 700;
+              background: var(--live-accent) !important; border-color: var(--live-accent) !important; color: #fff !important; }
+#live-record.recording { background: rgb(200, 50, 50) !important; color: #fff !important; border-color: rgb(200, 50, 50) !important; }
+#live-mark { min-width: 180px; min-height: 64px !important; font-size: 22px; font-weight: 800; letter-spacing: .04em;
+            background: #e0a020 !important; border-color: #c08010 !important; color: #1d1d1b !important; }
+#live.field #live-mark { background: #7a3a10 !important; border-color: #7a3a10 !important; color: #f0c0a0 !important; }
+#live-file { color: var(--live-muted); overflow-wrap: anywhere; }
 #live-status { margin: 0; min-height: 1.4em; }
 #live-status.warn { color: var(--warn); background: var(--warn-bg); padding: 4px 8px; border-radius: 4px; }
-#live-scopes { display: flex; flex-direction: column; gap: 4px; }
-#live-wave { width: 100%; height: 110px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; }
-#live-spec { width: 100%; height: 150px; background: #000; border-radius: 4px; }
-#live-marks { margin: 0; padding-left: 18px; color: var(--muted); columns: 4 12ch; }
-/* While recording, the rest of the app waits: the recording's view stays in front */
+#live button.live-plain { background: none; border-color: transparent; text-decoration: underline; color: var(--live-accent); }
 body.recording #sidebar { pointer-events: none; opacity: .55; }
+/* The night screen darkens the window around the Live view too, while it is shown */
+body.live-night { background: #0a0505; color: #d36b6b; }
+body.live-night .toolbar, body.live-night #sidebar { background: #140909; color: #9c4f4f; border-color: #3a1a1a; }
+body.live-night .toolbar .link, body.live-night .toolbar select, body.live-night .toolbar button,
+body.live-night #sidebar .device-name, body.live-night .nav-title { color: #9c4f4f; background: transparent; border-color: #3a1a1a; }
+body.live-night #sidebar .device-name.selected { background: #3a1414; }
 .player-start { display: inline-flex; gap: 8px; }
 /* An import's suggested cuts (live.js): under the waveform, until split or kept as one */
 #cut-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 4px 0; font-size: 13px; }
@@ -263,11 +339,7 @@ body.recording #sidebar { pointer-events: none; opacity: .55; }
 .cut-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 0 2px 0 8px; }
 .cut-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
 .cut-remove:disabled { cursor: default; opacity: .5; }
-/* The player's Enhance panel, moved into the Live view while it is open (live.js) */
-#live-enhance-box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }
-#live-enhance-box summary { cursor: pointer; font-weight: 600; }
-#live-enhance-panel .tab-panel { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px 20px; align-items: center;
-                                padding: 6px 0; }
-#live-enhance-panel .enhance-row { justify-content: flex-start; gap: 12px; }
-.enhance-tab .enhance-row[hidden] { display: none; }
-.live-enhance-note { padding: 4px 0; margin: 0; font-size: 12px; }
+/* Questions asked while recording (Live's question log), under the player's marks */
+#questions-list { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 12px; font-size: 13px; padding: 2px 0; }
+#questions-list[hidden] { display: none; }
+#questions-list .question { max-width: none; white-space: normal; text-align: left; }

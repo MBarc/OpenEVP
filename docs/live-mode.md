@@ -315,6 +315,47 @@ candidates take milliseconds), cancellable throughout:
 - If a saved Live recording cannot be opened in the player, Stop's result says
   why (`player_error`) and the page shows it; the file is saved either way.
 
+## The screen: made for touch in the field
+
+Only the Live screen is touch sized; the rest of the app keeps its sizes.
+
+- **Layout:** a status strip (the elapsed time at 44 px; a 260 px meter with
+  "Too loud" while it clips and "Silent" under -90 dB, its number the peak held
+  for 1.5 s; the time left on the drive from the backend's `left_seconds`, in
+  `live_start` and every `live_chunk` answer, as "about 9 h left"; the input and
+  its format), then the scopes and the Session panel. The scopes fill the space
+  that is left (spectrogram 7, waveform 3) and redraw from their history on any
+  resize. The Session panel sits beside them from 1000 px wide, under them
+  below that: `liveLayout()` sets `#live.wide` from a ResizeObserver, so it is
+  testable without a layout engine.
+- **Touch:** every button, select and field on this screen is at least 48 px;
+  every on/off choice (Listen, Show what I hear, Enhance what I hear, Night
+  screen, Suggest cuts, and the Enhance options inside the borrowed panel) is a
+  checkbox drawn as a big toggle button (CSS `label:has(input:checked)`, the
+  checkbox kept for keyboards and screen readers). Record is bottom left, MARK
+  bottom right under the thumb, with the toggles on the row below; M still works.
+- **Night screen** (`live.field`, remembered): dark red colours for the screen
+  and the window around it while it is open (`body.live-night`), the waveform in
+  red, the spectrogram dimmed and reddened by a CSS filter.
+- **Preview and silence:** the input is drawn from the moment it opens; nothing
+  is sent until Record. The spectrogram's empty area is grey, lighter than
+  silence, so silence shows as a dark band moving in, and the waveform as a flat
+  line. Under -80 dB RMS for 3 s of the input's own frames, the screen says "No
+  sound coming in. Is the mic muted, or is the wrong input selected?" with
+  **Open sound settings** (`Api.open_sound_settings`, `ms-settings:sound`); it
+  clears as soon as sound comes.
+- **Questions** (`Api.live_question`): logged at the moment Enter or Log
+  question is pressed, kept in the sidecar (`questions`), stored at the finish
+  in the marks store as the recording's `questions` (`AppData.add_question`,
+  idempotent: never marks, never counted as EVPs), also on crash recovery and
+  mapped into the parts of a split import. They are drawn on the live waveform
+  as labelled markers (kept in the history, so a resize keeps them) and shown
+  in the player as markers (`q-` regions) and a list ("Questions asked:").
+- **The live marks list:** each mark as it is made, with its time, A/B/C
+  buttons and a note; a change goes to `Api.live_mark_update` at once (the mark
+  in the sidecar), and is stored with the file at the finish through the same
+  journalled path as every mark.
+
 ## Smoke test
 
 `OpenEVP.exe --smoke` sets `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` to

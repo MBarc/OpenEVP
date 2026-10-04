@@ -23,6 +23,8 @@ const LV = {
   raf: 0, lastStatus: 0, drawn: 0, color: "",
   hist: null, redrawTimer: 0, sizeWatch: null, ratioWatch: null,   // drawn columns kept for redrawing (historyReset)
   enhanceHome: null,                     // where the player's Enhance panel goes back to (borrowEnhance)
+  quietFrames: 0,                        // frames in a row under LIVE_SILENT_DB (the "no sound coming in" warning)
+  layoutWatch: null,                     // the ResizeObserver that picks the wide or narrow layout
   cuts: null,                            // an import's cuts: {job, fp, cuts, suggested, looking, splitJob}
   cutRegions: [],                        // the cuts drawn on the waveform
   jobs: new Map(), jobEvents: new Map(), // import jobs the page knows (job -> handler); events of jobs it does not yet
@@ -30,6 +32,10 @@ const LV = {
 const LIVE_COLS_PER_SEC = 40;            // waveform and spectrogram: the same time scale, 25 ms a column
 const LIVE_CHUNK_SEC = 0.5;              // audio sent to the backend per call
 const CUT_MIN = 0.5;                     // seconds: a cut needs this much on each side (app/live.py MIN_PIECE)
+const LIVE_SILENT_DB = -80;              // under this for LIVE_SILENT_SEC: "No sound coming in"
+const LIVE_SILENT_SEC = 3;
+const LIVE_METER_SILENT_DB = -90;        // the meter says "Silent" under this, not a jittering number
+const LIVE_WIDE_PX = 1000;               // the session panel beside the scopes from this width, else under them
 const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by the backend, at most
 const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
 const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
@@ -68,7 +74,11 @@ async function openLive() {
   $("live-gap").disabled = !$("live-split").checked;
   $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
   $("live-heard").checked = !!LV.settings.heard;
+  $("live-field").checked = !!LV.settings.field;
+  applyField();
+  $("live-enhance-box").hidden = !$("live-enhance-open").checked;
   borrowEnhance();
+  liveLayout();
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
   renderLive();
@@ -79,6 +89,7 @@ async function openLive() {
 // goes back to the player.
 function liveViewLeft() {
   returnEnhance();
+  document.body.classList.remove("live-night");
   if (!LV.stream && !LV.ctx) return;
   closeInput();
 }
@@ -161,6 +172,29 @@ function splitChanged() {
 }
 
 // The buttons and fields: what can be changed now.
+// The dark red night screen (remembered): the Live view only.
+function applyField() {
+  $("live").classList.toggle("field", $("live-field").checked);
+  document.body.classList.toggle("live-night", $("live-field").checked && liveOpen());   // the window around it too
+  LV.color = "";                                    // the waveform's colour follows
+  LV.emptyColor = "";
+  liveRedraw();
+}
+
+// The session panel beside the scopes on a wide screen, under them on a narrow one.
+function liveLayout() {
+  const live = $("live");
+  live.classList.toggle("wide", (live.clientWidth || 0) >= LIVE_WIDE_PX);
+}
+
+// "about 9 h left": recording time left before the drive is nearly full (or the file at 4 GB).
+function fmtLeft(seconds) {
+  if (typeof seconds !== "number" || !isFinite(seconds)) return "";
+  if (seconds >= 3600) return `about ${Math.floor(seconds / 3600)} h left`;
+  if (seconds >= 60) return `about ${Math.floor(seconds / 60)} min left`;
+  return "under a minute left";
+}
+
 function renderLive() {
   const rec = liveRecording(), stopping = rec && LV.rec.closing;
   const ready = !!LV.node && !LV.opening;
@@ -168,6 +202,8 @@ function renderLive() {
   $("live-record").disabled = stopping || (!rec && !ready);
   $("live-record").classList.toggle("recording", rec);
   $("live-mark").disabled = !rec || stopping;
+  $("live-q-log").disabled = !rec || stopping;
+  $("live-marks-empty").hidden = $("live-marks").children.length > 0;
   for (const id of ["live-input", "live-folder", "live-mode-live", "live-mode-import", "live-split", "live-close"]) $(id).disabled = rec;
   $("live-gap").disabled = rec || !$("live-split").checked;
   document.body.classList.toggle("recording", rec);
@@ -284,6 +320,10 @@ async function startGraph(stream) {
                         deviceId: st.deviceId || "", label: track.label || "" });
     LV.wave.perCol = Math.max(1, Math.round(ctx.sampleRate / LIVE_COLS_PER_SEC));
     historyReset();                                     // another input: its own history
+    LV.quietFrames = 0;
+    $("live-silent").hidden = true;
+    $("live-input-info").textContent = `${track.label || "Input"} · ${+(ctx.sampleRate / 1000).toFixed(1)} kHz ` +
+                                       `${channels === 2 ? "stereo" : "mono"}`;
     LV.spec.bins = new Uint8Array(analyser.frequencyBinCount);
     track.onended = inputEnded;
     if (ctx.resume) await ctx.resume();
@@ -302,7 +342,7 @@ function closeInput(keepSeq = false) {
   if (LV.stream) for (const t of LV.stream.getTracks()) { t.onended = null; t.stop(); }
   if (LV.ctx) { try { LV.ctx.close(); } catch (e) { /* gone */ } }
   Object.assign(LV, { stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], heardAnalyser: null });
-  LV.meter.peak = LV.meter.rms = 0;
+  LV.meter.peak = LV.meter.rms = LV.meter.held = 0;
   if (LV.raf) { cancelAnimationFrame(LV.raf); LV.raf = 0; }
 }
 
@@ -357,6 +397,7 @@ function liveAudio(m) {
   }
   const pcm = new Int16Array(m.pcm), ch = LV.channels, n = m.frames;
   const meter = LV.meter;
+  checkSilence(n, m.sumsq, ch);
   meter.peak = Math.max(meter.peak * 0.85, m.peak);
   meter.rms = Math.sqrt(m.sumsq / Math.max(1, n * ch));
   if (m.peak >= meter.held || performance.now() - meter.heldAt > 1500) { meter.held = m.peak; meter.heldAt = performance.now(); }
@@ -477,6 +518,7 @@ function afterChunk(rec) {
   const r = rec.status;
   if (!r) return;
   liveStatus(r.warning || "", r.warning ? "warn" : "");
+  if (typeof r.left_seconds === "number") $("live-left").textContent = fmtLeft(r.left_seconds);
 }
 
 // Ask the worklet for the samples it holds that do not fill a batch yet; resolves once it has
@@ -502,12 +544,14 @@ async function startRecording() {
   const folder = $("live-folder").value || "root";
   const r = await api().live_start({ mode: LV.mode, folder, rate: LV.rate, channels: LV.channels, split });
   if (!r.ok) { liveStatus([r.error, r.advice].filter(Boolean).join(" "), "warn"); return r; }
+  $("live-left").textContent = fmtLeft(r.left_seconds);
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
              stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
+  $("live-questions").textContent = "";
   $("live-file").textContent = `Recording ${r.file}`;
   renderLive();
   return r;
@@ -525,10 +569,76 @@ async function liveMark() {
   const r = await callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
-  const li = document.createElement("li");
-  li.textContent = `★ ${fmtTime(at)}` + (LV.mode === "import" ? ` (${r.mark.file})` : "");
-  $("live-marks").appendChild(li);
+  addMarker("★");
+  $("live-marks").appendChild(markItem(rec, r.mark, at));
+  renderLive();
   return r;
+}
+
+// One mark in the live list: its time, big A/B/C buttons and a note. A change goes to the backend
+// at once (live_mark_update) and is stored with the file when it is finished.
+function markItem(rec, mark, at) {
+  const li = document.createElement("li");
+  const time = document.createElement("span");
+  time.className = "live-at"; time.textContent = `★ ${fmtTime(at)}`;
+  li.appendChild(time);
+  const buttons = [];
+  for (const cls of ["A", "B", "C"]) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "live-cls"; b.textContent = cls;
+    b.title = { A: "Class A: clear, anyone hears the words", B: "Class B: fairly clear", C: "Class C: faint" }[cls];
+    b.setAttribute("aria-pressed", String(mark.cls === cls));
+    b.onclick = () => editMark(rec, mark, { cls }, () => {
+      for (const x of buttons) x.setAttribute("aria-pressed", String(x.textContent === cls));
+    });
+    buttons.push(b);
+    li.appendChild(b);
+  }
+  const note = document.createElement("input");
+  note.type = "text"; note.className = "live-note"; note.maxLength = 500; note.placeholder = "What did you hear?";
+  note.setAttribute("aria-label", `Note for the mark at ${fmtTime(at)}`);
+  note.onchange = () => editMark(rec, mark, { note: note.value });
+  note.onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); note.blur(); note.onchange(); } };
+  li.appendChild(note);
+  return li;
+}
+
+async function editMark(rec, mark, change, done) {
+  if (LV.rec !== rec || rec.closing) { liveStatus("The recording is saved: change the mark in the player.", "warn"); return; }
+  const r = await callWithTimeout(() => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null),
+                                  LIVE_CALL_MS);
+  if (!r.ok) { liveStatus(r.error, "warn"); return; }
+  Object.assign(mark, change);
+  if (done) done();
+}
+
+// Log the question just asked: Enter in the box, or Log question. Saved with the recording.
+async function logQuestion() {
+  const rec = LV.rec, box = $("live-q-text"), text = box.value.trim();
+  if (!rec || rec.closing || rec.ended) { liveStatus("Questions are logged while recording.", "warn"); return null; }
+  if (!text) { box.focus(); return null; }
+  const at = rec.frames / LV.rate;
+  const r = await callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS);
+  if (!r.ok) { liveStatus(r.error, "warn"); return r; }
+  box.value = "";
+  rec.questions = (rec.questions || 0) + 1;
+  addMarker(`Q${rec.questions}`);
+  const li = document.createElement("li");
+  const time = document.createElement("span");
+  time.className = "live-at"; time.textContent = fmtTime(at);
+  const words = document.createElement("span");
+  words.textContent = `Q${rec.questions}. ${r.question.text}`;
+  li.append(time, words);
+  $("live-questions").appendChild(li);
+  return r;
+}
+
+// A labelled marker on the live waveform at the newest column (kept in the history, so it is drawn
+// again after a resize).
+function addMarker(label) {
+  const h = LV.hist;
+  h.markers.push({ col: h.waveN + LV.wave.cols.length, label });
+  if (h.markers.length > 500) h.markers.shift();
 }
 
 // Stop and save. With drain (the default): the worklet's last samples (an acknowledged flush), then
@@ -841,13 +951,25 @@ function liveFrame(now) {
 
 function dbfs(v) { return v > 0 ? 20 * Math.log10(v) : -Infinity; }
 
+// The meter: the bar follows the peak; the number is the peak held for a moment (readable, not
+// jittering), "Silent" under LIVE_METER_SILENT_DB; "Too loud" while the input clips.
 function drawMeter() {
   const m = LV.meter, db = dbfs(m.peak), held = dbfs(m.held);
   const pos = (d) => `${Math.max(0, Math.min(100, (d + 60) / 60 * 100))}%`;
   $("live-meter-fill").style.width = pos(db);
   $("live-meter-peak").style.left = pos(held);
-  $("live-meter").classList.toggle("clip", m.held >= 0.99);
-  $("live-level").textContent = isFinite(db) ? `${Math.round(db)} dB` : "−∞ dB";
+  const clip = m.held >= 0.99;
+  $("live-meter").classList.toggle("clip", clip);
+  $("live-clip").hidden = !clip;
+  $("live-level").textContent = held < LIVE_METER_SILENT_DB ? "Silent" : `${Math.round(held)} dB`;
+}
+
+// No sound coming in (a muted microphone, the wrong input): said after LIVE_SILENT_SEC under
+// LIVE_SILENT_DB, cleared as soon as sound comes. Counted in frames, so it is the input's own time.
+function checkSilence(frames, sumsq, channels) {
+  const db = 10 * Math.log10(Math.max(1e-12, sumsq / Math.max(1, frames * channels)));
+  LV.quietFrames = db < LIVE_SILENT_DB ? LV.quietFrames + frames : 0;
+  $("live-silent").hidden = LV.quietFrames < LIVE_SILENT_SEC * LV.rate;
 }
 
 function canvasSize(c) {
@@ -871,7 +993,7 @@ function shiftLeft(g, c, n) {
 // spectrogram's frequency bins up to its top. A resize redraws the whole canvas from them.
 const LIVE_HISTORY_COLS = 8192;
 function historyReset() {
-  LV.hist = { wave: new Float32Array(LIVE_HISTORY_COLS * 2), waveN: 0, spec: null, specN: 0, specBins: 0 };
+  LV.hist = { wave: new Float32Array(LIVE_HISTORY_COLS * 2), waveN: 0, spec: null, specN: 0, specBins: 0, markers: [] };
 }
 
 function pushWave(lo, hi) {
@@ -886,8 +1008,33 @@ function pushSpec(bins, kept, times) {
 }
 
 function waveColor() {
-  if (!LV.color) LV.color = getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#2f6f5e";
+  if (!LV.color) LV.color = getComputedStyle($("live")).getPropertyValue("--live-accent").trim() ||
+                            getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#2f6f5e";
   return LV.color;
+}
+
+// The spectrogram's colour where nothing was drawn yet: lighter than silence (inferno's near black),
+// so silence shows as a dark band moving in.
+function emptyColor() {
+  if (!LV.emptyColor) LV.emptyColor = getComputedStyle($("live")).getPropertyValue("--live-empty").trim() || "#2b2b2b";
+  return LV.emptyColor;
+}
+
+// The markers (questions, marks) whose columns are among the last m drawn, at their place.
+function drawMarkers(c, g, m) {
+  const h = LV.hist, first = h.waveN - m;
+  g.fillStyle = waveColor();
+  for (const mk of h.markers) {
+    if (mk.col < first || mk.col >= h.waveN) continue;
+    const x = c.width - (h.waveN - mk.col);
+    g.fillRect(x, 0, 2, c.height);
+    if (g.fillText) {
+      const px = window.devicePixelRatio || 1;
+      g.font = `bold ${Math.round(14 * px)}px sans-serif`;
+      g.textAlign = "right";                          // left of the line: drawn while the line is at the edge
+      g.fillText(mk.label, x - 4 * px, 16 * px);
+    }
+  }
 }
 
 function redrawWave(c, g) {
@@ -899,6 +1046,7 @@ function redrawWave(c, g) {
     const y0 = mid - h.wave[i + 1] * mid, y1 = mid - h.wave[i] * mid;
     g.fillRect(c.width - m + k, y0, 1, Math.max(1, y1 - y0));
   }
+  drawMarkers(c, g, m);
 }
 
 // For each row of a canvas this tall, the spectrogram bin it shows (0 Hz at the bottom).
@@ -911,7 +1059,7 @@ function specRows(height) {
 
 function redrawSpec(c, g) {
   const h = LV.hist, sp = LV.spec;
-  g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+  g.fillStyle = emptyColor(); g.fillRect(0, 0, c.width, c.height);
   sp.img = g.createImageData(1, c.height);
   sp.rows = specRows(c.height);
   const m = h.spec ? Math.min(h.specN, LIVE_HISTORY_COLS, c.width) : 0;
@@ -976,6 +1124,7 @@ function drawWave() {
     const y0 = mid - hi * mid, y1 = mid - lo * mid;
     g.fillRect(c.width - n + i, y0, 1, Math.max(1, y1 - y0));
   }
+  drawMarkers(c, g, n);                                 // markers among the columns just drawn
   cols.length = 0;
 }
 
@@ -1057,6 +1206,15 @@ function setupLive() {
   $("live-gap").onchange = splitChanged;
   $("live-monitor").onchange = () => { applyMonitor(); renderLive(); };
   $("live-heard").onchange = () => { applyMonitor(); saveLive({ heard: $("live-heard").checked }); };
+  $("live-field").onchange = () => { applyField(); saveLive({ field: $("live-field").checked }); };
+  $("live-enhance-open").onchange = () => { $("live-enhance-box").hidden = !$("live-enhance-open").checked; };
+  $("live-sound-settings").onclick = () => api().open_sound_settings();
+  $("live-q-log").onclick = logQuestion;
+  $("live-q-text").onkeydown = (e) => { if (e.key === "Enter") { e.preventDefault(); logQuestion(); } };
+  if (typeof ResizeObserver !== "undefined" && !LV.layoutWatch) {
+    LV.layoutWatch = new ResizeObserver(liveLayout);
+    LV.layoutWatch.observe($("live"));
+  }
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());
   $("live-mark").onclick = liveMark;
   $("cut-add").onclick = addCut;

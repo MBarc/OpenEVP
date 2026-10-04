@@ -73,49 +73,74 @@
         <button type="button" id="live-mode-import" aria-pressed="false" title="Copy recordings off a recorder that only has a headphone jack, played into this PC">Import from a recorder</button>
       </span>
       <span class="spacer"></span>
-      <button id="live-close" class="link" title="Back to the EVP Library">Close</button>
+      <label class="toggle" id="live-field-label" title="A dark red screen that is easier on your eyes in the dark"><input type="checkbox" id="live-field"> Night screen</label>
+      <button id="live-close" type="button" class="live-plain" title="Back to the EVP Library">Close</button>
+    </div>
+    <div id="live-strip">
+      <span id="live-time" aria-label="Time recorded">0:00</span>
+      <span id="live-meter-box">
+        <span id="live-meter" title="The input's level. Keep loud parts out of the red: that is where it clips."><span id="live-meter-fill"></span><span id="live-meter-peak"></span></span>
+        <span id="live-level">Silent</span>
+        <span id="live-clip" hidden>Too loud</span>
+      </span>
+      <span id="live-left" title="Recording time left before the drive is nearly full"></span>
+      <span id="live-input-info"></span>
+    </div>
+    <div id="live-silent" hidden role="alert">
+      <span>No sound coming in. Is the mic muted, or is the wrong input selected?</span>
+      <button id="live-sound-settings" type="button">Open sound settings</button>
     </div>
     <div id="live-settings">
       <label>Input <select id="live-input" aria-label="Audio input"></select></label>
-      <span id="live-meter" title="The input's level. Keep loud parts out of the red: that is where it clips."><span id="live-meter-fill"></span><span id="live-meter-peak"></span></span>
-      <span id="live-level">−∞ dB</span>
       <label>Save into <select id="live-folder" aria-label="Library folder to save into"></select></label>
     </div>
     <div id="live-import" hidden>
       <div id="live-split-row">
-        <label title="After Stop, suggest cuts wherever the recorder went quiet this long; you check them before anything is split"><input type="checkbox" id="live-split" checked> Suggest cuts at</label>
-        <input id="live-gap" type="number" min="0.5" max="60" step="0.5" value="3" aria-label="Seconds of silence"> seconds of silence
+        <label class="toggle" title="After Stop, suggest cuts wherever the recorder went quiet this long. You check them before anything is split."><input type="checkbox" id="live-split" checked> Suggest cuts</label>
+        <span>at <input id="live-gap" type="number" min="0.5" max="60" step="0.5" value="3" aria-label="Seconds of silence"> seconds of silence</span>
       </div>
       <details id="live-guide" open>
         <summary>How to connect a recorder</summary>
         <ol>
-          <li>Run a cable from the recorder's headphone jack to your PC's line-in, or to a USB audio adapter. Many recorders have a 3.5 mm jack; some, like the Panasonic RR-DR60, have a smaller 2.5 mm one, so you may need a 2.5 mm to 3.5 mm adapter. A line-in works better than a microphone input, which is much more sensitive.</li>
+          <li>Run a cable from the recorder's headphone jack to your PC's line-in, or to a USB audio adapter. Many recorders have a 3.5 mm jack. Some, like the Panasonic RR-DR60, have a smaller 2.5 mm one, so you may need a 2.5 mm to 3.5 mm adapter. A line-in works better than a microphone input, which is much more sensitive.</li>
           <li>Choose that input above, then play a little and set the recorder's volume to about the middle. The meter should move well, but loud parts should stay out of the red.</li>
           <li>Set the recorder's playback speed to normal, and turn voice activation off.</li>
           <li>Press Record here first, then Play on the recorder, and Stop when it is done. The import opens in the player with suggested cuts wherever the recorder went quiet for the seconds set above. Check them, remove or add cuts, then split it into separate recordings or keep it as one. The whole import is always kept.</li>
         </ol>
       </details>
     </div>
+    <div id="live-main">
+      <div id="live-scopes">
+        <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
+        <canvas id="live-spec" aria-label="Spectrogram of the input"></canvas>
+      </div>
+      <aside id="live-session" aria-label="Session">
+        <h3>Questions</h3>
+        <div id="live-q-row">
+          <input id="live-q-text" type="text" maxlength="300" enterkeyhint="send" autocomplete="off" placeholder="The question you just asked" aria-label="Question">
+          <button id="live-q-log" type="button" disabled title="Note the question you asked, at this moment (or press Enter)">Log question</button>
+        </div>
+        <ol id="live-questions" aria-label="Questions asked"></ol>
+        <h3>Marks</h3>
+        <p id="live-marks-empty" class="muted">Press MARK (or M) when you hear something.</p>
+        <ol id="live-marks" aria-label="Marks made while recording"></ol>
+      </aside>
+    </div>
     <div id="live-controls">
-      <button id="live-record" class="primary" disabled>● Record</button>
-      <button id="live-mark" disabled title="Mark this moment as an EVP (M). It becomes a 2-second mark ending now; change its class and note in the player afterwards.">★ Mark (M)</button>
-      <span id="live-time">0:00</span>
+      <button id="live-record" type="button" class="primary" disabled>● Record</button>
       <span id="live-file"></span>
-      <span class="spacer"></span>
-      <label id="live-monitor-label" title="Hear the input through your speakers or headphones, with the Enhance settings below. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
-      <label id="live-heard-label" title="Draw the spectrogram of what you hear (the Enhance settings below applied) instead of the input as it comes in. The waveform and the saved file stay the input as it came in."><input type="checkbox" id="live-heard"> Show what I hear</label>
+      <span id="live-toggles">
+      <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones, with the Enhance settings. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
+      <label class="toggle" id="live-heard-label" title="Draw the spectrogram of what you hear, with the Enhance settings applied, instead of the input as it comes in. The waveform and the saved file stay the input as it came in."><input type="checkbox" id="live-heard"> Show what I hear</label>
+      <label class="toggle" id="live-enhance-label" title="Show the Enhance controls: they change only what you hear"><input type="checkbox" id="live-enhance-open"> Enhance what I hear</label>
+      </span>
+      <button id="live-mark" type="button" disabled title="Mark this moment as an EVP (or press M). It becomes a 2-second mark ending now. Set its class and note in the list.">★ MARK</button>
     </div>
-    <details id="live-enhance-box">
-      <summary>Enhance what I hear</summary>
-      <p class="muted live-enhance-note">These change only what you hear while listening (and the spectrogram with Show what I hear). The saved recording is always the input as it came in. They are the player's Enhance settings: a change here changes them there too. Noise reduction is for recordings only.</p>
+    <div id="live-enhance-box" hidden>
+      <p class="live-enhance-note">These change only what you hear while listening, and the spectrogram with Show what I hear. The saved recording is always the input as it came in. They are the player's Enhance settings, so a change here changes them there too. Noise reduction is for recordings only.</p>
       <div id="live-enhance-panel"></div>
-    </details>
-    <p id="live-status" role="status"></p>
-    <div id="live-scopes">
-      <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
-      <canvas id="live-spec" aria-label="Spectrogram of the input"></canvas>
     </div>
-    <ul id="live-marks" aria-label="Marks made while recording"></ul>
+    <p id="live-status" role="status"></p>
   </section>
 </main>
 <footer id="player">
@@ -170,6 +195,7 @@
       </div>
       <div id="marks" hidden>
         <div id="marks-list"></div>
+        <div id="questions-list" hidden></div>
         <div id="marks-footer">
           <span id="marks-empty">No EVPs marked yet. Select a part, then press M.</span>
           <span id="backup-status"></span>

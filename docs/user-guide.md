@@ -129,16 +129,31 @@ marking it in one place marks it everywhere.
 ## Recording live
 
 Click **Record live** in the sidebar (under On this PC), or **Record live…**
-next to Open audio file. The recording view takes over the window until you
-close it.
+next to Open audio file. The recording screen takes over the window until you
+close it. It's made for a tablet or touchscreen laptop in the field: the
+buttons are big enough to tap, and the waveform and spectrogram fill the
+screen.
+
+Across the top is the status strip: the time recorded, in big numbers you can
+read at arm's length; the level meter; how much recording time is left on the
+drive ("about 9 h left"); and the input with its format.
 
 ### Choosing an input
 
 Pick the input under **Input**: the PC's built-in microphone, a USB
-microphone, a line-in socket or a USB audio adapter. The meter next to it
-shows the level, so you can see sound is coming in before you record. Keep
-the loud parts out of the red, because that's where the sound clips and gets
-distorted.
+microphone, a line-in socket or a USB audio adapter. As soon as an input is
+chosen, the waveform and spectrogram start moving, so you can check
+everything before you record. Nothing is saved until you press Record.
+
+The meter shows the level. Keep the loud parts out of the red, because that's
+where the sound clips and gets distorted; when it does, a red **Too loud**
+appears. When nothing at all is coming in, the meter says **Silent**.
+
+If nothing comes in for three seconds, OpenEVP says so: "No sound coming in.
+Is the mic muted, or is the wrong input selected?" **Open sound settings**
+takes you to Windows' sound settings. The message goes as soon as sound comes
+in. A silent input still moves across the screen, as a flat line in the
+waveform and a dark band in the spectrogram.
 
 OpenEVP remembers the input you picked last time. If it isn't plugged in, it
 uses Windows' default input and says so.
@@ -148,18 +163,24 @@ browser's "improvements" (echo cancelling, noise suppression, automatic
 volume) are turned off, because they can wipe out the very sounds you're
 looking for.
 
-### Recording and marking
+### Recording, marking and logging questions
 
 1. Under **Save into**, pick the library folder for the recording. It starts
    on the folder the EVP Library was showing.
-2. Click **● Record**. The waveform and spectrogram scroll by as it records,
+2. Tap **● Record**. The waveform and spectrogram scroll by as it records,
    and the time counts up.
-3. When you hear something, press **M** (or click **★ Mark**). OpenEVP marks
-   the two seconds just before that moment, class C, with the note "Marked
-   while recording". You can change the class and note afterwards, like any
-   other mark.
-4. Click **■ Stop**. The recording is saved and opens in the player, with its
-   marks, and the EVP Library shows the folder it's in.
+3. When you hear something, tap **★ MARK** (bottom right, under your thumb),
+   or press **M** on a keyboard. OpenEVP marks the two seconds just before that
+   moment. The mark appears in the **Marks** list beside the waveform (under
+   it on a narrow screen), class C to start with: tap **A**, **B** or **C** to
+   change it, and type what you heard in its note box.
+4. After asking a question during an EVP session, type it in the
+   **Questions** box and tap **Log question** (or press Enter). It's noted at
+   that moment, listed, and marked on the waveform as Q1, Q2 and so on. Later
+   the player shows the questions too, so you can see what was asked just
+   before a reply. Questions are never counted as EVPs.
+5. Tap **■ Stop**. The recording is saved and opens in the player, with its
+   marks and questions, and the EVP Library shows the folder it's in.
 
 Recordings are named after the moment you pressed Record, for example
 `Live 2026-10-03 21-05-09.wav`. OpenEVP never overwrites a file: if that
@@ -178,19 +199,26 @@ chose.
 If you close OpenEVP while recording, it asks first, then saves the recording
 the same way Stop does before the window closes.
 
+### The night screen
+
+Tap **Night screen** (top right) for a dark red screen that's easier on your
+eyes in the dark, and keeps your night vision. It covers the whole window
+while the recording screen is open. OpenEVP remembers it.
+
 ### Listening while you record
 
-Tick **Listen** to hear the input through your speakers or headphones. It's
-off every time you open the view, and it's best used with headphones: a
+Tap **Listen** to hear the input through your speakers or headphones. It's
+off every time you open the screen, and it's best used with headphones: a
 microphone near speakers picks up its own sound and squeals.
 
-Open **Enhance what I hear** to change what you hear: Boost, the Leveler and
-its strength, Voice filter, Cut rumble, Cut hiss, the Hum remover, and Reset.
-They're the same controls, and the same settings, as the player's Enhance tab,
-so a change here is there too, and the other way round. Noise reduction isn't
-here: it learns the noise from a recording, so it's for recordings only.
+Tap **Enhance what I hear** to show the controls that change what you hear:
+Boost, the Leveler and its strength, Voice filter, Cut rumble, Cut hiss, the
+Hum remover, and Reset. They're the same controls, and the same settings, as
+the player's Enhance tab, so a change here is there too, and the other way
+round. Noise reduction isn't here: it learns the noise from a recording, so
+it's for recordings only.
 
-Tick **Show what I hear** to draw the spectrogram of what you hear, with those
+Tap **Show what I hear** to draw the spectrogram of what you hear, with those
 settings applied, instead of the input as it comes in. OpenEVP remembers it.
 The waveform always shows the input.
 

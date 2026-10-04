@@ -48,7 +48,8 @@ const S = { devices: [], device: null, folder: null, folders: [], caps: { wav: f
             markGen: 0, markBusy: 0,                         // player mark calls: started (generation) and in flight
             // EVP clips: the player's call in flight, and the library's background job (its number, running).
             savingClips: false, clips: { job: 0, running: false },
-            reloads: new Map() };                            // rec -> {wanted, running}: marks reloads, per loaded recording
+            reloads: new Map(),                              // rec -> {wanted, running}: marks reloads, per loaded recording
+            questions: [], questionRegions: [] };            // the loaded recording's questions (Live's question log)
 
 function api() { return window.pywebview.api; }
 function fmtTime(s) { s = Math.max(0, Math.round(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
@@ -1354,6 +1355,10 @@ function applyPlayerMarks(r) {
     else if (drawn) addMarkRegion(m);
   }
   $("reviewed").checked = !!r.reviewed;
+  if (Array.isArray(r.questions)) {                             // the questions asked while recording
+    S.questions = r.questions.slice().sort((a, b) => a.at - b.at);
+    renderQuestions(); if (drawn) drawQuestions();
+  }
   S.backup = r.backup; S.backupNeeded = !!r.backup_needed;
   renderMarks();                                                // also syncs the library rows
 }
@@ -3046,8 +3051,10 @@ function playbackFinished() {
 function isCut(r) { return typeof r.id === "string" && r.id.startsWith("cut-"); }   // an import's cuts (live.js)
 
 function regionCreated(r) {
-  if (isMark(r) || isCut(r)) return;                        // marks and cuts live beside the selection
-  for (const other of S.regions.getRegions()) if (other !== r && !isMark(other) && !isCut(other)) other.remove();   // one selection at a time
+  if (isMark(r) || isCut(r) || isQuestion(r)) return;       // marks, cuts and questions live beside the selection
+  for (const other of S.regions.getRegions()) {             // one selection at a time
+    if (other !== r && !isMark(other) && !isCut(other) && !isQuestion(other)) other.remove();
+  }
   S.region = r;
   if (S.activeMark) deselectMark();                         // the bar (and the loop) is the selection's now
   showSelection();
@@ -3070,6 +3077,7 @@ function regionOut(r) {
 function regionClicked(r, e) {
   e.stopPropagation();
   if (isCut(r)) { cutClicked(r); return; }                  // clicking a cut removes it
+  if (isQuestion(r)) { S.ws.setTime(Math.max(0, r.start - 1)); S.ws.play(); return; }
   if (!isMark(r)) { r.play(); return; }
   selectMark(markId(r));
   playActiveMark();
@@ -3278,6 +3286,10 @@ function setCurrent(label, r) {
                     peaks: r.peaks || [],
                     markReason: r.markable === false ? r.mark_reason || "This recording can't be marked." : "" } : null;
   S.marks = r ? sortMarks(r.marks || []) : [];
+  S.questions = r && Array.isArray(r.questions) ? r.questions.slice().sort((a, b) => a.at - b.at) : [];
+  for (const q of S.questionRegions) { try { q.remove(); } catch (e) { /* gone */ } }
+  S.questionRegions = [];
+  renderQuestions();
   S.backup = r ? r.backup : null;
   S.backupNeeded = !!(r && r.backup_needed);
   S.backupRunning = false;
@@ -3296,6 +3308,39 @@ function sortMarks(marks) { return marks.slice().sort((a, b) => a.start - b.star
 function drawMarks(seq) {
   if (!S.ws.getDuration()) { S.ws.once("ready", () => { if (seq === S.playSeq) drawMarks(seq); }); return; }
   for (const m of S.marks) if (!S.markRegions.has(m.id)) addMarkRegion(m);
+  drawQuestions();
+}
+
+// ---- questions asked while recording (Live mode's question log): labelled markers on the waveform
+// and a list under the marks; clicking one plays from a moment before it. Never marks, never EVPs. ----
+function isQuestion(r) { return typeof r.id === "string" && r.id.startsWith("q-"); }
+
+function drawQuestions() {
+  for (const r of S.questionRegions) { try { r.remove(); } catch (e) { /* gone */ } }
+  S.questionRegions = [];
+  if (!S.ws.getDuration() || !S.regions || !S.regions.addRegion) return;
+  S.questions.forEach((q, i) => {
+    S.questionRegions.push(S.regions.addRegion({ id: `q-${i}`, start: q.at, color: "rgba(70, 130, 220, 0.85)",
+                                                 content: `Q${i + 1}`, drag: false, resize: false }));
+  });
+}
+
+function renderQuestions() {
+  const list = $("questions-list");
+  list.textContent = "";
+  list.hidden = !S.questions.length;
+  if (!S.questions.length) return;
+  const title = document.createElement("span");
+  title.className = "muted"; title.textContent = "Questions asked:";
+  list.appendChild(title);
+  S.questions.forEach((q, i) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "link question";
+    b.textContent = `Q${i + 1} ${fmtTime(q.at)} ${q.text}`;
+    b.title = "Play from just before this question";
+    b.onclick = () => { S.ws.setTime(Math.max(0, q.at - 1)); S.ws.play(); };
+    list.appendChild(b);
+  });
 }
 
 function addMarkRegion(m) {

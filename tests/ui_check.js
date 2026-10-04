@@ -2484,9 +2484,10 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     set_live_settings: async (c) => { lv.push(["set", c]); liveSettings = { ...liveSettings, ...c }; return liveSettings; },
     live_start: async (o) => { lv.push(["start", o]); return { ok: true, session: "s1", file: o.mode === "live" ? "Live 2026-10-03 21-05-09.wav" : "Import 2026-10-03 21-05-09 (full).wav", folder: "Old Mill" }; },
     live_chunk: async (sid, seq, data) => { lv.push(["chunk", sid, seq, data]); return chunkAnswer(seq); },
-    live_mark: async (sid, at) => { lv.push(["mark", sid, at]); return { ok: true, mark: { at, file: "Live 2026-10-03 21-05-09.wav", start: Math.max(0, at - 2), end: at, cls: "C" } }; },
+    live_mark: async (sid, at) => { lv.push(["mark", sid, at]); return { ok: true, mark: { id: lv.filter((c) => c[0] === "mark").length - 1, at, file: "Live 2026-10-03 21-05-09.wav", start: Math.max(0, at - 2), end: at, cls: "C" } }; },
     live_stop: async (sid) => { lv.push(["stop", sid]); return stopAnswer; },
     open_mic_settings: async () => { lv.push(["mic-settings"]); return { ok: true }; },
+    open_sound_settings: async () => { lv.push(["sound-settings"]); return { ok: true }; },
   });
   assert.ok(html.includes('id="live-entry"') && html.includes('id="open-live"') && html.includes('src="live.js"'));
   vm.runInContext(`S.lib.folders = [{ id: "root", name: "OpenEVP", rel: [], parent: null, in_clips: false },
@@ -2607,7 +2608,38 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   const mark = lv.filter((c) => c[0] === "mark").pop();
   assert.ok(Math.abs(mark[2] - 13 * 2048 / 48000) < 1e-9, String(mark[2]));
   assert.strictEqual(lv.filter((c) => c[0] === "chunk").pop()[2], 1);
-  assert.deepStrictEqual(texts($("live-marks")), ["★ 0:01"]);
+  // The live marks list: the mark with its time, big A/B/C buttons (C to start with) and a note; a
+  // change goes to the backend at once, to be stored when the file is finished.
+  const markLi = $("live-marks").children[0];
+  assert.strictEqual(markLi.children[0].textContent, "★ 0:01");
+  assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => [b.textContent, b.getAttribute("aria-pressed")]),
+                         [["A", "false"], ["B", "false"], ["C", "true"]]);
+  assert.ok($("live-marks-empty").hidden);
+  const edits = [];
+  api.live_mark_update = async (sid, id, cls, note) => { edits.push([sid, id, cls, note]); return { ok: true, mark: {} }; };
+  await markLi.children[2].onclick();                      // B
+  sameJSON(edits.pop(), ["s1", 0, "B", null]);
+  assert.deepStrictEqual(markLi.children.slice(1, 4).map((b) => b.getAttribute("aria-pressed")), ["false", "true", "false"]);
+  markLi.children[4].value = "a whisper: get out";
+  await markLi.children[4].onchange();
+  sameJSON(edits.pop(), ["s1", 0, null, "a whisper: get out"]);
+  // The question log: Enter (or Log question) notes the question at this moment, saved with the
+  // recording; it is listed and marked on the waveform.
+  const asked = [];
+  api.live_question = async (sid, at, text) => { asked.push([sid, at, text]); return { ok: true, question: { id: 0, at, text } }; };
+  assert.ok(!$("live-q-log").disabled);
+  $("live-q-text").value = "  Is anyone here with us?  ";
+  fire([$("live-q-text")], "keydown", { key: "Enter" });
+  $("live-q-text").onkeydown({ key: "Enter", preventDefault() {} });
+  await settle();
+  assert.strictEqual(asked.length, 1);
+  assert.deepStrictEqual([asked[0][0], asked[0][2]], ["s1", "Is anyone here with us?"]);
+  assert.strictEqual($("live-q-text").value, "");
+  assert.deepStrictEqual(texts($("live-questions")), ["0:01Q1. Is anyone here with us?"]);
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.label)", context), ["★", "Q1"]);
+  $("live-q-text").value = "";
+  await $("live-q-log").onclick();                         // nothing typed: nothing logged
+  assert.strictEqual(asked.length, 1);
   // Stop: the rest is sent, then the recording is saved; it opens in the player, in its folder.
   stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0,
                  files: [{ id: "lf1", name: "Live 2026-10-03 21-05-09.wav", seconds: 0.6, marks: 1 }],
@@ -2852,6 +2884,141 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     byId.delete("live-wave"); byId.delete("live-spec");
     $("live-close").onclick();
     await settle();
+  }
+  // ---- The touch screen: toggles and their memory, the night screen, the layout, the status strip,
+  // silence, and scopes that scroll even for a silent input ----
+  {
+    const ops = [];
+    const fakeCanvas = (id, w, h) => {
+      const c = { id, tagName: "CANVAS", clientWidth: w, clientHeight: h, width: 0, height: 0, style: {} };
+      const g = { fillStyle: "", globalCompositeOperation: "source-over", font: "",
+                  clearRect: () => {}, fillRect: (x, y, w2, h2) => ops.push([id, "fill", x, y, w2, h2]),
+                  fillText: (t) => ops.push([id, "text", t]), drawImage: () => {},
+                  createImageData: (iw, ih) => ({ width: iw, height: ih, data: new Uint8ClampedArray(iw * ih * 4) }),
+                  putImageData: (img, x) => ops.push([id, "put", x, img.width]) };
+      c.getContext = () => g;
+      return c;
+    };
+    byId.set("live-wave", fakeCanvas("live-wave", 400, 100)); byId.set("live-spec", fakeCanvas("live-spec", 400, 120));
+    liveSettings = { ...liveSettings, field: true };
+    vm.runInContext("LV.settings = null;", context);      // as after a restart: read from the backend again
+    await context.openLive();
+    await settle();
+    // The night screen is remembered and applied; Listen is never on by itself.
+    assert.ok($("live-field").checked && $("live").classList.contains("field"));
+    assert.ok(!$("live-monitor").checked);
+    $("live-field").checked = false; $("live-field").onchange();
+    await settle();
+    assert.ok(!$("live").classList.contains("field"));
+    sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { field: false }]);
+    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, Show what I hear,
+    // Enhance what I hear, the night screen, Suggest cuts; and the Enhance options inside.
+    for (const id of ["live-monitor-label", "live-heard-label", "live-enhance-label", "live-field-label"]) {
+      assert.ok(html.includes(`<label class="toggle" id="${id}"`), id);
+    }
+    assert.ok(html.includes('<label class="toggle" title="After Stop, suggest cuts'));
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    assert.ok(css.includes("#live label.toggle:has(input:checked)") && css.includes('#live-enhance-panel label:has(> input[type="checkbox"])'));
+    assert.ok(/#live button, #live select[^{]*\{[^}]*min-height: 48px/.test(css), "touch targets of 48 px, on the Live screen only");
+    assert.ok(!/^button\s*\{[^}]*min-height/m.test(css), "the rest of the app keeps its sizes");
+    // Enhance what I hear: a toggle that shows the controls.
+    assert.ok($("live-enhance-box").hidden);
+    $("live-enhance-open").checked = true; $("live-enhance-open").onchange();
+    assert.ok(!$("live-enhance-box").hidden);
+    $("live-enhance-open").checked = false; $("live-enhance-open").onchange();
+    // The layout: the session panel beside the scopes when wide, under them when narrow.
+    Object.defineProperty($("live"), "clientWidth", { value: 1280, configurable: true });
+    context.liveLayout();
+    assert.ok($("live").classList.contains("wide"));
+    Object.defineProperty($("live"), "clientWidth", { value: 700, configurable: true });
+    context.liveLayout();
+    assert.ok(!$("live").classList.contains("wide"));
+    // The status strip: the input and its format; the time left on the drive.
+    assert.strictEqual($("live-input-info").textContent, "Microphone (Realtek Audio) · 48 kHz stereo");
+    for (const [sec, text] of [[9 * 3600 + 1800, "about 9 h left"], [45 * 60, "about 45 min left"], [30, "under a minute left"]]) {
+      assert.strictEqual(context.fmtLeft(sec), text);
+    }
+    // Feeding the input: -120 dB (nothing at all), -85 dB (almost nothing), -20 dB (sound).
+    const tapZ = worklets[worklets.length - 1], spec = vm.runInContext("LV.analyser", context);
+    spec.getByteFrequencyData = (arr) => arr.fill(0);
+    let t = 5000;
+    const feedAt = (db, seconds) => {
+      const v = db <= -120 ? 0 : Math.round(32768 * Math.pow(10, db / 20));
+      for (let i = 0; i < Math.round(seconds * 48000 / 2048); i++) {
+        const pcm = new Int16Array(2048 * 2).fill(v);
+        tapZ.port.onmessage({ data: { pcm: pcm.buffer, frames: 2048, peak: v / 32768, sumsq: 2048 * 2 * (v / 32768) ** 2 } });
+        t += 2048 / 48;
+        context.liveFrame(t);
+      }
+    };
+    // Preview before Record: nothing at all coming in; after 3 s the screen says so, the meter says
+    // Silent, and the scopes still scroll (a flat line, dark columns): nothing is saved.
+    const chunksBefore = lv.filter((c) => c[0] === "chunk").length;
+    feedAt(-120, 2);
+    assert.ok($("live-silent").hidden, "not before 3 s");
+    feedAt(-120, 1.5);
+    assert.ok(!$("live-silent").hidden);
+    assert.ok(html.includes("No sound coming in. Is the mic muted, or is the wrong input selected?"));
+    context.drawMeter();
+    assert.strictEqual($("live-level").textContent, "Silent");
+    const waveCols = ops.filter((o) => o[0] === "live-wave" && o[1] === "fill" && o[4] === 1).length;
+    const specCols = ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length;
+    assert.ok(waveCols > 100, `the waveform scrolls a flat line (${waveCols} columns)`);
+    assert.ok(specCols > 100, `the spectrogram scrolls dark columns (${specCols})`);
+    assert.strictEqual(lv.filter((c) => c[0] === "chunk").length, chunksBefore, "nothing is sent before Record");
+    await $("live-sound-settings").onclick();
+    sameJSON(lv.pop(), ["sound-settings"]);
+    // Almost nothing (-85 dB): still "no sound coming in", but the meter shows the level.
+    feedAt(-85, 0.2);
+    context.drawMeter();
+    assert.ok(/^-8\d dB$/.test($("live-level").textContent), $("live-level").textContent);
+    assert.ok(!$("live-silent").hidden);
+    // Sound (-20 dB): the warning goes at once.
+    feedAt(-20, 0.1);
+    assert.ok($("live-silent").hidden);
+    // Too loud: clipping says so, clearly.
+    assert.ok($("live-clip").hidden);
+    tapZ.port.onmessage({ data: { pcm: new Int16Array(4096).fill(32767).buffer, frames: 2048, peak: 1, sumsq: 4096 } });
+    context.drawMeter();
+    assert.ok(!$("live-clip").hidden && $("live").classList !== undefined);
+    // While recording a near-silent input the scopes keep scrolling, and the time left is shown.
+    chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Live x.wav", stopped: null, left_seconds: 9 * 3600 + 120 });
+    api.live_start = async (o) => { lv.push(["start", o]); return { ok: true, session: "s9", file: "Live x.wav", folder: "OpenEVP", left_seconds: 10 * 3600 }; };
+    await $("live-record").onclick();
+    assert.strictEqual($("live-left").textContent, "about 10 h left");
+    ops.length = 0;
+    feedAt(-85, 1);
+    await settle();
+    assert.strictEqual($("live-left").textContent, "about 9 h left");
+    assert.ok(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length >= 35, "the waveform scrolls while recording");
+    assert.ok(ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length >= 35, "so does the spectrogram");
+    stopAnswer = { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] };
+    await $("live-record").onclick();
+    await settle();
+    byId.delete("live-wave"); byId.delete("live-spec");
+    $("live-close").onclick();
+    await settle();
+  }
+  // The player shows the questions asked while recording: markers and a list.
+  {
+    const qRegions = [];
+    const qWs = new Proxy({ getDuration: () => 30, setTime() {}, play() {} }, { get: (t2, k) => (k in t2 ? t2[k] : anything) });
+    const qReg = new Proxy({ addRegion(o) { qRegions.push(o); return { id: o.id, remove() {} }; }, getRegions: () => [] },
+                           { get: (t2, k) => (k in t2 ? t2[k] : anything) });
+    context.__qws = qWs; context.__qreg = qReg;
+    vm.runInContext("S.ws = __qws; S.regions = __qreg;", context);
+    await context.loadIntoPlayer(vm.runInContext("++S.playSeq", context), "Live q.wav",
+                                 { ok: true, rec: "rq", url: "http://a/q.wav", peaks: [0.1], duration: 30, rate: 48000, channels: 1,
+                                   fp: "fpq", marks: [], reviewed: false, backup: { status: null, detail: "" },
+                                   questions: [{ id: "b", at: 20.5, text: "Can you knock?" }, { id: "a", at: 4, text: "Is anyone here?" }] }, false);
+    await settle();
+    assert.ok(!$("questions-list").hidden);
+    assert.deepStrictEqual(texts($("questions-list")), ["Questions asked:", "Q1 0:04 Is anyone here?", "Q2 0:21 Can you knock?"]);
+    sameJSON(qRegions.filter((o) => o.id.startsWith("q-")).map((o) => [o.id, o.start, o.content]), [["q-0", 4, "Q1"], ["q-1", 20.5, "Q2"]]);
+    vm.runInContext(`setCurrent(null);`, context);
+    assert.ok($("questions-list").hidden);
+    context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
+    vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
   }
   // ---- A bridge that stalls: the audio waiting for it is bounded, and Stop never waits forever ----
   const liveTimers = [];
