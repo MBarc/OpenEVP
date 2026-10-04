@@ -263,3 +263,11 @@ body.recording #sidebar { pointer-events: none; opacity: .55; }
 .cut-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 0 2px 0 8px; }
 .cut-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
 .cut-remove:disabled { cursor: default; opacity: .5; }
+/* The player's Enhance panel, moved into the Live view while it is open (live.js) */
+#live-enhance-box { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; }
+#live-enhance-box summary { cursor: pointer; font-weight: 600; }
+#live-enhance-panel .tab-panel { display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px 20px; align-items: center;
+                                padding: 6px 0; }
+#live-enhance-panel .enhance-row { justify-content: flex-start; gap: 12px; }
+.enhance-tab .enhance-row[hidden] { display: none; }
+.live-enhance-note { padding: 4px 0; margin: 0; font-size: 12px; }

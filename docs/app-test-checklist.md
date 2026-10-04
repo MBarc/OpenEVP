@@ -301,10 +301,16 @@ test opens a real input):
     where M was pressed; the library lists it in the folder that was picked.
     The file plays in another program (Audacity, VLC) and its sample rate and
     channels match the input (Windows Sound settings, the input's Advanced tab).
-48. **Listen.** Listen is off on opening the view. With headphones on, tick it:
-    you hear yourself, with a small delay. Set Boost +12 dB in the player's
-    Enhance tab, tick **Enhance what I hear**: louder in the headphones; the
-    saved file is not louder (compare its waveform with one recorded without).
+48. **Listen and Enhance.** Listen is off on opening the view. With headphones
+    on, tick it: you hear yourself, with a small delay. Open **Enhance what I
+    hear**: Boost, Leveler, Voice filter, Cut rumble, Cut hiss, Hum and Reset are
+    there (no noise reduction). Set Boost +12 dB: louder in the headphones at
+    once; the saved file is not louder (compare its waveform with one recorded
+    without). Close the Live view: the player's Enhance tab shows +12 dB too;
+    change it there, go back to Live: the same. Tick **Show what I hear** with Hum
+    60 Hz on: the hum lines go from the spectrogram, the waveform is unchanged;
+    reopen OpenEVP: it is still ticked. Resize the window while recording: the
+    waveform and spectrogram stay.
 49. **Windows blocking the microphone.** In Settings, Privacy & security,
     Microphone, turn off "Let desktop apps access your microphone"; open Record
     live: OpenEVP says Windows is blocking it and **Open microphone settings**

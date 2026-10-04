@@ -99,7 +99,8 @@ input -> getUserMedia (EC/NS/AGC off, channelCount ideal 2)
             (x * 32768, rounded: exact for a 16-bit source), batches of 2048 frames
             with peak and sum of squares -> port.postMessage (transferred)
          -> AnalyserNode (fftSize 2048, -100..-25 dB) -> spectrogram
-         -> [Listen] -> Enhance nodes -> destination        (off by default)
+         -> [Listen or Show what I hear] -> Enhance nodes (the player's settings)
+               -> destination (Listen, off by default) / a second AnalyserNode (Show what I hear)
 page:  batches -> meter + waveform columns; while recording, ~0.5 s of PCM ->
        base64 -> a queue -> one sender: Api.live_chunk(session, seq, data)
 backend (app/live.py): seq checked, base64 decoded, disk space checked,
@@ -298,6 +299,19 @@ candidates take milliseconds), cancellable throughout:
   private mode, so the page asks for the remembered id as `ideal`, then
   re-opens by **label** with `exact` if that is a different device.
 - Listening is never remembered: off whenever the view opens.
+- **Enhance in the Live view** is the player's own Enhance tab panel (`#panel-enhance`,
+  its handlers in app.js `setupEnhance`), moved into the Live view's "Enhance what I
+  hear" box while the view is open and back afterwards (live.js `borrowEnhance` /
+  `returnEnhance`): one implementation, one stored setting (`enhance`), so a change in
+  either place is the other's too (`setEnhance` also calls `liveEnhanceChanged`).
+  Noise reduction (learnt from a recording) and "Exports enhanced" are hidden there;
+  Cut hiss follows the input's rate (`enhRate` asks `liveRate`). The chain
+  (`applyMonitor`) is built only while Listen or Show what I hear is on: the source
+  goes to the worklet and the raw analyser directly (the saved file and the waveform
+  are always the input) and, through the chain, to the speakers (Listen) and to a
+  second analyser (Show what I hear, remembered as the setting `live.heard`), which
+  the spectrogram then reads. The nodes are Web Audio's own (biquads, compressor,
+  gain, wave shaper): a few, rebuilt only when a setting changes.
 - If a saved Live recording cannot be opened in the player, Stop's result says
   why (`player_error`) and the page shows it; the file is saved either way.
 

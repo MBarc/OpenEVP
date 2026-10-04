@@ -52,7 +52,7 @@ from .library_ops import CLOSING, ROOT_CHANGED, _fail, _file_id, _plain, _root_i
 from .store import MIN_MARK_LENGTH, StoreReadOnly, StoreUnavailable
 
 PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute paths)
-LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool}
+LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool}
 RESERVE_BYTES = 500 << 20        # recording stops before the disk has less than this free
 WARN_SECONDS = 15 * 60           # ... and warns once less than this much audio still fits
 MARK_SECONDS = 2.0               # a mark: this long, ending when M was pressed
@@ -284,20 +284,24 @@ class LiveOps:
     # ---- settings ----
     def live_settings(self):
         """The Live view's remembered choices: the input last used ({"id", "label"} or
-        None), the silence split in seconds (0 = off) and whether Import was on."""
+        None), the silence split in seconds (0 = off), whether Import was on, and whether
+        the spectrogram shows what is heard (the Enhance settings applied) instead of the
+        input. (The Enhance settings themselves are the player's: one setting, shared.)"""
         saved = self._store.get_setting(LIVE_SETTING) if self._store is not None else None
         saved = self._live_saved or (saved if isinstance(saved, dict) else {})
         split = _split(saved.get("split"))
         return {"ok": True, "input": _clean_input(saved.get("input")),
                 "split": silence.DEFAULT_GAP if split is None else split,
-                "import": saved.get("import") is True, "max_split": silence.MAX_GAP,
+                "import": saved.get("import") is True, "heard": saved.get("heard") is True,
+                "max_split": silence.MAX_GAP,
                 "reserve_mb": RESERVE_BYTES >> 20}
 
     def set_live_settings(self, changes):
-        if not isinstance(changes, dict) or set(changes) - {"input", "split", "import"}:
+        if not isinstance(changes, dict) or set(changes) - {"input", "split", "import", "heard"}:
             return _fail("Unknown Live settings.")
         current = self.live_settings()
-        new = {"input": current["input"], "split": current["split"], "import": current["import"]}
+        new = {"input": current["input"], "split": current["split"], "import": current["import"],
+               "heard": current["heard"]}
         if "input" in changes:
             new["input"] = _clean_input(changes["input"]) if changes["input"] is not None else None
             if changes["input"] is not None and new["input"] is None:
@@ -306,10 +310,11 @@ class LiveOps:
             if _split(changes["split"]) is None:
                 return _fail(f"The silence gap must be between 0.5 and {silence.MAX_GAP:g} seconds.")
             new["split"] = _split(changes["split"])
-        if "import" in changes:
-            if not isinstance(changes["import"], bool):
-                return _fail("Unknown Live settings.")
-            new["import"] = changes["import"]
+        for key in ("import", "heard"):
+            if key in changes:
+                if not isinstance(changes[key], bool):
+                    return _fail("Unknown Live settings.")
+                new[key] = changes[key]
         self._live_saved = new                   # this session's, also when it cannot be remembered
         if self._store is not None:
             try:

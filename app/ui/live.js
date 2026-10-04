@@ -13,6 +13,7 @@ const LV = {
   settings: null,                        // live_settings(): input, split, import
   mode: "live",                          // "live" or "import"
   stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], opening: 0,
+  heardAnalyser: null,                   // the spectrogram of what is heard (Show what I hear)
   rate: 0, channels: 0, deviceId: "", label: "", devices: [],
   rec: null,                             // the recording (see startRecording)
   flushId: 0, flushWaiters: new Map(),   // worklet flushes waiting for their answer
@@ -21,6 +22,7 @@ const LV = {
   spec: { bins: null, last: 0, lut: null, img: null },
   raf: 0, lastStatus: 0, drawn: 0, color: "",
   hist: null, redrawTimer: 0, sizeWatch: null, ratioWatch: null,   // drawn columns kept for redrawing (historyReset)
+  enhanceHome: null,                     // where the player's Enhance panel goes back to (borrowEnhance)
   cuts: null,                            // an import's cuts: {job, fp, cuts, suggested, looking, splitJob}
   cutRegions: [],                        // the cuts drawn on the waveform
   jobs: new Map(), jobEvents: new Map(), // import jobs the page knows (job -> handler); events of jobs it does not yet
@@ -65,18 +67,51 @@ async function openLive() {
   $("live-gap").value = String(LV.settings.split > 0 ? LV.settings.split : 3);
   $("live-gap").disabled = !$("live-split").checked;
   $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
-  $("live-enhance").checked = false;
+  $("live-heard").checked = !!LV.settings.heard;
+  borrowEnhance();
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
   renderLive();
   await openInput(LV.settings.input);
 }
 
-// Called by renderMain whenever another view is shown: the input is let go of.
+// Called by renderMain whenever another view is shown: the input is let go of, and the Enhance panel
+// goes back to the player.
 function liveViewLeft() {
+  returnEnhance();
   if (!LV.stream && !LV.ctx) return;
   closeInput();
 }
+
+// ---- the player's Enhance panel, in the Live view while it is open ----
+// One panel, one implementation: the player's own Enhance tab panel (index.html #panel-enhance, with
+// its handlers in app.js setupEnhance) is moved into the Live view and back. Its settings are the
+// player's, shared. Noise reduction (learnt from a recording) and "Exports enhanced" do not apply here.
+function borrowEnhance() {
+  const panel = $("panel-enhance");
+  if (LV.enhanceHome || !panel.parentNode) return;
+  LV.enhanceHome = { parent: panel.parentNode, next: panel.nextSibling, hidden: panel.hidden };
+  $("live-enhance-panel").appendChild(panel);
+  panel.hidden = false;
+  $("noise-row").hidden = true;
+  showEnhance();                                    // Cut hiss follows the input's rate here
+}
+
+function returnEnhance() {
+  const home = LV.enhanceHome, panel = $("panel-enhance");
+  if (!home) return;
+  LV.enhanceHome = null;
+  home.parent.insertBefore(panel, home.next && home.next.parentNode === home.parent ? home.next : null);
+  panel.hidden = home.hidden;
+  $("noise-row").hidden = false;
+  applyEnhance(); showEnhance();                    // the recording's rate again
+}
+
+// The rate Enhance works at while the Live view is open (app.js enhRate), else 0.
+function liveRate() { return liveOpen() && LV.rate ? LV.rate : 0; }
+
+// The Enhance settings changed (app.js setEnhance): what is heard follows at once.
+function liveEnhanceChanged() { if (LV.ctx) applyMonitor(); }
 
 // The folders a recording can go into: the library's (not Clips folders), the one shown in the
 // library picked (else the library folder itself).
@@ -135,7 +170,6 @@ function renderLive() {
   $("live-mark").disabled = !rec || stopping;
   for (const id of ["live-input", "live-folder", "live-mode-live", "live-mode-import", "live-split", "live-close"]) $(id).disabled = rec;
   $("live-gap").disabled = rec || !$("live-split").checked;
-  $("live-enhance").disabled = !$("live-monitor").checked;
   document.body.classList.toggle("recording", rec);
   if (!rec) $("live-time").textContent = "0:00";
 }
@@ -267,7 +301,7 @@ function closeInput(keepSeq = false) {
   if (LV.node) { LV.node.port.onmessage = null; try { LV.node.disconnect(); } catch (e) { /* gone */ } }
   if (LV.stream) for (const t of LV.stream.getTracks()) { t.onended = null; t.stop(); }
   if (LV.ctx) { try { LV.ctx.close(); } catch (e) { /* gone */ } }
-  Object.assign(LV, { stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [] });
+  Object.assign(LV, { stream: null, ctx: null, src: null, node: null, analyser: null, monitor: [], heardAnalyser: null });
   LV.meter.peak = LV.meter.rms = 0;
   if (LV.raf) { cancelAnimationFrame(LV.raf); LV.raf = 0; }
 }
@@ -282,20 +316,36 @@ async function inputEnded() {
 }
 
 // ---- listening ----
+// What is heard: the input through the Enhance chain (the player's settings), to the speakers with
+// Listen, and to a second analyser with Show what I hear. The capture never goes through it: the
+// worklet and the raw analyser take the source directly, so the saved file and the waveform stay
+// the input as it came in. With neither on, no chain exists at all (no CPU spent on it).
 function applyMonitor() {
   const ctx = LV.ctx;
   if (!ctx) return;
   for (const n of LV.monitor) { try { n.disconnect(); } catch (e) { /* gone */ } }
   LV.monitor = [];
   try { LV.src.disconnect(); } catch (e) { /* not connected */ }
-  LV.src.connect(LV.node); LV.src.connect(LV.analyser);
-  if (!$("live-monitor").checked) return;
-  const stages = $("live-enhance").checked && S.enh.settings ? enhanceGraph(S.enh.settings, ctx.sampleRate) : [];
+  LV.src.connect(LV.node); LV.src.connect(LV.analyser);            // the capture: always raw
+  const listen = $("live-monitor").checked, heard = $("live-heard").checked;
+  if (!listen && !heard) return;
+  const stages = S.enh.settings ? enhanceGraph(S.enh.settings, ctx.sampleRate) : [];
   LV.monitor = stages.flatMap((st) => makeNodes(ctx, st));
   let at = LV.src;
   for (const n of LV.monitor) { at.connect(n); at = n; }
-  at.connect(ctx.destination);
+  if (listen) at.connect(ctx.destination);
+  if (heard) {
+    if (!LV.heardAnalyser) {
+      LV.heardAnalyser = ctx.createAnalyser();
+      LV.heardAnalyser.fftSize = 2048; LV.heardAnalyser.smoothingTimeConstant = 0;
+      LV.heardAnalyser.minDecibels = LIVE_DB_FLOOR; LV.heardAnalyser.maxDecibels = LIVE_DB_TOP;
+    }
+    at.connect(LV.heardAnalyser);
+  }
 }
+
+// The analyser the spectrogram reads: what is heard with Show what I hear, else the input.
+function specAnalyser() { return $("live-heard").checked && LV.heardAnalyser ? LV.heardAnalyser : LV.analyser; }
 
 // ---- audio from the worklet: meter, waveform, and the chunks a recording sends ----
 function liveAudio(m) {
@@ -951,7 +1001,7 @@ function infernoLut() {
 }
 
 function drawSpec(now) {
-  const c = $("live-spec"), a = LV.analyser, sp = LV.spec;
+  const c = $("live-spec"), a = specAnalyser(), sp = LV.spec;
   if (!a || !c.getContext) return;
   const g = c.getContext("2d");
   if (canvasSize(c) || !sp.img || sp.img.height !== c.height) redrawSpec(c, g);   // resized: everything again
@@ -1006,7 +1056,7 @@ function setupLive() {
   $("live-split").onchange = splitChanged;
   $("live-gap").onchange = splitChanged;
   $("live-monitor").onchange = () => { applyMonitor(); renderLive(); };
-  $("live-enhance").onchange = applyMonitor;
+  $("live-heard").onchange = () => { applyMonitor(); saveLive({ heard: $("live-heard").checked }); };
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());
   $("live-mark").onclick = liveMark;
   $("cut-add").onclick = addCut;

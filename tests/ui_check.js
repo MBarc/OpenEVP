@@ -2493,6 +2493,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                                     { id: "f1", name: "Old Mill", rel: ["Old Mill"], parent: "root", in_clips: false },
                                     { id: "c1", name: "Clips", rel: ["Old Mill", "Clips"], parent: "f1", in_clips: true }];
                    S.lib.folderById = new Map(S.lib.folders.map((d) => [d.id, d])); S.lib.folderId = "f1"; S.lib.flat = false;`, context);
+  $("player-tab-panels").appendChild($("panel-enhance"));        // its home in the player, as index.html has it
+  $("panel-enhance").hidden = true;
   mics.requests.length = 0;
   await context.openLive();
   await settle();
@@ -2516,19 +2518,54 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(tap.opts.processorOptions.channels, 2);
   const stream = ctxLive.nodes.find((n) => n.kind === "stream");
   assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);   // not to the speakers
-  assert.ok(!$("live-monitor").checked && $("live-enhance").disabled);
+  assert.ok(!$("live-monitor").checked, "Listen is off when the view opens");
   assert.ok(!$("live-record").disabled && $("live-mark").disabled);
-  // Listen: the input to the speakers; with "Enhance what I hear", through the player's Enhance chain.
+  // The player's own Enhance panel is in the Live view (one implementation), without noise reduction.
+  assert.strictEqual($("panel-enhance").parentNode, $("live-enhance-panel"));
+  assert.ok(!$("panel-enhance").hidden && $("noise-row").hidden);
+  assert.ok(html.includes("Noise reduction is for recordings only.") && html.includes("Use headphones"));
+  // Listen: the input to the speakers, through the Enhance chain (the player's settings). A change in
+  // the panel is the player's setting (saved once for both) and is heard at once.
+  const liveEnhSaved = [];
+  api.set_enhance = async (st) => { liveEnhSaved.push(st); return { ok: true, enhance: st, remembered: true }; };
   $("live-monitor").checked = true; $("live-monitor").onchange();
-  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);
-  vm.runInContext(`S.enh.settings = normEnhance({ boost: 6 });`, context);
-  $("live-enhance").checked = true; $("live-enhance").onchange();
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);   // nothing on: straight
+  $("boost").value = "6"; $("boost").oninput();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.enh.settings.boost", context), 6);
+  assert.strictEqual(liveEnhSaved.pop().boost, 6, "saved as the player's Enhance setting");
   const chainOut = stream.outs[2];
   assert.strictEqual(chainOut.kind, "gain");
   assert.strictEqual(chainOut.outs[0].kind, "gain");                                 // the limiter's pre-gain, then its curve
+  // The capture never goes through it: the worklet (the saved file) and the waveform take the source.
+  assert.strictEqual(stream.outs[0], tap, "the worklet gets the raw input");
+  assert.ok(!ctxLive.nodes.filter((n) => n.kind === "gain").some((n) => n.outs.includes(tap)), "never the enhanced signal");
+  $("leveler").checked = true; $("leveler").onchange();
+  assert.ok(ctxLive.nodes.some((n) => n.kind === "compressor" && stream.outs.length === 3), "the Leveler is heard");
+  assert.strictEqual(stream.outs[0], tap);
+  // Show what I hear: the spectrogram reads the enhanced signal (remembered); the waveform stays raw.
+  assert.ok(!$("live-heard").checked);
+  $("live-heard").checked = true; $("live-heard").onchange();
+  await settle();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { heard: true }]);
+  const heardA = vm.runInContext("LV.heardAnalyser", context);
+  assert.ok(heardA && vm.runInContext("specAnalyser() === LV.heardAnalyser", context));
+  assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA) && n !== stream), "fed from the end of the chain");
+  // Listen off, Show what I hear on: the chain still runs for the spectrogram, nothing to the speakers.
   $("live-monitor").checked = false; $("live-monitor").onchange();
-  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);
-  vm.runInContext(`S.enh.settings = normEnhance({});`, context);
+  assert.ok(!ctxLive.nodes.some((n) => n.outs.some((o) => o.kind === "destination")), "nothing is heard");
+  assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA)));
+  $("live-heard").checked = false; $("live-heard").onchange();
+  await settle();
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "with neither, no chain at all");
+  assert.ok(vm.runInContext("specAnalyser() === LV.analyser", context));
+  // Settings shared the other way: the player's Enhance (setEnhance) is what Live hears.
+  vm.runInContext(`setEnhance({ boost: 0, leveler: false, hum: "60" });`, context);
+  $("live-monitor").checked = true; $("live-monitor").onchange();
+  assert.ok(stream.outs.length === 3 && stream.outs[2].kind === "biquad" && stream.outs[2].type === "notch");
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  vm.runInContext(`setEnhance({ ...ENH_DEFAULT });`, context);
+  await settle();
   // Another input: opened, and remembered (by id and name).
   $("live-input").value = "d-mic";
   await $("live-input").onchange();
@@ -2592,6 +2629,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.ok($("live").hidden && !$("player").hidden && !document.body.classList.contains("recording"));
   assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-05-09.wav in Old Mill.");
   assert.strictEqual(tap2.ctx.state, "closed", "the input is let go of");
+  assert.strictEqual($("panel-enhance").parentNode, $("player-tab-panels"), "the Enhance panel is back in the player");
+  assert.ok(!$("noise-row").hidden);
   assert.strictEqual(vm.runInContext("S.lib.folderId", context), "f1");
 
   // A recording that could not be opened in the player: saved, and said so.

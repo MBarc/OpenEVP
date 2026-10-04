@@ -2530,7 +2530,8 @@ function normEnhance(v) {                       // each damaged or missing field
   out.boost = Math.round(out.boost);
   return out;
 }
-function enhRate() { return (S.current && S.current.rate) || 48000; }   // no recording: as if wide-band
+// The rate Enhance works at: the Live input's while the Live view is open (live.js), else the recording's.
+function enhRate() { return liveRate() || (S.current && S.current.rate) || 48000; }   // no recording: as if wide-band
 function hissAvailable(rate) { const sp = S.caps.enhance_spec; return !!sp && rate >= sp.hiss_min_rate; }
 
 // The stages for a recording at this rate, as openevp.enhance.graph() makes them (keep the two alike).
@@ -2675,7 +2676,7 @@ function showEnhance() {
   $("hum").value = s.hum;
   // Never on unnoticed: the Enhance tab's dot, and a tag above the waveform.
   $("enhanced-tag").hidden = !on;
-  $("export-heard-label").hidden = !on;
+  $("export-heard-label").hidden = !on || liveOpen();      // exports are the player's; Live only listens
   $("export-heard").checked = S.enh.exportHeard;
   showNoise();
   showTabMarks();
@@ -2687,6 +2688,7 @@ function setEnhance(changes) {
   S.enh.settings = normEnhance({ ...S.enh.settings, ...changes });
   if (!was && enhanceOn()) S.enh.exportHeard = true;          // the user turned it on: exports follow
   applyEnhance(); resumeAudio(); showEnhance();
+  liveEnhanceChanged();                                      // Live mode's listening uses them too (live.js)
   saveEnhance();
 }
 

@@ -184,9 +184,18 @@ Tick **Listen** to hear the input through your speakers or headphones. It's
 off every time you open the view, and it's best used with headphones: a
 microphone near speakers picks up its own sound and squeals.
 
-**Enhance what I hear** applies the player's Enhance settings (Boost, filters,
-Leveler, hum) to what you hear. The saved recording is never enhanced. It's
-always the input as it came in.
+Open **Enhance what I hear** to change what you hear: Boost, the Leveler and
+its strength, Voice filter, Cut rumble, Cut hiss, the Hum remover, and Reset.
+They're the same controls, and the same settings, as the player's Enhance tab,
+so a change here is there too, and the other way round. Noise reduction isn't
+here: it learns the noise from a recording, so it's for recordings only.
+
+Tick **Show what I hear** to draw the spectrogram of what you hear, with those
+settings applied, instead of the input as it comes in. OpenEVP remembers it.
+The waveform always shows the input.
+
+None of this touches the recording. The saved file is always the input as it
+came in.
 
 ### If the power goes or the app crashes
 

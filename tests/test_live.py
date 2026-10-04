@@ -924,14 +924,17 @@ class LiveApiTests(Tmp):
     def test_settings_are_remembered(self):
         a = self.api()
         self.assertEqual((a.live_settings()["split"], a.live_settings()["input"]), (3.0, None))
-        r = a.set_live_settings({"input": {"id": "abc", "label": "USB Audio (Line)"}, "split": 5, "import": True})
+        self.assertFalse(a.live_settings()["heard"])
+        r = a.set_live_settings({"input": {"id": "abc", "label": "USB Audio (Line)"}, "split": 5, "import": True,
+                                 "heard": True})
         self.assertTrue(r["ok"])
         b = self.api()
         got = b.live_settings()
-        self.assertEqual((got["input"], got["split"], got["import"]), ({"id": "abc", "label": "USB Audio (Line)"}, 5, True))
+        self.assertEqual((got["input"], got["split"], got["import"], got["heard"]),
+                         ({"id": "abc", "label": "USB Audio (Line)"}, 5, True, True))
         self.assertTrue(b.set_live_settings({"split": 0})["ok"])
         self.assertEqual(b.live_settings()["split"], 0)
-        for bad in ({"split": 0.1}, {"split": True}, {"input": {"id": 1}}, {"import": "yes"}, {"other": 1}, []):
+        for bad in ({"split": 0.1}, {"split": True}, {"input": {"id": 1}}, {"import": "yes"}, {"heard": 1}, {"other": 1}, []):
             self.assertFalse(b.set_live_settings(bad)["ok"], bad)
 
 

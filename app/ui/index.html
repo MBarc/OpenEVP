@@ -102,9 +102,14 @@
       <span id="live-time">0:00</span>
       <span id="live-file"></span>
       <span class="spacer"></span>
-      <label id="live-monitor-label" title="Hear the input through your speakers or headphones. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
-      <label id="live-enhance-label" title="Apply the player's Enhance settings to what you hear while listening. The saved file is always the input as it came in."><input type="checkbox" id="live-enhance"> Enhance what I hear</label>
+      <label id="live-monitor-label" title="Hear the input through your speakers or headphones, with the Enhance settings below. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
+      <label id="live-heard-label" title="Draw the spectrogram of what you hear (the Enhance settings below applied) instead of the input as it comes in. The waveform and the saved file stay the input as it came in."><input type="checkbox" id="live-heard"> Show what I hear</label>
     </div>
+    <details id="live-enhance-box">
+      <summary>Enhance what I hear</summary>
+      <p class="muted live-enhance-note">These change only what you hear while listening (and the spectrogram with Show what I hear). The saved recording is always the input as it came in. They are the player's Enhance settings: a change here changes them there too. Noise reduction is for recordings only.</p>
+      <div id="live-enhance-panel"></div>
+    </details>
     <p id="live-status" role="status"></p>
     <div id="live-scopes">
       <canvas id="live-wave" aria-label="Waveform of the input"></canvas>
