@@ -137,10 +137,17 @@ after Stop (an import with a silence gap set): it opens in the player with
   the first three quarters (52.5 s). It is told its budget, less a 3 s margin
   (`liveDrainForClose(49500)`), and fits its whole Stop in it: every wait
   (flush, chunks, each mark/edit/question call, the queue as a whole) is cut to
-  what is left less 8 s kept for `live_stop`. What is called off, unanswered or
-  still waiting (`liveUnsavedNow()`) is then read by the window (at most 2 s) and
-  kept by `Api.record_unsaved` in the setting `live_unsaved`; the next start
-  says it (`live_recover` returns it as `unsaved`, once). If the page did not
+  what is left less 8 s kept for `live_stop`. The deadline is one value every
+  wait reads (`liveWait`, re-armed by `setDeadline`), so a close that comes
+  during a Stop already under way shrinks that Stop's remaining waits too. What
+  is called off, unanswered or still waiting (`liveUnsavedNow()`) is then read by
+  the window (at most 2 s) and kept by `Api.record_unsaved` in the setting
+  `live_unsaved` (on its own thread, waited for at most 2 s; if the settings
+  write stalls, `Api.log_unsaved` appends it to `live-unsaved.jsonl` in the data
+  folder instead, on a thread never waited for). The next start says it
+  (`live_recover` returns both as `unsaved`, once). Every step of the close runs
+  bounded: the window's own last steps (letting the close through, destroying
+  the window) are waited for at most 5 s each. If the page did not
   finish, `Api.finish_recording()`
   (which may wait on the recording's lock or the disk) runs on a thread of its
   own until the deadline; then the window closes regardless. `shutdown()` waits

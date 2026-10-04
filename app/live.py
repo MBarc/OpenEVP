@@ -55,6 +55,7 @@ PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute pa
 UNSAVED_SETTING = "live_unsaved"  # changes made while recording that may not have been saved when
                                   # OpenEVP closed: [{"file", "items": [text]}], said at the next start
 MAX_UNSAVED = 200
+UNSAVED_LOG = "live-unsaved.jsonl"  # in the data folder: the same, written when the settings could not be
 LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool,
                                  #  "field": bool (the dark night screen)}
 RESERVE_BYTES = 500 << 20        # recording stops before the disk has less than this free
@@ -1055,6 +1056,45 @@ class LiveOps:
         except (StoreReadOnly, StoreUnavailable):
             return False
 
+    def _unsaved_log(self):
+        folder = getattr(self._store, "_folder", None) if self._store is not None else None
+        return os.path.join(folder, UNSAVED_LOG) if folder else None
+
+    def log_unsaved(self, report):
+        """record_unsaved() did not return in time as the window closed (a stalled settings
+        write): the list is appended to a plain log file in the data folder instead, which the
+        next start reads as well (live_recover)."""
+        path = self._unsaved_log()
+        if path is None or not isinstance(report, dict) or not isinstance(report.get("items"), list):
+            return False
+        items = [x[:400] for x in report["items"] if isinstance(x, str) and x][:MAX_UNSAVED]
+        name = report.get("file") if isinstance(report.get("file"), str) else ""
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps({"file": name[:300], "items": items}) + "\n")
+            return True
+        except OSError:
+            return False
+
+    def _read_unsaved_log(self):
+        """The changes log_unsaved() wrote down, once (the file is removed after reading)."""
+        path = self._unsaved_log()
+        out = []
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        k = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(k, dict) and isinstance(k.get("items"), list) and k["items"]:
+                        out.append({"file": k.get("file") if isinstance(k.get("file"), str) else "",
+                                    "items": [x for x in k["items"] if isinstance(x, str)]})
+            os.remove(path)
+        except (OSError, TypeError):
+            pass
+        return out
+
     def live_recover(self):
         """Finish the .part files a crash left behind (once the store is writable):
         {"ok", "recovered": [{"name", "folder", "seconds", "marks"}], "failed": [text],
@@ -1071,6 +1111,7 @@ class LiveOps:
                 store.set_setting(UNSAVED_SETTING, [])
             except (StoreReadOnly, StoreUnavailable):
                 pass
+        out["unsaved"] += self._read_unsaved_log()
         with self._live_lock:
             active = set()
             if self._live is not None and self._live.piece is not None:

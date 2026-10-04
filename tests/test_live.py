@@ -408,6 +408,15 @@ class LiveApiTests(Tmp):
         self.assertFalse(os.path.exists(part + ".json"))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
+    def test_unsaved_changes_logged_when_the_settings_stalled_are_said_at_the_next_start(self):
+        a = self.api()
+        self.assertTrue(a.log_unsaved({"file": "Live x.wav", "items": ["the question \"Who?\"", 3]}))
+        self.assertTrue(a.log_unsaved({"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}))
+        got = self.api().live_recover()["unsaved"]
+        self.assertEqual(got, [{"file": "Live x.wav", "items": ["the question \"Who?\""]},
+                               {"file": "Live y.wav", "items": ["class A for the mark at 0:02"]}])
+        self.assertEqual(self.api().live_recover()["unsaved"], [])
+
     def test_record_unsaved_is_said_once_at_the_next_start(self):
         a = self.api()
         self.assertTrue(a.record_unsaved({"file": "Live x.wav", "items": ["class B for the mark at 0:04", 5, ""]}))
@@ -1414,6 +1423,55 @@ class CloseDrainTests(unittest.TestCase):
                                 report=lambda got: order.append(("report", got)))
         self.assertEqual(order, ["read", ("report", listed), "finalize", "close"])
         self.assertEqual(w.js[0], "liveDrainForClose(0); true")         # 3 s for the page: all margin
+
+    def test_a_report_that_hangs_cannot_hold_the_close(self):
+        # Astra: report() writes the settings, which may stall on the disk. It runs on a thread of its
+        # own, waited for briefly; then log() writes the list down instead, and the close goes on.
+        import json as js
+        import threading
+        import time as clock
+        from app import main
+        never = threading.Event()
+        listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}
+        order = []
+
+        class Page(self.Window):
+            def evaluate_js(self, code):
+                return js.dumps(listed) if code == main._UNSAVED_JS else super().evaluate_js(code)
+
+        def report(got):
+            order.append("report")
+            never.wait()
+        w = Page([True])
+        t0 = clock.monotonic()
+        with mock.patch.object(main, "CLOSE_REPORT_WAIT", 0.2):
+            main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"),
+                                    timeout=1.0, sleep=lambda s: None, report=report,
+                                    log=lambda got: order.append(("log", got)))
+        took = clock.monotonic() - t0
+        self.assertLess(took, 1.5, took)
+        for _ in range(100):
+            if ("log", listed) in order:
+                break
+            clock.sleep(0.01)
+        self.assertEqual(order, ["report", ("log", listed), "close"])
+        self.assertTrue(w.destroyed)
+        never.set()
+
+    def test_the_last_steps_of_the_close_are_bounded_too(self):
+        import threading
+        import time as clock
+        from app import main
+        never = threading.Event()
+
+        class Stuck(self.Window):
+            def destroy(self):
+                never.wait()
+        t0 = clock.monotonic()
+        with mock.patch.object(main, "CLOSE_LAST_WAIT", 0.2):
+            main._close_after_drain(Stuck([True]), never.wait, sleep=lambda s: None)
+        self.assertLess(clock.monotonic() - t0, 1.5)
+        never.set()
 
     def test_a_page_that_is_gone_still_closes(self):
         from app import main

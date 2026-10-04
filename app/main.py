@@ -156,7 +156,8 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
 CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
 CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
 CLOSE_PAGE_MARGIN = 3.0            # seconds of the page's share it is not told about: polling and the report after
-CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved
+CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved, and again to keep it
+CLOSE_LAST_WAIT = 5.0              # seconds the window's own last steps (before_close, destroy) are waited for
 _DRAIN_START_JS = "liveDrainForClose({ms}); true"
 _DRAIN_DONE_JS = "window.__liveDrained === true"
 _UNSAVED_JS = "JSON.stringify(liveUnsavedNow())"
@@ -167,8 +168,24 @@ def _drain_start_js(page_seconds):
     return _DRAIN_START_JS.format(ms=int(max(0.0, page_seconds - CLOSE_PAGE_MARGIN) * 1000))
 
 
+def _bounded(fn, seconds, name):
+    """Run fn on a thread of its own and wait for it at most `seconds`: True if it returned."""
+    done = threading.Event()
+
+    def run():
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            done.set()
+    threading.Thread(target=run, name=name, daemon=True).start()
+    return done.wait(max(0.0, seconds))
+
+
 def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
-                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None):
+                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None,
+                       log=None):
     """Closing during a recording, on a worker thread: the page stops and saves it
     as Stop does (the worklet's last samples, every queued chunk, then the backend
     finishes the file: live.js liveDrainForClose). The whole close takes at most
@@ -180,12 +197,16 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
     - then the page's list of marks, edits and questions that may not have been
       saved (liveUnsavedNow: called off, unanswered, or still waiting) is read,
       briefly, and given to report(), which keeps it for the next start: a closing
-      window cannot show it, and it must never be lost without a word;
+      window cannot show it, and it must never be lost without a word. report() runs
+      on a thread of its own too (its store write may stall); if it does not return
+      in time, log() writes the list down instead (on its own thread, never waited
+      for) and the close goes on;
     - if it did not finish, finalize() (the backend finishing the file with what
       has arrived) runs on a thread of its own too, until the deadline: it may wait
       on the recording's lock or on the disk;
-    then before_close() and the window closes, finished or not. A file left
-    unfinished is a .part that the next start recovers."""
+    then before_close() and the window closes, finished or not (both on threads of
+    their own, waited for at most CLOSE_LAST_WAIT seconds: nothing here waits without
+    a limit). A file left unfinished is a .part that the next start recovers."""
     start = time.monotonic()
     drained = threading.Event()
     page_seconds = timeout * (1 - finalize_share)
@@ -221,21 +242,20 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
         asker.start()
         asker.join(page_seconds)
         if report is not None:
-            reader = threading.Thread(target=read_unsaved, name="close-drain-unsaved", daemon=True)
-            reader.start()
-            reader.join(max(0.0, min(CLOSE_REPORT_WAIT, timeout - (time.monotonic() - start))))
+            left = lambda: timeout - (time.monotonic() - start)     # noqa: E731
+            _bounded(read_unsaved, min(CLOSE_REPORT_WAIT, left()), "close-drain-unsaved")
             if unsaved:
-                try:
-                    report(unsaved[0])
-                except Exception:
-                    pass
+                got = unsaved[0]
+                if not _bounded(lambda: report(got), min(CLOSE_REPORT_WAIT, left()), "close-drain-report") \
+                        and log is not None:
+                    threading.Thread(target=log, args=(got,), name="close-drain-log", daemon=True).start()
         if not drained.is_set() and finalize is not None:
             finisher = threading.Thread(target=run_finalize, name="close-finalize", daemon=True)
             finisher.start()
             finisher.join(max(0.0, timeout - (time.monotonic() - start)))
     finally:
-        before_close()
-        window.destroy()
+        _bounded(before_close, CLOSE_LAST_WAIT, "close-before")
+        _bounded(window.destroy, CLOSE_LAST_WAIT, "close-destroy")
 
 
 def _own_taskbar_identity():
@@ -620,7 +640,8 @@ def _run_app(smoke=None):
                     # Not yet: the page first saves what it still holds (bounded), then the
                     # window closes (close_now lets that close through).
                     threading.Thread(target=_close_after_drain, args=(window, close_now, api.finish_recording),
-                                     kwargs={"report": api.record_unsaved}, name="close-drain", daemon=True).start()
+                                     kwargs={"report": api.record_unsaved, "log": api.log_unsaved},
+                                     name="close-drain", daemon=True).start()
                     return False
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the

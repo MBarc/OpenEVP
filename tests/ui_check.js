@@ -3128,6 +3128,49 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.ok(reported.items[0].startsWith("class C for the mark at") && reported.items[1].startsWith("the note for the mark at") &&
               reported.items[2].startsWith("class A for the mark at"), JSON.stringify(reported));
     assert.strictEqual(reported.file, "Live x.wav");
+    // Astra: the window closes while a Stop the user pressed is already under way (five edits queued,
+    // 14 s each: on its own it would take over a minute). The close's budget reaches the Stop running
+    // (every wait reads the one deadline), so it all ends inside the budget, the rest reported.
+    realTimers();
+    context.liveNow = () => Date.now();
+    await context.openLive();
+    await settle();
+    assert.ok((await $("live-record").onclick()).ok);
+    await settle();
+    await context.liveMark();
+    await settle();
+    const markLi4 = $("live-marks").children[$("live-marks").children.length - 1];
+    fakeTimers();
+    context.liveNow = () => clock.now;
+    const from4 = lv.length, answered4 = [];
+    api.live_mark_update = (sid, id, cls, note) => new Promise((resolve) => {
+      lv.push(["edit", cls || note]);
+      context.setTimeout(() => { answered4.push(cls || note); resolve({ ok: true, mark: {}, applied: [cls ? "cls" : "note"] }); }, 14000);
+    });
+    markLi4.children[4].value = "louder";
+    const five4 = [markLi4.children[1].onclick(), markLi4.children[2].onclick(), markLi4.children[3].onclick(),
+                   markLi4.children[4].onchange(), markLi4.children[1].onclick()];
+    await settle();
+    const manual = $("live-record").onclick();               // the user's Stop
+    await settle();
+    await advance(5000);
+    window.__liveDrained = false;
+    const t1 = clock.now;
+    const closing4 = context.liveDrainForClose(49500);       // then the window closes
+    let stopped4 = null;
+    while (!window.__liveDrained && clock.now - t1 < 70000) {
+      await advance(500);
+      if (stopped4 === null && lv.slice(from4).some((c) => c[0] === "stop")) stopped4 = clock.now - t1;
+    }
+    assert.ok(window.__liveDrained && clock.now - t1 <= 49500, `the running Stop fitted the close (${clock.now - t1} ms)`);
+    assert.ok(stopped4 !== null && stopped4 <= 49500, "the finish was asked for in time");
+    await closing4;
+    await manual;
+    await Promise.all(five4);
+    const reported4 = context.liveUnsavedNow();
+    assert.deepStrictEqual(answered4.slice(0, 3), ["A", "B", "C"]);
+    assert.strictEqual(lv.slice(from4).filter((c) => c[0] === "edit").length, 4, "the called-off edit is never sent");
+    sameJSON(reported4.items.map((x) => x.split(" for ")[0]), ["the note", "class A"]);
     context.liveNow = () => Date.now();
     realTimers();
     byId.delete("live-wave"); byId.delete("live-spec");
