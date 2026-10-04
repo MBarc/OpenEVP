@@ -110,8 +110,8 @@ recording on it as its own file.
 |---|---|
 | Sony ICD-ST25 | Yes |
 | Sony ICD-ST10 | Yes, in all three of its recording modes (ST, SP and LP) |
-| Panasonic RR-DR60 | Through its headphone jack. It has no PC connection, so you play it into the PC's line-in and OpenEVP records it (**Import from a recorder**). Not tried with a real one yet. |
-| Panasonic QR-80 | Planned. I haven't had a look at it yet, so I don't know how it connects. |
+| Panasonic RR-DR60 | Works, through Import. It has no PC connection, so plug its headphone output into the PC with a USB audio adapter, press Record in OpenEVP, and play it in. |
+| Panasonic RR-QR80 | Works the same way. It also has no PC connection, so plug its headphone output into the PC with a USB audio adapter, press Record in OpenEVP, and play it in. |
 
 Got a different recorder? [Open an issue](https://github.com/MBarc/OpenEVP/issues)
 (that's GitHub's name for a request or bug report) and tell me which one.
