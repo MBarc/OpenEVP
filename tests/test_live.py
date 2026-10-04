@@ -10,6 +10,7 @@ import os
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 import wave
 from unittest import mock
@@ -1592,17 +1593,32 @@ class CloseDrainTests(unittest.TestCase):
             child = subprocess.Popen([sys.executable, script, os.path.dirname(os.path.abspath(__file__)),
                                       os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."), d],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-            took = child.stdout.readline()
-            self.assertTrue(took, child.stderr.read() if child.poll() is not None else "no answer")
-            self.assertLess(float(took), 10, took)
-            # The stuck writer may still replace files: until that process has ended, no other
-            # OpenEVP may write here.
-            other = AppData(os.path.join(d, "appdata"))
-            self.assertTrue(other.read_only, "the folder stays locked while the first process lives")
-            other.close()
-            out, err = child.communicate("\n", timeout=60)
-            self.assertEqual(child.returncode, 0, err)
-            self.assertIn("closing without waiting", err)                        # logged
+            try:
+                # Its first line, read on a thread of its own and waited for at most 60 s: a child
+                # that hangs or dies fails the test instead of holding it up.
+                line = []
+                reader = threading.Thread(target=lambda: line.append(child.stdout.readline()), daemon=True)
+                reader.start()
+                reader.join(60)
+                took = line[0] if line else ""
+                self.assertTrue(took, "the child did not answer within 60 s" if child.poll() is None
+                                else f"the child ended: {child.stderr.read()}")
+                self.assertLess(float(took), 10, took)
+                # The stuck writer may still replace files: until that process has ended, no other
+                # OpenEVP may write here.
+                other = AppData(os.path.join(d, "appdata"))
+                self.assertTrue(other.read_only, "the folder stays locked while the first process lives")
+                other.close()
+                out, err = child.communicate("\n", timeout=60)
+                self.assertEqual(child.returncode, 0, err)
+                self.assertIn("closing without waiting", err)                    # logged
+            finally:
+                if child.poll() is None:                 # never left running, whatever failed
+                    child.kill()
+                try:
+                    child.communicate(timeout=30)        # reaped, its pipes closed
+                except (ValueError, subprocess.TimeoutExpired):
+                    pass
             with open(os.path.join(d, "appdata", live.UNSAVED_LOG), encoding="utf-8") as f:
                 self.assertEqual(json.loads(f.read().splitlines()[0])["items"],
                                  ["the mark at 0:04", "the mark at 0:07"])
