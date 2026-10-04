@@ -521,9 +521,9 @@ class ShutdownWaitsForFolderOperationsTests(FolderApiBase):
         r = self.index(api)
         closing = self.store.close
 
-        def close():
+        def close(**kw):
             order.append("store closed")
-            closing()
+            closing(**kw)
         result = {}
         with mock.patch.object(self.store, "close", close):
             deleting = threading.Thread(target=lambda: result.update(api.delete_folder(self.folder(r, "Old Mill"))))
