@@ -21,7 +21,11 @@ Automated (exits non-zero if any fails):
      tables and fast C cores, an MP3 clip is encoded (lameenc) and decoded back
      (mp3_core.dll), the backend and the WebView2 page start in a
      hidden window, the page loads its scripts and styles and can fetch every
-     bundled UI file, and the JS bridge answers capabilities().
+     bundled UI file, and the JS bridge answers capabilities(); then Live mode
+     records a moment from Chromium's fake audio input (no real input is
+     opened) through the page's own code: the app's microphone permission
+     handler, getUserMedia, the AudioWorklet, the bridge, the WAV writer and a
+     mark, and the WAV saved into the library folder is checked.
 
 Then prints the manual checklist (a real ICD-ST25, the driver, the updater).
 """
@@ -84,6 +88,11 @@ Driver (a test PC or VM):
   [ ] Fresh install of the new setup: the WinUSB driver installs; the recorder is found.
   [ ] Upgrade over v0.7.2: the driver is updated (DriverVer); marks, settings and library kept.
   [ ] Uninstall: the driver package is removed; the recorder goes back to its default driver.
+
+Record live and Import (docs/app-test-checklist.md 47-60):
+  [ ] A real microphone: no permission prompt, the input remembered, M marks, Stop opens it in the player.
+  [ ] A USB audio adapter with a recorder's headphone output: Import splits it into one file per recording.
+  [ ] An hour-long session stays smooth; pulling the plug leaves a .part that the next start finishes.
 
 Updater:
   [ ] From an installed v0.7.2, "Check for updates" finds this release, downloads it
@@ -414,6 +423,11 @@ def check_gui():
     d = m.get("decoded")
     print(f"   MP3 decoding: {'available' if m.get('decoder') else 'NOT available'}"
           f"{', test clip ' + str(d['seconds']) + ' s at ' + str(d['rate']) + ' Hz' if d else ''}")
+    lv = report.get("live") or {}
+    wav = lv.get("wav") or {}
+    print(f"   Live recording: {'ok' if lv.get('ok') else 'NOT ok'} from {lv.get('label')!r}"
+          f"{', ' + str(wav.get('frames')) + ' frames at ' + str(wav.get('rate')) + ' Hz, ' + str(wav.get('channels')) + ' ch' if wav else ''}"
+          f"{', mark stored' if lv.get('mark') else ''}")
     print(f"   fetched {len(report.get('ui_files', []))} UI files; capabilities(): "
           f"version {report.get('capabilities', {}).get('version')!r}, "
           f"wav {report.get('capabilities', {}).get('wav')!r}")
@@ -422,6 +436,8 @@ def check_gui():
         problems.append("GUI smoke: the report says nothing about MP3 encoding")
     elif report.get("ok") and "decoder" not in report["mp3"]:   # a report from before MP3 decoding
         problems.append("GUI smoke: the report says nothing about MP3 decoding")
+    elif report.get("ok") and not lv.get("ok"):         # a report from before Live mode
+        problems.append("GUI smoke: the report says nothing about Live recording")
     if code != 0 and not problems:
         problems.append(f"OpenEVP.exe --smoke exited {code}")
     if code == 0 and not report.get("ok"):

@@ -495,7 +495,7 @@ class AudioServer:
 
     def add_spectrogram(self, url, spec):
         """Keep a spectrogram of the audio at url; returns its tiles' base URL
-        (<base>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""
+        (<base>/<colour map>/<level>/<index>.png). The oldest beyond SPECTROGRAMS are dropped."""
         file_id = self.file_id(url)
         sid = secrets.token_hex(8)
         with self._lock:
@@ -518,7 +518,8 @@ class AudioServer:
         with self._lock:
             ok = secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._specs
             spec = self._specs[m.group(2)][1] if ok else None
-        png = spec.tile(int(m.group(3)), int(m.group(4))) if spec is not None and len(m.group(3)) < 4 and len(m.group(4)) < 9 else None
+        level, index, cmap = m.group(4), m.group(5), m.group(3) or "inferno"
+        png = spec.tile(int(level), int(index), cmap) if spec is not None and len(level) < 4 and len(index) < 9 else None
         if png is None:
             h.send_error(404)
             return
@@ -592,7 +593,9 @@ class AudioServer:
             pass                                     # still being served; the temp dir is removed at exit
 
     def _handle(self, h):
-        t = re.fullmatch(r"/([^/]+)/spec/([0-9a-f]{16})/(\d+)/(\d+)\.png", h.path)
+        # <base>/<colour map>/<level>/<index>.png: the map is part of the URL, so a tile drawn in
+        # another map is another image (never one cached in the other map); without it, inferno.
+        t = re.fullmatch(r"/([^/]+)/spec/([0-9a-f]{16})/(?:(inferno|night)/)?(\d+)/(\d+)\.png", h.path)
         if t:
             self._tile(h, t)
             return

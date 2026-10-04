@@ -152,6 +152,16 @@ of detail served as image tiles, so only what is on screen is drawn. A
 recordings and clips get one too: they are decoded to WAV like every other
 file.
 
+## Live mode and analog import
+
+Recording from a PC input is captured in the page (getUserMedia with echo
+cancellation, noise suppression and automatic gain off, and an AudioWorklet)
+and written by the backend as it arrives, to a `.part` WAV whose header is
+rewritten every 5 seconds. OpenEVP grants its own page the microphone through
+WebView2's permission event; nothing else gets it. Import mode splits a
+recorder's playback on silence measured against the input's own idle floor.
+Details, and why the page and not the backend captures: [live-mode.md](live-mode.md).
+
 ## Recorder modules
 
 Each recorder is one module in `openevp/recorders/`; see

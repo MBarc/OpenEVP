@@ -80,6 +80,18 @@ paste it with Ctrl+V.
 Dragging out a Sony `.dvf` file (which other programs can't play)? OpenEVP
 sends a playable copy instead. Your original never moves.
 
+## Record live, or copy a recorder that only has a headphone jack
+
+Click **Record live** to record straight from a microphone or any other input
+on your PC. The waveform and spectrogram scroll by as it records, and pressing
+**M** marks the moment you heard something, so it's easy to find again. When
+you stop, the recording is in the EVP Library. If the PC crashes halfway
+through, what was recorded is still saved.
+
+Got a recorder with no USB at all? Run a cable from its headphone jack to the
+PC's line-in, pick **Import from a recorder**, and play it. OpenEVP saves each
+recording on it as its own file.
+
 ## A few more things
 
 - It opens WAV and MP3 files from anywhere on your PC, including voice notes
@@ -98,7 +110,7 @@ sends a playable copy instead. Your original never moves.
 |---|---|
 | Sony ICD-ST25 | Yes |
 | Sony ICD-ST10 | Yes, in all three of its recording modes (ST, SP and LP) |
-| Panasonic RR-DR60 | No. It has no PC connection at all, only a headphone jack. Recording it through a PC's line-in socket might happen one day, but I'm not promising anything. |
+| Panasonic RR-DR60 | Through its headphone jack. It has no PC connection, so you play it into the PC's line-in and OpenEVP records it (**Import from a recorder**). Not tried with a real one yet. |
 | Panasonic QR-80 | Planned. I haven't had a look at it yet, so I don't know how it connects. |
 
 Got a different recorder? [Open an issue](https://github.com/MBarc/OpenEVP/issues)

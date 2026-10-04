@@ -2,12 +2,29 @@
         --accent: #2f6f5e; --accent-soft: #d8ebe4; --warn-bg: #fff3cd; --warn: #7a5b00;
         --ok-bg: #d8ebe4; --ok: #1f5a4a;
         /* EVP mark classes: the same bands as on the waveform, readable in both themes */
-        --mark-a: rgba(220, 60, 60, .30); --mark-b: rgba(230, 150, 30, .30); --mark-c: rgba(70, 130, 220, .30); }
+        --mark-a: rgba(220, 60, 60, .30); --mark-b: rgba(230, 150, 30, .30); --mark-c: rgba(70, 130, 220, .30);
+        --on-accent: #fff; }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #161615; --panel: #1f1f1d; --text: #ecece8; --muted: #9a9a94; --line: #34342f;
           --accent: #6cc3a7; --accent-soft: #23372f; --warn-bg: #3a3218; --warn: #f0d58a;
           --ok-bg: #1f3a31; --ok: #a8e6cf; }
 }
+/* The night screen (app.js applyNight; index.html sets html.night before these styles load): the whole
+   app dark red on black, for the dark. Contrast against the black: text 5.9:1, muted 4.9:1, accent 4.8:1;
+   on an accent fill the text is dark (4.8:1). Mark classes: red, amber and a dusky rose, with their letters. */
+html.night { color-scheme: dark; scrollbar-color: #4a2020 #0a0505; accent-color: #d05050;
+             --bg: #0a0505; --panel: #140909; --text: #d36b6b; --muted: #c06060; --line: #3a1a1a;
+             --accent: #d05050; --accent-soft: #3a1414; --warn-bg: #2a1405; --warn: #e0a060;
+             --ok-bg: #1f0b0b; --ok: #d36b6b; --on-accent: #0a0505;
+             --mark-a: rgba(235, 80, 80, .42); --mark-b: rgba(215, 140, 40, .38); --mark-c: rgba(150, 70, 110, .45); }
+html.night body { background: var(--bg); font-variant-emoji: text; }   /* emoji icons as text, in the theme's red */
+html.night ::selection { background: #3a1414; color: #e08080; }
+:where(html.night) :is(button, input, select, textarea) { background-color: var(--panel); color: var(--text); border-color: var(--line); }
+html.night ::-webkit-scrollbar { width: 12px; height: 12px; background: #0a0505; }
+html.night ::-webkit-scrollbar-thumb { background: #4a2020; border-radius: 6px; }
+html.night .modal { background: rgba(0, 0, 0, .7); }
+.night-toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; color: var(--accent); user-select: none; }
+.night-toggle:has(input:checked) { font-weight: 600; }
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 /* A column where only the recordings area stretches; hidden bars (progress, banner, player) take no room. */
@@ -221,3 +238,103 @@ td.note { color: var(--warn); }
 .modal-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 button.primary { background: var(--accent); color: var(--panel); border: 1px solid var(--accent); border-radius: 4px; padding: 4px 14px; cursor: pointer; }
 button.primary:disabled { opacity: .5; cursor: default; }
+/* Live mode and analog import (live.js): the view takes the recordings area and the player's place.
+   It is meant for touchscreens in the field: everything here (and only here) is big enough to tap
+   (48 px), the scopes fill the space, and a dark red night screen can be turned on. */
+#list[hidden], #live[hidden], #player[hidden] { display: none; }
+#live { --live-bg: var(--bg); --live-panel: var(--panel); --live-text: var(--text); --live-muted: var(--muted);
+        --live-line: var(--line); --live-accent: var(--accent); --live-accent-soft: var(--accent-soft); --live-empty: #2b2b2b;
+        --live-on-accent: var(--on-accent);
+        display: flex; flex-direction: column; gap: 10px; min-height: 0; min-width: 0; padding: 10px 14px; overflow: auto;
+        background: var(--live-bg); color: var(--live-text); font-size: 16px; }
+html.night #live { --live-empty: #1c0d0d; }
+#live-bar, #live-settings, #live-controls, #live-split-row, #live-strip { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+#live-title { font-size: 20px; margin: 0; }
+#live button, #live select, #live input[type="text"], #live input[type="number"] {
+  min-height: 48px; font: inherit; border-radius: 8px; border: 1px solid var(--live-line);
+  background: var(--live-panel); color: var(--live-text); padding: 0 16px; }
+#live button { cursor: pointer; }
+#live button:disabled { opacity: .5; cursor: default; }
+#live select { padding: 0 10px; max-width: 32ch; }
+#live-modes { display: inline-flex; gap: 6px; }
+#live-modes button[aria-pressed="true"], #live label.toggle:has(input:checked),
+#live .live-seg button[aria-pressed="true"], #live .live-opt[aria-pressed="true"] {
+  background: var(--live-accent); border-color: var(--live-accent); color: var(--live-on-accent); font-weight: 600; }
+/* Every on/off choice here is a big toggle button: the checkbox is kept (for the keyboard and screen
+   readers) but drawn as the button's state. */
+#live label.toggle {
+  display: inline-flex; align-items: center; min-height: 48px; padding: 0 18px; border: 1px solid var(--live-line);
+  border-radius: 24px; background: var(--live-panel); cursor: pointer; user-select: none; position: relative; }
+#live label.toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
+#live label.toggle:has(input:focus-visible) { outline: 3px solid var(--live-accent); outline-offset: 2px; }
+/* The Listen panel (only while Listen is on): one row per kind of option, all touch sized */
+#live-listen { display: flex; flex-direction: column; gap: 8px; background: var(--live-panel); border: 1px solid var(--live-line);
+               border-radius: 8px; padding: 8px 14px; }
+#live-listen[hidden] { display: none; }
+.live-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.live-ctl-name { min-width: 12ch; font-weight: 600; }
+#live-boost { height: 40px; width: 220px; }
+#live .live-seg { display: inline-flex; }
+#live .live-seg button { border-radius: 0; margin-left: -1px; min-width: 72px; }
+#live .live-seg button:first-child { border-radius: 8px 0 0 8px; margin-left: 0; }
+#live .live-seg button:last-child { border-radius: 0 8px 8px 0; }
+#live .live-opt { border-radius: 24px; }
+.live-enhance-note { padding: 4px 0; margin: 0; font-size: 14px; color: var(--live-muted); }
+/* The status strip: readable at arm's length */
+#live-strip { padding: 6px 12px; background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 8px; }
+#live-time { font-variant-numeric: tabular-nums; font-size: 44px; font-weight: 700; line-height: 1; min-width: 4ch; }
+#live-meter-box { display: inline-flex; align-items: center; gap: 10px; }
+#live-meter { position: relative; display: inline-block; width: 260px; height: 22px; border-radius: 11px; overflow: hidden;
+              background: linear-gradient(90deg, var(--live-line) 0 80%, #6d5a12 80% 95%, rgba(220, 60, 60, .6) 95%); }
+#live-meter-fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--live-accent); }
+#live-meter-peak { position: absolute; top: 0; bottom: 0; width: 3px; left: 0; background: var(--live-text); }
+#live-meter.clip #live-meter-fill { background: rgb(220, 60, 60); }
+#live-level { font-variant-numeric: tabular-nums; font-size: 18px; min-width: 7ch; }
+#live-clip { background: rgb(210, 40, 40); color: #fff; font-weight: 700; padding: 4px 10px; border-radius: 6px; font-size: 18px; }
+#live-clip[hidden] { display: none; }
+#live-left { font-size: 18px; font-weight: 600; }
+#live-input-info { color: var(--live-muted); overflow-wrap: anywhere; }
+#live-silent { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 8px 12px; border-radius: 8px;
+               background: var(--warn-bg); color: var(--warn); font-weight: 600; }
+#live-silent[hidden] { display: none; }
+#live-import[hidden] { display: none; }
+#live-gap { width: 7ch; }
+#live-guide { background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 8px; padding: 6px 12px; margin-top: 6px; }
+#live-guide summary { cursor: pointer; font-weight: 600; min-height: 40px; display: flex; align-items: center; }
+#live-guide ol { margin: 6px 0; padding-left: 20px; }
+#live-guide li { margin: 4px 0; }
+/* The scopes fill what is left, the spectrogram most of it */
+#live-scopes { flex: 1; display: flex; flex-direction: column; gap: 6px; min-height: 300px; min-width: 0; }
+#live-wave { flex: 3 1 0; height: 0; width: 100%; min-height: 70px; background: var(--live-panel); border: 1px solid var(--live-line); border-radius: 6px; }
+#live-spec { flex: 7 1 0; height: 0; width: 100%; min-height: 140px; background: var(--live-empty); border-radius: 6px; }
+/* The bottom row: Record on the left, MARK on the right, under the thumb */
+#live-controls { position: sticky; bottom: 0; padding: 8px 0; background: var(--live-bg); display: grid; align-items: center;
+                 grid-template-columns: auto 1fr auto; grid-template-areas: "rec file mark" "toggles toggles toggles"; }
+#live-record { grid-area: rec; }
+#live-file { grid-area: file; }
+#live-mark-box { grid-area: mark; display: inline-flex; align-items: center; gap: 10px; }
+#live-marked { font-size: 20px; font-weight: 700; color: var(--live-accent); }
+#live-marked[hidden] { display: none; }
+#live-toggles { grid-area: toggles; display: flex; flex-wrap: wrap; gap: 10px; }
+#live-record { min-width: 160px; min-height: 64px !important; font-size: 20px; font-weight: 700;
+              background: var(--live-accent) !important; border-color: var(--live-accent) !important; color: var(--live-on-accent) !important; }
+#live-record.recording { background: rgb(200, 50, 50) !important; color: #fff !important; border-color: rgb(200, 50, 50) !important; }
+#live-mark { min-width: 180px; min-height: 64px !important; font-size: 22px; font-weight: 800; letter-spacing: .04em;
+            background: #e0a020 !important; border-color: #c08010 !important; color: #1d1d1b !important; }
+html.night #live-mark { background: #7a3a10 !important; border-color: #7a3a10 !important; color: #f0c0a0 !important; }
+html.night #live-record.recording { background: #8f2a2a !important; border-color: #8f2a2a !important; color: #f0c0c0 !important; }
+html.night #live-clip { background: #8f2a2a; color: #f0c0c0; }
+#live-file { color: var(--live-muted); overflow-wrap: anywhere; }
+#live-status { margin: 0; min-height: 1.4em; }
+#live-status.warn { color: var(--warn); background: var(--warn-bg); padding: 4px 8px; border-radius: 4px; }
+#live button.live-plain { background: none; border-color: transparent; text-decoration: underline; color: var(--live-accent); }
+/* Leaving the Record live screen while it records: touch sized, as the screen is */
+#live-leave .modal-buttons button { min-height: 48px; padding: 0 18px; font-size: 16px; }
+.player-start { display: inline-flex; gap: 8px; }
+/* An import's suggested cuts (live.js): under the waveform, until split or kept as one */
+#cut-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 4px 0; font-size: 13px; }
+#cut-bar[hidden] { display: none; }
+#cut-list { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.cut-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 0 2px 0 8px; }
+.cut-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
+.cut-remove:disabled { cursor: default; opacity: .5; }

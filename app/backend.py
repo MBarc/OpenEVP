@@ -87,6 +87,7 @@ from .library_ops import (CLOSING, HANDLES, SESSION_CACHE, LibraryOps, _bounded_
                           _plain)
 from .library_ops import (BACKUP_RECYCLED, CLIPS, CLIPS_AGAIN, CLIPS_ONLY, FS_BUSY, FS_WAIT, INDEXER_BUSY, LIB_CHANGED,  # noqa: F401
                           PATH_TOO_LONG, ROOT_CHANGED, _root_identity)
+from .live import LiveOps
 from .sharing import ShareOps
 from .store import StoreReadOnly, StoreUnavailable
 
@@ -102,6 +103,7 @@ NO_AUDIO = "This recording has no audio to mark."
 GONE = "That file is no longer there. Refresh the list."
 NOT_IN_LIBRARY = "it is no longer inside the library folder"
 BACKUP_RUNNING = "Wait for the backup of a marked recording to finish, then update."
+UPDATE_RECORDING = "Stop the recording, then update."
 MARKED_BUSY = "Wait for the export to finish, then save the WAV with marks."
 MARKED_BUSY_UPDATE = "An update is being installed; the WAV with marks was not saved."
 CLIPS_BUSY = "Wait for the export to finish, then export the clips."
@@ -113,6 +115,27 @@ PLAYBACK_SPEED = "playback_speed"   # the player's speed setting: one of SPEEDS
 KEEP_PITCH = "keep_pitch"           # does a changed speed keep the pitch (True) or play it tape-style?
 ENHANCE = "enhance"                 # the player's Enhance settings (openevp.enhance.DEFAULT's keys)
 SPECTROGRAM = "spectrogram"         # is the player's spectrogram shown? (a bool; on unless turned off)
+NIGHT = "night"                     # the night screen, app wide (a bool; off unless turned on)
+
+
+def night_setting(store):
+    """Is the night screen on? (app/main.py asks before the window opens, so it never flashes
+    white.) The first time, the Live screen's own night setting of the test builds ("live"
+    {"field": true}) becomes this one, and is taken out of the Live settings."""
+    if store is None:
+        return False
+    saved = store.get_setting(NIGHT)
+    if isinstance(saved, bool):
+        return saved
+    live_saved = store.get_setting("live")
+    night = isinstance(live_saved, dict) and live_saved.get("field") is True
+    try:
+        store.set_setting(NIGHT, night)
+        if isinstance(live_saved, dict) and "field" in live_saved:
+            store.set_setting("live", {k: v for k, v in live_saved.items() if k != "field"})
+    except (StoreReadOnly, StoreUnavailable):
+        pass                                # read-only here: the writing window moves it
+    return night
 SPEEDS = (0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0)
 
 
@@ -468,7 +491,7 @@ def _recording(folder, r):
             "play_problem": r.get("play_problem") or None}
 
 
-class Api(ShareOps, LibraryOps):
+class Api(ShareOps, LibraryOps, LiveOps):
     def __init__(self, manager, emit, pick_folder, default_dest, audio_server, driver_setup=None,
                  pick_wav=None, updater=None, quit_app=None, can_install=False, before_install=None,
                  store=None, store_problems=(), recycle=None, drag_files=None, copy_files=None):
@@ -487,6 +510,7 @@ class Api(ShareOps, LibraryOps):
         self._update = None                   # the release found by the last check_update()
         self._before_install = before_install # () -> None, just before the installer starts
         self._updating = False
+        self._update_claim = False            # an update is being installed (set with _busy, under _workers_lock)
         self._busy = threading.Lock()      # held while an export, export_marked() or an update install runs
         self._marked_done = None              # threading.Event while export_marked() runs; shutdown waits for it
         self._clips_running = None            # (job, cancel Event) of the clips job running (under _workers_lock)
@@ -494,6 +518,7 @@ class Api(ShareOps, LibraryOps):
         self._playback = None                 # (speed, keep_pitch) picked in this session (when it could not be remembered)
         self._enhance = None                  # Enhance settings picked in this session (when they could not be remembered)
         self._spectrogram = None              # spectrogram shown or not, picked in this session (when it could not be remembered)
+        self._night = None                    # the night screen, picked in this session (when it could not be remembered)
         self._noise = OrderedDict()           # noise profile id -> (fp, openevp.denoise.Profile), this session only
         self._denoising = {}                  # reduce_noise() job -> its cancel Event
         self._spec_lock = threading.Lock()
@@ -531,6 +556,7 @@ class Api(ShareOps, LibraryOps):
         self._fs_busy = False                 # a folder operation holds _busy (not an export)
         self._fs_done = None                  # set when that operation is over (shutdown() waits for it)
         self._library_root = None             # _root_identity() of the library folder at the last listing
+        self._live_init()                     # Live mode and analog import (app/live.py)
         if store is not None:
             saved = store.get_setting("save_folder")
             if isinstance(saved, str) and saved and os.path.isdir(saved):
@@ -566,7 +592,7 @@ class Api(ShareOps, LibraryOps):
                 "store_problems": self._store_problems + (store.problems() if store is not None else []),
                 "clip_format": self.clip_format(), "mp3": mp3.available(),
                 **self.playback_speed(), "enhance": self.enhance_settings(), "enhance_spec": enhance.spec(),
-                "spectrogram": self.spectrogram_shown(),
+                "spectrogram": self.spectrogram_shown(), "night": self.night(),
                 "noise": {"default_amount": denoise.DEFAULT_AMOUNT, "max_reduction_db": denoise.MAX_REDUCTION_DB},
                 "mp3_status": None if mp3.available() else mp3.UNAVAILABLE}
 
@@ -1171,6 +1197,25 @@ class Api(ShareOps, LibraryOps):
         with self._recs_lock:
             ok = url is None or url == entry.get("url") or url in entry.get("variants", ())
         return (entry.get("url") if url is None else url) if ok else None
+
+    def night(self):
+        """Is the night screen on (the whole app dark red on black)? Picked in this session if it
+        could not be remembered, else remembered (night_setting), else off."""
+        return self._night if self._night is not None else night_setting(self._store)
+
+    def set_night(self, on):
+        """Turn the night screen on or off, and remember it. {"ok", "night", "remembered"}."""
+        if not isinstance(on, bool):
+            return _fail("Unknown night screen setting.")
+        remembered = False
+        if self._store is not None:
+            try:
+                self._store.set_setting(NIGHT, on)
+                remembered = True
+            except (StoreReadOnly, StoreUnavailable):
+                pass
+        self._night = None if remembered else on
+        return {"ok": True, "night": on, "remembered": remembered}
 
     def spectrogram(self, rec, url=None):
         """The spectrogram of the loaded recording's audio (or of url, a version of it
@@ -2405,10 +2450,17 @@ class Api(ShareOps, LibraryOps):
             return _fail("Updates install only in the installed app, not when running from source.")
         if self._stop.is_set():
             return _fail(CLOSING)
-        if not self._busy.acquire(blocking=False):      # held from here on: no export can start
-            return _fail("Wait for the export to finish, then update.")
+        # Admitted against a recording in one step: live_start() checks _update_claim, and
+        # sets the recording, under _workers_lock too.
+        with self._workers_lock:
+            if self._live_busy():
+                return _fail(UPDATE_RECORDING)
+            if not self._busy.acquire(blocking=False):  # held from here on: no export can start
+                return _fail("Wait for the export to finish, then update.")
+            self._update_claim = True
         with self._backup_lock:                         # from here on no backup can be queued
             if self._backup_queue or self._backup_running is not None:
+                self._update_claim = False
                 self._busy.release()
                 return _fail(BACKUP_RUNNING)
             self._updating = True
@@ -2434,6 +2486,7 @@ class Api(ShareOps, LibraryOps):
                 self._updater.discard(path)
             with self._backup_lock:
                 self._updating = False
+            self._update_claim = False
             self._busy.release()
             if isinstance(e, _BackupRunning):
                 return _fail(BACKUP_RUNNING)
@@ -2603,6 +2656,10 @@ class Api(ShareOps, LibraryOps):
             pass
         with self._lib_lock:                    # nor a library indexer
             pass
+        try:
+            self._stop_jobs()                   # an import's suggest or split job: told to stop, waited for (bounded)
+        except Exception:
+            pass                                # never keeps the workers and the store from closing
         with self._workers_lock:                # nor an export, export_marked() or folder operation
             workers = list(self._workers)
             marked = self._marked_done
@@ -2614,8 +2671,11 @@ class Api(ShareOps, LibraryOps):
             marked.wait()
         if fs is not None:
             fs.wait()
+        self._live_shutdown()                   # a recording running is finished and saved
         if self._store is not None:
-            self._store.close()
+            # The fingerprint cache is not written here (no write without a deadline at shutdown):
+            # the indexer writes it as it goes, and the next start re-reads what it lacks.
+            self._store.close(flush_index=False)
 
     def _export(self, device_id, native, work, to_wav, dest, job):
         """Download each recording (on the device thread), then save it (here, never

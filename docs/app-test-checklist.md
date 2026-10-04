@@ -288,3 +288,111 @@ Deleting recordings and clips:
     recording: OpenEVP says the `.dvf` went and the `.wav` is still there, and
     why. In a second OpenEVP window, Delete… is greyed out and the key says why;
     during an export or a backup it is refused.
+
+Record live and Import from a recorder (by hand, in the built app: no automated
+test opens a real input):
+
+47. **Real microphone.** Click **Record live**. The first time, no permission
+    prompt appears (OpenEVP grants its own page the microphone). The Input list
+    names the PC's inputs; the meter moves when you speak. Pick another input,
+    close and reopen OpenEVP: the same input is chosen. Record 30 s, speaking
+    now and then, press **M** twice: a star appears on the waveform and
+    "Marked" shows for a moment each time. Stop opens `Live <date> <time>.wav`
+    in the player with two class C marks "Marked while recording, not graded
+    yet", each 3 s long and ending about where M was pressed; the library lists
+    it in the folder that was picked.
+    The file plays in another program (Audacity, VLC) and its sample rate and
+    channels match the input (Windows Sound settings, the input's Advanced tab).
+48. **Listen.** Listen is off on opening the view, and its panel is hidden. With
+    headphones on, tap it: you hear yourself, with a small delay, and the panel
+    shows Volume, Even out loud and quiet (Off, Light, Medium, Strong), Clean up
+    (Voice only, Cut rumble, Cut hiss), Hum (Off, 60 Hz, 50 Hz) and Reset, in that
+    order, all easy to tap. Set Volume to +12 dB: louder in the headphones at
+    once; the saved file is not louder (compare its waveform with one recorded
+    without). Click EVP Library in the sidebar: the player's Enhance tab shows Boost +12 dB
+    too; change it there, go back to Live: the same. With a hum in the input,
+    turn on Hum 60 Hz: the hum lines go from the spectrogram at once, the
+    waveform is unchanged; turn Listen off: the hum lines come back (the
+    spectrogram shows what is heard). There is no Enhance what I hear or Show
+    what I hear button. Resize the window while recording: the waveform and
+    spectrogram stay.
+49. **Windows blocking the microphone.** In Settings, Privacy & security,
+    Microphone, turn off "Let desktop apps access your microphone"; open Record
+    live: OpenEVP says Windows is blocking it and **Open microphone settings**
+    opens that page. Turn it back on, pick the input again: it works.
+50. **USB audio adapter with a recorder's headphone output.** RR-DR60 (2.5 mm to
+    3.5 mm adapter) or any recorder, into a USB adapter's line or mic input.
+    **Import from a recorder**, the guide is shown; volume at about the middle,
+    meter out of the red. Record first, then play three recordings back to
+    back, then Stop: `Import <date> <time> (full).wav` opens in the player and,
+    a moment later, red ✂ marks appear between the recordings, half a second
+    before each one's sound, none in the middle of a pause inside a recording.
+    Remove one (✕), add one at the play cursor (**✂ Add cut here**), click a mark
+    to remove it, then **Split into N recordings**: the parts appear in the
+    library, each starting where its cut was. Another import: **Keep as one**
+    leaves only the full file. Another: click **Cancel splitting** while it
+    splits: only the full file remains, and the banner says so. Untick
+    **Suggest cuts**: one plain file, no suggestions.
+51. **An hour-long session.** Record live for 60+ minutes at 48 kHz: the
+    waveform and spectrogram keep scrolling smoothly to the end; Task Manager
+    shows OpenEVP's (and its WebView2 processes') CPU low and memory flat after
+    the first minutes. Marks made near the end land in the right place. Stop:
+    the file opens within a few seconds and is about 690 MB (stereo).
+52. **Pulling the plug.** Record live for a few minutes, press M once, then cut
+    the power (or end OpenEVP.exe and msedgewebview2.exe in Task Manager). The
+    folder holds `Live <…>.wav.part`, which already plays in VLC. Start
+    OpenEVP: it says it saved the cut-off recording; the `.part` is now
+    `Live <…>.wav`, missing at most the last ~5 seconds, with its mark. Unplug
+    the USB adapter in the middle of a recording: it stops, says the input
+    stopped, and the recording is saved.
+53. **Disk nearly full.** On a USB stick with a little over 500 MB free,
+    record into a library folder on it: a warning appears when less than 15
+    minutes fit, then it stops by itself and saves; at least 500 MB stay free.
+54. **While recording**, clicking EVP Library in the sidebar asks "Stop recording
+    and save it?" (big buttons): Keep recording goes on recording; Stop and save
+    saves it, then shows the library. Not recording, the same click leaves at once
+    and the microphone is let go (Windows' microphone icon goes). Closing the window asks
+    first (and saves the recording if you close), Check for updates won't
+    install, and a second OpenEVP window cannot record (it says why).
+55. **Closing mid-recording.** Record live for a minute, speak right before
+    closing the window, answer the prompt: the window closes within a few
+    seconds and the saved file ends with what you said (nothing cut off). Try
+    renaming the recording's folder in File Explorer during a recording: Windows
+    refuses; after Stop it works.
+56. **Import, whole input.** After a split, the full file is as long as the
+    parts together and has the marks made while importing; each part has the
+    marks that fall in it; playing the parts back to back sounds exactly like the
+    full one. Import an hour from a recorder: the suggestions appear within a few
+    seconds of Stop, and the split within a minute or so.
+57. **Closing during a split.** Start a split of a long import and close
+    OpenEVP: it closes within a few seconds; the full file is there, no
+    half-written parts are left (after the next start), and nothing hangs in
+    Task Manager.
+58. **Touch screen in the field.** On a tablet or touchscreen laptop, open Record
+    live: every button and toggle is easy to hit with a finger; MARK is bottom
+    right under the thumb. There is no Night screen button on this screen; turn
+    on **Night screen** in the top bar: the whole app goes dark red, this screen
+    included; reopen OpenEVP: it is still on, and the window opens dark with no
+    white flash. "about N h left" shows before Record. Turn Listen on, close the
+    screen and open it again: Listen is off and its options are hidden. Rotate or resize the window: the
+    waveform and spectrogram fill the space and keep their picture. Mute the microphone: within about 3 s the screen says "No sound
+    coming in…", the meter says Silent, the waveform shows a flat line and the
+    spectrogram a dark band moving in; **Open sound settings** opens Windows'
+    sound settings; unmute: the message goes. Shout into the mic: **Too loud**.
+59. **Marking in the field.** While recording, tap MARK a few seconds in, then
+    again within a second: two stars, the second a row lower, and "Marked" each
+    time; there is no list, class or note on this screen. Stop: in the player
+    each mark is class C, "Marked while recording, not graded yet", 3 s long;
+    grade one in the EVP Library. A mark in the first second is shorter (it
+    starts at 0:00). "about N h left" in the status strip matches the free space
+    on the drive less 500 MB, at the input's rate (94 GB free at 48 kHz stereo:
+    about 135 h), not the 6 h a 4 GB file holds.
+60. **Night screen, app wide.** Tick **Night screen** in the top bar: the EVP
+    Library, the player, the recording screen, the About and other dialogs,
+    the right-click menus, banners and the scrollbars turn dark red on black;
+    nothing stays bright white. Play a recording: the waveform is red and the
+    spectrogram red on black (scroll and zoom: new tiles come in red too). A, B
+    and C marks are told apart (red, amber, rose, with letters). Close and
+    reopen OpenEVP: it opens dark at once, with no white flash. Untick it: back
+    to the usual colours everywhere, the spectrogram in its usual colours.
+

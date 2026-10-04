@@ -13,6 +13,18 @@ const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
 const assert = require("assert");
+// If the run stops before its end (something it waited for never happened, so Node runs out of work
+// and exits quietly), say so and fail, with the last check that passed.
+let lastAssert = "", finished = false;
+for (const k of ["ok", "strictEqual", "deepStrictEqual", "notStrictEqual", "throws", "rejects"]) {
+  const f = assert[k];
+  assert[k] = (...a) => { lastAssert = (new Error().stack.split(String.fromCharCode(10))[2] || "").trim(); return f(...a); };
+}
+process.on("beforeExit", () => {
+  if (finished) return;
+  console.error(`ui_check stopped before its end: something it waited for never happened. Last check passed ${lastAssert}`);
+  process.exitCode = 1;
+});
 
 // ---- a small DOM: enough of it for app.js ------------------------------------------
 class ClassList {
@@ -105,6 +117,7 @@ const document = {
   addEventListener(type, fn, capture) { listen(document, type, fn, capture); },
   activeElement: null,
   body: new Element("body"),
+  documentElement: new Element("html"),
 };
 // The format menu as index.html ships it.
 const format = document.getElementById("format");
@@ -164,6 +177,7 @@ const api = {
   recordings: async (id) => listing[id],
   export: async (...args) => { calls.push(["export", ...args]); return { ok: true, job: args[4] }; },
   audio: async (...args) => { calls.push(["audio", ...args]); return { ok: false, error: "stub" }; },
+  live_recover: async () => ({ ok: true, recovered: [], failed: [] }),
 };
 
 // ---- a fake Web Audio: nodes that remember their params and connections -------------------
@@ -175,9 +189,18 @@ class FakeNode {
   disconnect() { this.outs = []; }
 }
 class FakeAudioContext {
-  constructor() { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
-                  this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
+  constructor(opts = {}) { this.state = "suspended"; this.nodes = []; this.resumes = 0; this.sources = 0;
+                           this.sampleRate = (opts && opts.sampleRate) || 48000; this.opts = opts; this.modules = [];
+                           this.audioWorklet = { addModule: async (url) => { this.modules.push(url); } };
+                           this.destination = new FakeNode(this, "destination"); audioContexts.push(this); }
   resume() { this.resumes++; this.state = "running"; return Promise.resolve(); }
+  close() { this.state = "closed"; return Promise.resolve(); }
+  createMediaStreamSource(stream) { const n = new FakeNode(this, "stream"); n.stream = stream; return n; }
+  createAnalyser() {
+    const n = new FakeNode(this, "analyser");
+    Object.assign(n, { fftSize: 2048, frequencyBinCount: 1024, getByteFrequencyData() {} });
+    return n;
+  }
   createMediaElementSource(m) { this.sources++; const n = new FakeNode(this, "source"); n.media = m; return n; }
   createBiquadFilter() { const n = new FakeNode(this, "biquad"); n.type = "lowpass"; n.frequency = new FakeParam(350); n.Q = new FakeParam(1); return n; }
   createDynamicsCompressor() {
@@ -204,6 +227,77 @@ function audioChain(ctx) {
   return out;
 }
 
+// ---- the night screen before the first paint: index.html's inline script, as the page runs it ----
+function runNightScript(html, search) {
+  const m = /<script>(if \(\/\[\?&\]night=1[^<]*)<\/script>/.exec(html);
+  assert.ok(m, "an inline script sets the night screen before the styles load");
+  assert.ok(html.indexOf(m[0]) < html.indexOf('<link rel="stylesheet" href="style.css">'), "before the stylesheet");
+  const el = new Element("html");
+  vm.runInNewContext(m[1], { location: { search }, document: { documentElement: el } });
+  return el.classList.contains("night");
+}
+
+// ---- a clock the test moves on by hand (fakeTimers ... realTimers): setTimeout otherwise never fires ----
+const clock = { now: 0, timers: [] };
+function fakeTimers() {
+  clock.timers = [];
+  context.setTimeout = (fn, ms) => { clock.timers.push({ fn, due: clock.now + (ms || 0) }); return clock.timers.length; };
+  context.clearTimeout = (id) => { const t = clock.timers[id - 1]; if (t) t.fn = null; };
+}
+function realTimers() { context.setTimeout = () => 0; context.clearTimeout = () => {}; }
+async function advance(ms) {
+  clock.now += ms;
+  for (const t of clock.timers) if (t.fn && t.due <= clock.now) { const f = t.fn; t.fn = null; f(); }
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+}
+
+// ---- a fake getUserMedia: the PC's inputs, and every request made ----------------------
+const mics = {
+  requests: [], fail: null, hold: null,   // hold: an array; each request waits there until the test answers it
+  devices: [{ kind: "audioinput", deviceId: "default", label: "Default - Microphone (Realtek Audio)" },
+            { kind: "audioinput", deviceId: "d-mic", label: "Microphone (Realtek Audio)" },
+            { kind: "audioinput", deviceId: "d-usb", label: "Line (USB Audio Device)" },
+            { kind: "audiooutput", deviceId: "o-1", label: "Speakers" }],
+};
+function fakeStream(device) {
+  const track = { label: device.label, stopped: false, onended: null,
+                  stop() { this.stopped = true; }, getSettings: () => ({ deviceId: device.deviceId, sampleRate: 48000, channelCount: 2 }) };
+  return { track, getAudioTracks: () => [track], getTracks: () => [track] };
+}
+const navigator = { mediaDevices: {
+  getUserMedia: async (c) => {
+    mics.requests.push(c);
+    if (mics.hold) await new Promise((res) => mics.hold.push(res));
+    if (mics.fail) { const e = new Error("blocked"); e.name = mics.fail; throw e; }
+    const want = c.audio.deviceId, inputs = mics.devices.filter((d) => d.kind === "audioinput");
+    let dev = inputs[0];
+    if (want && want.exact) { dev = inputs.find((d) => d.deviceId === want.exact); if (!dev) { const e = new Error("no"); e.name = "OverconstrainedError"; throw e; } }
+    else if (want && want.ideal) dev = inputs.find((d) => d.deviceId === want.ideal) || inputs[0];
+    return fakeStream(dev);
+  },
+  enumerateDevices: async () => mics.devices.map((d) => ({ ...d })),
+  addEventListener() {},
+} };
+const worklets = [];
+class FakeWorkletNode {
+  constructor(ctx, name, opts) {
+    this.ctx = ctx; this.name = name; this.opts = opts; this.outs = [];
+    // The worklet's port: a flush is answered at once (after any tail the test queues in port.tail),
+    // unless the test answers itself (port.manual).
+    const port = this.port = { onmessage: null, posted: [], manual: false, tail: null,
+      postMessage(m) {
+        port.posted.push(m);
+        if (port.manual || m.flush === undefined) return;
+        Promise.resolve().then(() => {
+          if (port.tail) { port.onmessage({ data: port.tail }); port.tail = null; }
+          port.onmessage({ data: { flushed: m.flush } });
+        });
+      } };
+                                 this.kind = "worklet"; ctx.nodes.push(this); worklets.push(this); }
+  connect(n) { this.outs.push(n); return n; }
+  disconnect() { this.outs = []; }
+}
+
 let ready = null;
 const window = {
   AudioContext: FakeAudioContext,
@@ -214,10 +308,12 @@ const window = {
 };
 const context = { window, document, WaveSurfer: anything, console, getComputedStyle: () => ({ getPropertyValue: () => "" }),
                   setTimeout: () => 0, clearTimeout() {}, requestAnimationFrame: () => 0, localStorage: window.localStorage,
+                  cancelAnimationFrame() {}, navigator, AudioWorkletNode: FakeWorkletNode, btoa, atob, performance,
                   Map, Set, JSON, Promise, Number, String, Math, Object, Array, RegExp };
 vm.createContext(context);
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "notes.js"), "utf8"), context);   // as index.html loads it
 vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "app.js"), "utf8"), context);
+vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "app", "ui", "live.js"), "utf8"), context);
 
 const $ = (id) => document.getElementById(id);
 const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.textContent));
@@ -2163,6 +2259,47 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   $("tab-view").onclick();
   context.__ws = wsBeforeTabs;
   vm.runInContext("S.ws = __ws;", context);
+  assert.strictEqual(window.__openevpStarted, true, "the startup ran to its end");
+  // ---- The night screen: before the first paint, and on every view ----
+  // At startup the theme is applied before the Live screen is set up (app.js setupNight runs before
+  // setupLive): redrawing scopes that have no history yet must be a no-op, never an error that would
+  // stop the rest of the start. (A real canvas, as in the browser.)
+  {
+    const realWave = byId.get("live-wave");
+    byId.set("live-wave", { id: "live-wave", tagName: "CANVAS", clientWidth: 300, clientHeight: 80, width: 300, height: 80, style: {},
+                            getContext: () => ({ clearRect() {}, fillRect() {}, fillText() {} }) });
+    vm.runInContext("var __hist = LV.hist; LV.hist = null;", context);
+    try {
+      vm.runInContext("applyNight(true); applyNight(false);", context);
+    } finally {
+      vm.runInContext("LV.hist = __hist;", context);
+      if (realWave) byId.set("live-wave", realWave); else byId.delete("live-wave");
+    }
+  }
+  assert.ok(runNightScript(html, "?night=1") && !runNightScript(html, "") && !runNightScript(html, "?nightly=1"));
+  {
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    const night = /html\.night \{([^}]*)\}/.exec(css);
+    assert.ok(night, "html.night sets the theme's colours");
+    for (const v of ["--bg: #0a0505", "--panel: #140909", "--text: #d36b6b", "--accent: #d05050", "--on-accent: #0a0505",
+                     "--mark-a:", "--mark-b:", "--mark-c:", "color-scheme: dark", "scrollbar-color:"]) {
+      assert.ok(night[1].includes(v), v);
+    }
+    // The major views draw with the theme's variables (no colour of their own to miss at night).
+    for (const sel of [".toolbar {", "#sidebar {", "#banner {", ".modal-card {", "#live {"]) {
+      const rule = css.slice(css.indexOf(sel), css.indexOf("}", css.indexOf(sel)));
+      assert.ok(rule && /var\(--(panel|bg|warn-bg|live-bg)\)/.test(rule), sel);
+    }
+    assert.ok(!css.includes("live-night") && !css.includes("#live.field"), "the Live screen has no night of its own");
+    assert.ok(html.includes('id="night-label"') && html.indexOf('id="night"') > html.indexOf('id="check-update"'),
+              "the switch is in the toolbar, next to Check for updates");
+  }
+  // Mark classes stay apart at night: their own colours (and letters on the regions).
+  assert.deepStrictEqual(JSON.parse(vm.runInContext(`JSON.stringify((() => { applyNight(true); const n = ["A", "B", "C"].map(markColor);
+                                     applyNight(false); return [n, ["A", "B", "C"].map(markColor)]; })())`, context)),
+           [["rgba(235, 80, 80, .42)", "rgba(215, 140, 40, .38)", "rgba(150, 70, 110, .45)"],
+            ["rgba(220, 60, 60, .30)", "rgba(230, 150, 30, .30)", "rgba(70, 130, 220, .30)"]]);
+
   // ---- Spectrogram: tiles from the backend, the level of detail for the zoom, only those in view ----
   assert.ok(/<input id="spectrogram" type="checkbox"> Spectrogram<\/label>/.test(html));
   // On by default: capabilities() said nothing (a new user), so it is on; only an explicit false turns it off.
@@ -2200,17 +2337,34 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(specEl().labels.children.map((c) => [c.textContent, c.style.bottom]),
                          [["1 kHz", "25.00%"], ["2 kHz", "50.00%"], ["3 kHz", "75.00%"]]);
   // Fit to 800 px: level 3 (782 columns would be too few, 1563 is enough); its 4 tiles, placed by time.
-  assert.deepStrictEqual(tiles(), ["3/0", "3/1", "3/2", "3/3"]);
-  const img0 = vm.runInContext(`S.spec.imgs.get("3/1")`, context);
+  // The colour map is part of each tile's key and URL (inferno by day).
+  assert.deepStrictEqual(tiles(), ["inferno/3/0", "inferno/3/1", "inferno/3/2", "inferno/3/3"]);
+  const img0 = vm.runInContext(`S.spec.imgs.get("inferno/3/1")`, context);
   assert.deepStrictEqual([img0.src, img0.style.left, img0.style.width, img0.style.imageRendering],
-                         ["http://t/spec/abc/3/1.png", "32.76400%", "32.76800%", "auto"]);
+                         ["http://t/spec/abc/inferno/3/1.png", "32.76400%", "32.76800%", "auto"]);
+  // The night screen: the tiles are asked again in the night colour map (another URL, so never a
+  // cached day tile), and the labels turn red.
+  let rafs = [];
+  const realRaf = context.requestAnimationFrame;
+  context.requestAnimationFrame = (fn) => { rafs.push(fn); return rafs.length; };
+  vm.runInContext("applyNight(true)", context);
+  assert.deepStrictEqual(tiles(), [], "the day tiles go");
+  rafs.forEach((fn) => fn()); rafs = [];
+  assert.deepStrictEqual(tiles(), ["night/3/0", "night/3/1", "night/3/2", "night/3/3"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("night/3/1").src`, context), "http://t/spec/abc/night/3/1.png");
+  assert.strictEqual(specEl().labels.style.color, "#d36b6b");
+  vm.runInContext("applyNight(false)", context);
+  rafs.forEach((fn) => fn());
+  context.requestAnimationFrame = realRaf;
+  assert.deepStrictEqual(tiles(), ["inferno/3/0", "inferno/3/1", "inferno/3/2", "inferno/3/3"]);
+  assert.strictEqual(specEl().labels.style.color, "#fff");
   await vm.runInContext("S.spec.save || Promise.resolve()", context);
   assert.deepStrictEqual(specSaves, [true]);
   // Zoomed in (400 px per second) and scrolled: full detail, only the tiles in view (and one each side).
   wrapW = 40000; wsScroll = 20000;
   context.renderSpectrogram();
-  assert.deepStrictEqual(tiles(), ["0/11", "0/12", "0/13"]);
-  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("0/12").style.imageRendering`, context), "pixelated");
+  assert.deepStrictEqual(tiles(), ["inferno/0/11", "inferno/0/12", "inferno/0/13"]);
+  assert.strictEqual(vm.runInContext(`S.spec.imgs.get("inferno/0/12").style.imageRendering`, context), "pixelated");
   assert.strictEqual(specEl().children.filter((c) => c.tagName === "IMG").length, 3, "tiles out of view are removed");
   wrapW = 800; wsScroll = 0;
   // Another recording before the answer: that answer is dropped; the new one asks again.
@@ -2413,5 +2567,975 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual(dlg.lastChild.textContent, "…and 2 earlier updates.");
   $("update-later").onclick();
   assert.ok($("update-dialog").hidden);
+
+  // ---- Live mode: the view, choosing an input (remembered by name), the level meter's data,
+  // Record / Stop, M marks, Listen (off by default) with Enhance, and analog import ----
+  const lv = [];                                        // the backend's Live calls
+  const sameJSON = (a, b) => assert.strictEqual(JSON.stringify(a), JSON.stringify(b));   // the page's objects
+  let liveSettings = { ok: true, input: { id: "stale-id", label: "Line (USB Audio Device)" }, split: 3, import: false, max_split: 60 };
+  let chunkAnswer = (seq) => ({ ok: true, seconds: 0.5 * (seq + 1), piece: 1, file: "Live 2026-10-03 21-05-09.wav", saved: 0, stopped: null });
+  let stopAnswer = null;
+  Object.assign(api, {
+    live_settings: async () => { lv.push(["settings"]); return liveSettings; },
+    set_live_settings: async (c) => { lv.push(["set", c]); liveSettings = { ...liveSettings, ...c }; return liveSettings; },
+    live_start: async (o) => { lv.push(["start", o]); return { ok: true, session: "s1", file: o.mode === "live" ? "Live 2026-10-03 21-05-09.wav" : "Import 2026-10-03 21-05-09 (full).wav", folder: "Old Mill" }; },
+    live_chunk: async (sid, seq, data) => { lv.push(["chunk", sid, seq, data]); return chunkAnswer(seq); },
+    live_mark: async (sid, at) => { lv.push(["mark", sid, at]); return { ok: true, mark: { id: lv.filter((c) => c[0] === "mark").length - 1, at, file: "Live 2026-10-03 21-05-09.wav", start: Math.max(0, at - 2), end: at, cls: "C" } }; },
+    live_stop: async (sid) => { lv.push(["stop", sid]); return stopAnswer; },
+    open_mic_settings: async () => { lv.push(["mic-settings"]); return { ok: true }; },
+    open_sound_settings: async () => { lv.push(["sound-settings"]); return { ok: true }; },
+    live_space: async (folder, rate, channels) => { lv.push(["space", folder, rate, channels]);
+                                                    return { ok: true, left_seconds: folder === "root" ? 50 * 3600 : 135 * 3600 + 120 }; },
+  });
+  assert.ok(html.includes('id="live-entry"') && html.includes('id="open-live"') && html.includes('src="live.js"'));
+  vm.runInContext(`S.lib.folders = [{ id: "root", name: "OpenEVP", rel: [], parent: null, in_clips: false },
+                                    { id: "f1", name: "Old Mill", rel: ["Old Mill"], parent: "root", in_clips: false },
+                                    { id: "c1", name: "Clips", rel: ["Old Mill", "Clips"], parent: "f1", in_clips: true }];
+                   S.lib.folderById = new Map(S.lib.folders.map((d) => [d.id, d])); S.lib.folderId = "f1"; S.lib.flat = false;`, context);
+  mics.requests.length = 0;
+  await context.openLive();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.view", context), "live");
+  assert.ok(!$("live").hidden && $("list").hidden && $("player").hidden);
+  // Raw input: no echo cancellation, noise suppression or automatic gain, stereo if it has it.
+  for (const c of mics.requests) {
+    assert.deepStrictEqual([c.audio.echoCancellation, c.audio.noiseSuppression, c.audio.autoGainControl], [false, false, false]);
+  }
+  // The remembered input's id is stale (ids change between sessions): found again by its name.
+  sameJSON(mics.requests.map((c) => c.audio.deviceId), [{ ideal: "stale-id" }, { exact: "d-usb" }]);
+  assert.deepStrictEqual(texts($("live-input")), ["Default - Microphone (Realtek Audio)", "Microphone (Realtek Audio)", "Line (USB Audio Device)"]);
+  assert.strictEqual($("live-input").value, "d-usb");
+  // Saved into the folder the library shows; Clips folders are not offered.
+  assert.deepStrictEqual(texts($("live-folder")), ["EVP Library (top folder)", "Old Mill"]);
+  assert.strictEqual($("live-folder").value, "f1");
+  const ctxLive = audioContexts[audioContexts.length - 1];
+  assert.strictEqual(ctxLive.sampleRate, 48000);
+  assert.deepStrictEqual(ctxLive.modules, ["live-worklet.js"]);
+  const tap = worklets[worklets.length - 1];
+  assert.strictEqual(tap.opts.processorOptions.channels, 2);
+  const stream = ctxLive.nodes.find((n) => n.kind === "stream");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);   // not to the speakers
+  assert.ok(!$("live-monitor").checked, "Listen is off when the view opens");
+  assert.ok(!$("live-record").disabled && $("live-mark").disabled);
+  // Before Record, the status strip already shows the time left on the drive of the folder picked
+  // (at the input's rate), and it follows the folder.
+  sameJSON(lv.filter((c) => c[0] === "space").pop(), ["space", "f1", 48000, 2]);
+  assert.strictEqual($("live-left").textContent, "about 135 h left");
+  $("live-folder").value = "root"; await $("live-folder").onchange();
+  assert.strictEqual($("live-left").textContent, "about 50 h left");
+  $("live-folder").value = "f1"; await $("live-folder").onchange();
+  // The Listen panel: hidden until Listen is on; there is no separate Enhance toggle any more.
+  assert.ok(!html.includes("live-enhance-open") && !html.includes("Enhance what I hear"));
+  assert.ok($("live-listen").hidden, "no Listen, no panel");
+  assert.ok(html.includes("Use headphones"));
+  assert.strictEqual(vm.runInContext("typeof borrowEnhance", context), "undefined", "the player keeps its own Enhance tab");
+  // Listen: the input to the speakers, straight while no option is set; the panel shows.
+  const liveEnhSaved = [];
+  api.set_enhance = async (st) => { liveEnhSaved.push(st); return { ok: true, enhance: st, remembered: true }; };
+  $("live-monitor").checked = true; $("live-monitor").onchange();
+  assert.ok(!$("live-listen").hidden, "Listen on: its panel shows");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);   // nothing on: straight
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context), "no option: the spectrogram is the input");
+  // The controls, in order: Volume, Even out loud and quiet, Clean up, Hum, Reset.
+  const order = ["Volume</span>", "Even out loud and quiet</span>", "Clean up</span>", "Hum</span>", ">Reset</button>"]
+    .map((t) => html.indexOf(t, html.indexOf('id="live-listen"')));
+  assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])), JSON.stringify(order));
+  assert.deepStrictEqual(texts($("live-even")), ["Off", "Light", "Medium", "Strong"]);
+  assert.deepStrictEqual(texts($("live-hum")), ["Off", "60 Hz", "50 Hz"]);
+  assert.ok(['id="live-voice"', ">Voice only<", 'id="live-rumble"', ">Cut rumble<", 'id="live-hiss"', ">Cut hiss<"].every((t) => html.includes(t)));
+  // They map onto the player's Enhance settings (saved once, for both), and are heard at once.
+  $("live-boost").value = "6"; $("live-boost").oninput();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.enh.settings.boost", context), 6);
+  assert.strictEqual(liveEnhSaved.pop().boost, 6, "saved as the player's Enhance setting");
+  assert.strictEqual($("live-boost-value").textContent, "+6 dB");
+  assert.strictEqual($("boost").value, "6", "the player's tab shows it too");
+  const chainOut = stream.outs[2];
+  assert.strictEqual(chainOut.kind, "gain");
+  assert.strictEqual(chainOut.outs[0].kind, "gain");                                 // the limiter's pre-gain, then its curve
+  // The capture never goes through it: the worklet (the saved file) and the waveform take the source.
+  assert.strictEqual(stream.outs[0], tap, "the worklet gets the raw input");
+  assert.ok(!ctxLive.nodes.filter((n) => n.kind === "gain").some((n) => n.outs.includes(tap)), "never the enhanced signal");
+  const even = (v) => $("live-even").children.find((b) => b.dataset.v === v);
+  even("strong").onclick();
+  await settle();
+  sameJSON(vm.runInContext("[S.enh.settings.leveler, S.enh.settings.strength]", context), [true, "strong"]);
+  assert.deepStrictEqual($("live-even").children.map((b) => b.getAttribute("aria-pressed")), ["false", "false", "false", "true"]);
+  assert.ok(ctxLive.nodes.some((n) => n.kind === "compressor" && stream.outs.length === 3), "evened out: the Leveler is heard");
+  assert.ok($("leveler").checked && $("leveler-strength").value === "strong", "the player's Leveler and strength");
+  even("off").onclick();
+  await settle();
+  sameJSON(vm.runInContext("[S.enh.settings.leveler, S.enh.settings.strength]", context), [false, "strong"]);
+  assert.deepStrictEqual($("live-even").children.map((b) => b.getAttribute("aria-pressed")), ["true", "false", "false", "false"]);
+  for (const [id, key] of [["live-voice", "voice"], ["live-rumble", "rumble"], ["live-hiss", "hiss"]]) {
+    $(id).onclick();
+    await settle();
+    assert.ok(vm.runInContext(`S.enh.settings.${key}`, context) === true && $(id).getAttribute("aria-pressed") === "true", key);
+    $(id).onclick();
+    await settle();
+    assert.ok(vm.runInContext(`S.enh.settings.${key}`, context) === false && $(id).getAttribute("aria-pressed") === "false", key);
+  }
+  $("live-hum").children.find((b) => b.dataset.v === "50").onclick();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.enh.settings.hum", context), "50");
+  assert.strictEqual($("hum").value, "50");
+  // The spectrogram follows what is heard: listening with an option set, the enhanced signal, read at
+  // the end of the chain; the waveform (and the saved file) stay raw.
+  assert.ok(!html.includes("live-heard") && !html.includes("Show what I hear"));
+  const heardA = vm.runInContext("LV.heardAnalyser", context);
+  assert.ok(heardA && vm.runInContext("LV.enhanced && specAnalyser() === LV.heardAnalyser", context));
+  assert.ok(ctxLive.nodes.some((n) => n.outs.includes(heardA) && n !== stream), "fed from the end of the chain");
+  assert.strictEqual(stream.outs[1].kind, "analyser", "the raw analyser still takes the source");
+  assert.strictEqual(stream.outs[0], tap);
+  // Listen off: no chain at all, the panel hides, and the spectrogram is the input (options or not).
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  assert.ok($("live-listen").hidden);
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"], "Listen off: no chain");
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context));
+  // Reset: every option off (here and in the player's tab).
+  $("live-monitor").checked = true; $("live-monitor").onchange();
+  $("live-enh-reset").onclick();
+  await settle();
+  sameJSON(vm.runInContext("S.enh.settings", context), vm.runInContext("ENH_DEFAULT", context));
+  assert.ok(vm.runInContext("!LV.enhanced && specAnalyser() === LV.analyser", context), "Reset: the spectrogram is the input");
+  assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser", "destination"]);
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  // Nothing about it is stored in the Live settings.
+  assert.ok(!lv.some((c) => c[0] === "set" && "heard" in c[1]));
+  // Settings shared the other way: the player's Enhance (setEnhance) is what Live hears, and shows.
+  vm.runInContext(`setEnhance({ boost: 0, leveler: false, hum: "60" });`, context);
+  $("live-monitor").checked = true; $("live-monitor").onchange();
+  assert.ok(stream.outs.length === 3 && stream.outs[2].kind === "biquad" && stream.outs[2].type === "notch");
+  assert.strictEqual($("live-hum").children.find((b) => b.getAttribute("aria-pressed") === "true").dataset.v, "60");
+  $("live-monitor").checked = false; $("live-monitor").onchange();
+  vm.runInContext(`setEnhance({ ...ENH_DEFAULT });`, context);
+  await settle();
+  // Another input: opened, and remembered (by id and name).
+  $("live-input").value = "d-mic";
+  await $("live-input").onchange();
+  await settle();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { input: { id: "d-mic", label: "Microphone (Realtek Audio)" } }]);
+  assert.strictEqual(mics.requests.slice(-1)[0].audio.deviceId.ideal, "d-mic");
+  const tap2 = worklets[worklets.length - 1];
+  // The level meter follows the worklet's batches.
+  const batch = (frames, value) => {
+    const pcm = new Int16Array(frames * 2).fill(value);
+    tap2.port.onmessage({ data: { pcm: pcm.buffer, frames, peak: Math.abs(value) / 32768, sumsq: frames * 2 * (value / 32768) ** 2 } });
+    return pcm;
+  };
+  batch(2048, 16384);
+  context.drawMeter();
+  assert.strictEqual($("live-level").textContent, "-6 dB");
+  assert.ok(!lv.some((c) => c[0] === "chunk"), "nothing is sent before Record");
+  // Record: the backend gets the mode, the folder, the input's rate and channels.
+  await $("live-record").onclick();
+  sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "live", folder: "f1", rate: 48000, channels: 2, split: 0 });
+  assert.strictEqual($("live-record").textContent, "■ Stop");
+  assert.ok($("live-input").disabled && $("live-folder").disabled && $("live-mode-import").disabled);
+  assert.ok(document.body.classList.contains("recording") && !$("live-mark").disabled);
+  assert.strictEqual($("live-file").textContent, "Recording Live 2026-10-03 21-05-09.wav");
+  // Half a second of audio goes as one chunk: numbered, base64 16-bit PCM, exactly the samples.
+  const sent = [];
+  for (let i = 0; i < 12; i++) sent.push(batch(2048, i * 100 - 500));
+  await settle();
+  const chunks = lv.filter((c) => c[0] === "chunk");
+  assert.strictEqual(chunks.length, 1);
+  assert.deepStrictEqual([chunks[0][1], chunks[0][2]], ["s1", 0]);
+  const bytes = Buffer.from(chunks[0][3], "base64");
+  const want = Buffer.concat(sent.map((p) => Buffer.from(p.buffer)));
+  assert.ok(bytes.equals(want), "the chunk holds exactly the captured samples");
+  // M marks the moment heard now (the audio before it is sent first).
+  batch(2048, 7);
+  fire([document], "keydown", { key: "m", target: document.body });
+  await settle();
+  const mark = lv.filter((c) => c[0] === "mark").pop();
+  assert.ok(Math.abs(mark[2] - 13 * 2048 / 48000) < 1e-9, String(mark[2]));
+  assert.strictEqual(lv.filter((c) => c[0] === "chunk").pop()[2], 1);
+  // The mark shows as a star on the waveform and "Marked" for a moment. There is no marks list, no
+  // class or note on this screen: marks are graded later in the EVP Library.
+  assert.ok(!$("live-marked").hidden, "Marked shows");
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => m.label)", context), ["★"]);
+  assert.ok(!html.includes('id="live-marks"') && !html.includes("live-q-") && !html.includes("Log question"));
+  assert.ok(html.includes("Mark the last 3 seconds"));
+  // Another right after: its star goes a row lower, so both stay readable.
+  fire([document], "keydown", { key: "M", target: document.body });
+  await settle();
+  sameJSON(vm.runInContext("LV.hist.markers.map((m) => [m.label, m.row])", context), [["★", 0], ["★", 1]]);
+  // "Marked" goes again after a moment.
+  fakeTimers();
+  context.flashMarked();
+  assert.ok(!$("live-marked").hidden);
+  await advance(1300);
+  assert.ok($("live-marked").hidden, "Marked is brief");
+  realTimers();
+  // Stop: the rest is sent, then the recording is saved; it opens in the player, in its folder.
+  stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0,
+                 files: [{ id: "lf1", name: "Live 2026-10-03 21-05-09.wav", seconds: 0.6, marks: 1 }],
+                 player: { ok: true, rec: "r-live", url: "http://a/live.wav", peaks: [0.1], duration: 0.6, rate: 48000, channels: 2,
+                           fp: "fp-live", marks: [{ id: "m1", start: 0, end: 0.55, cls: "C", note: "Marked while recording" }],
+                           reviewed: false, backup: { status: null, detail: "" }, name: "Live 2026-10-03 21-05-09.wav" } };
+  batch(2048, 9);
+  const tail = new Int16Array(100 * 2).fill(1234);         // held by the worklet: less than a batch
+  tap2.port.tail = { pcm: tail.slice().buffer, frames: 100, peak: 0.04, sumsq: 0 };
+  // Marks still waiting for the backend when Stop is pressed, each answered within its own time limit
+  // but 30 s in all: Stop waits for every one of them, then finishes the file.
+  fakeTimers();
+  const heldMarks = [], realMark = api.live_mark, fromMarks = lv.length;
+  api.live_mark = (sid, at) => new Promise((resolve) => {
+    lv.push(["slow-mark", at]); heldMarks.push(() => resolve({ ok: true, mark: { at, start: Math.max(0, at - 3), end: at, cls: "C" } }));
+  });
+  const marks3 = [context.liveMark(), context.liveMark(), context.liveMark()];
+  await settle();
+  const stopAfterMarks = $("live-record").onclick();
+  await settle();
+  for (let i = 0; i < 3; i++) {
+    await advance(10000);
+    assert.ok(!lv.slice(fromMarks).some((c) => c[0] === "stop"), `Stop waits for mark ${i + 1}`);
+    heldMarks.shift()();
+    await settle();
+  }
+  await Promise.all(marks3);
+  await stopAfterMarks;
+  await settle();
+  realTimers();
+  api.live_mark = realMark;
+  const marksAt = lv.map((c, i) => (c[0] === "slow-mark" ? i : -1)).filter((i) => i >= 0);
+  assert.strictEqual(marksAt.length, 3);
+  assert.ok(marksAt.every((i) => i < lv.findIndex((c) => c[0] === "stop")), "all before the finish");
+  for (const i of marksAt.reverse()) lv.splice(i, 1);
+  assert.deepStrictEqual(lv.slice(-2).map((c) => c[0]), ["chunk", "stop"]);
+  assert.ok(tap2.port.posted.some((m) => m.flush !== undefined), "Stop asks the worklet for its last samples");
+  const lastChunk = Buffer.from(lv[lv.length - 2][3], "base64");
+  assert.ok(lastChunk.subarray(lastChunk.length - 400).equals(Buffer.from(tail.buffer)), "they are saved, at the end");
+  assert.strictEqual(vm.runInContext("S.view", context), "library");
+  assert.strictEqual(vm.runInContext("S.playing", context), "lib|lf1");
+  assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-live");
+  assert.ok($("live").hidden && !$("player").hidden && !document.body.classList.contains("recording"));
+  assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-05-09.wav in Old Mill.");
+  assert.strictEqual(tap2.ctx.state, "closed", "the input is let go of");
+  assert.strictEqual(vm.runInContext("S.lib.folderId", context), "f1");
+
+  // A recording that could not be opened in the player: saved, and said so.
+  await context.openLive();
+  await settle();
+  stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, player_error: "Could not play x: no space.",
+                 files: [{ id: "lf2", name: "Live 2026-10-03 21-06-00.wav", seconds: 0.1, marks: 0 }] };
+  await $("live-record").onclick();
+  worklets[worklets.length - 1].port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  await $("live-record").onclick();
+  await settle();
+  assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-06-00.wav in Old Mill. " +
+                     "It could not be opened in the player (Could not play x: no space); find it in the EVP Library.");
+  assert.strictEqual($("banner").className, "");                    // a warning, not a plain success
+  // A recording past 4 GB: the status shows the part being written; Stop says it is in parts, part 1 open.
+  await context.openLive();
+  await settle();
+  {
+    const realChunk = chunkAnswer;
+    chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Live 2026-10-03 21-07-00 (part 2).wav", part: 2, stopped: null, left_seconds: 3600 });
+    stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, parts: true,
+                   files: [{ id: "p1", name: "Live 2026-10-03 21-07-00.wav", seconds: 0.3, marks: 0 },
+                           { id: "p2", name: "Live 2026-10-03 21-07-00 (part 2).wav", seconds: 0.2, marks: 0 }],
+                   player: { ok: true, rec: "r-p1", url: "http://a/p1.wav", peaks: [0.1], duration: 0.3, rate: 48000, channels: 2,
+                             fp: "fp-p1", marks: [], reviewed: false, backup: { status: null, detail: "" }, name: "Live 2026-10-03 21-07-00.wav" } };
+    await $("live-record").onclick();
+    for (let i = 0; i < 12; i++) worklets[worklets.length - 1].port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+    await settle();
+    assert.strictEqual($("live-file").textContent, "Recording Live 2026-10-03 21-07-00 (part 2).wav");
+    await $("live-record").onclick();
+    await settle();
+    assert.strictEqual($("banner-text").textContent,
+                       "✓ Saved Live 2026-10-03 21-07-00.wav in 2 parts (a WAV file holds at most 4 GB) in Old Mill. Part 1 is open.");
+    assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-p1");
+    chunkAnswer = realChunk;
+  }
+  // No Close link: the sidebar is how one leaves. Not recording, the screen just goes and the
+  // microphone is let go. Recording (or saving), the user is asked first, and the move waits for
+  // the recording to be saved.
+  assert.ok(!html.includes('id="live-close"'), "no Close link on the Live screen")
+  await context.openLive();
+  await settle();
+  {
+    const tapL = worklets[worklets.length - 1];
+    const went = [];
+    const libEntry = Object.assign(new Element("div", "lib-entry"), { click() { went.push("library"); vm.runInContext("showLibrary()", context); } });
+    $("live-leave").hidden = true;                           // as index.html has it
+    const idle = fire([$("sidebar")], "click", { target: libEntry });
+    assert.ok(!idle.defaultPrevented && $("live-leave").hidden, "not recording: nothing in the way");
+    stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, files: [] };
+    await $("live-record").onclick();
+    await settle();
+    const ask = fire([$("sidebar")], "click", { target: libEntry });
+    assert.ok(ask.defaultPrevented && !$("live-leave").hidden, "recording: asked first");
+    assert.deepStrictEqual([$("live-leave-title").textContent, $("live-leave-stop").textContent, $("live-leave-keep").textContent],
+                           ["Stop recording and save it?", "Stop and save", "Keep recording"]);
+    assert.ok(html.includes("Everything recorded so far is saved."));
+    $("live-leave-keep").onclick();
+    assert.ok($("live-leave").hidden && vm.runInContext("liveRecording()", context) && went.length === 0, "Keep recording: still recording");
+    const fromStop = lv.length;
+    fire([$("sidebar")], "click", { target: libEntry });
+    await $("live-leave-stop").onclick();
+    await settle();
+    assert.ok(lv.slice(fromStop).some((c) => c[0] === "stop"), "saved");
+    assert.ok(!vm.runInContext("liveRecording()", context));
+    sameJSON(went, ["library"]);                             // then the move the user asked for
+    assert.strictEqual(tapL.ctx.state, "closed", "the microphone is let go");
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    assert.ok(!css.includes("body.recording #sidebar"), "the sidebar stays usable while recording");
+    assert.ok(/#live-leave \.modal-buttons button \{ min-height: 48px/.test(css), "touch sized");
+  }
+
+  // Import: the toggle, the silence setting, the guide; pieces come and go as the backend says.
+  await context.openLive();
+  await settle();
+  assert.ok($("live-import").hidden);
+  $("live-mode-import").onclick();
+  await settle();
+  assert.ok(!$("live-import").hidden);
+  assert.strictEqual($("live-title").textContent, "Import from a recorder");
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { import: true }]);
+  for (const words of ["headphone jack", "2.5 mm", "USB audio adapter", "line-in", "volume", "playback speed to normal",
+                       "voice activation off", "Press Record here first"]) assert.ok(html.includes(words), words);
+  assert.ok(!html.slice(html.indexOf('id="live-guide"'), html.indexOf("</details>")).includes("—"), "no em dashes in the guide");
+  $("live-gap").value = "5"; $("live-gap").onchange();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { split: 5 }]);
+  $("live-split").checked = false; $("live-split").onchange();
+  sameJSON(lv.filter((c) => c[0] === "set").pop(), ["set", { split: 0 }]);
+  assert.ok($("live-gap").disabled);
+  $("live-split").checked = true; $("live-split").onchange();
+  $("live-folder").value = "root";
+  // An import records one file; after Stop it opens in the player with suggested cuts cutsDrawn on the
+  // waveform. The user removes and adds cuts, then splitCalls (or keeps it as one). Job events that come
+  // before the page knows the job are kept for it.
+  chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Import 2026-10-03 21-05-09 (full).wav", stopped: null });
+  await $("live-record").onclick();
+  sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "import", folder: "root", rate: 48000, channels: 2, split: 5 });
+  assert.strictEqual($("live-file").textContent, "Recording Import 2026-10-03 21-05-09 (full).wav");
+  const tap3 = worklets[worklets.length - 1];
+  tap3.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  // A player and regions that remember what is cutsDrawn, and a play cutCursor the test moves.
+  let cutCursor = 0;
+  const cutsDrawn = new Map();
+  const cutRegionsFake = new Proxy({ addRegion(o) { const r = { id: o.id, start: o.start, remove() { cutsDrawn.delete(o.id); } };
+                                                cutsDrawn.set(o.id, r); return r; },
+                                  getRegions: () => [...cutsDrawn.values()] },
+                                { get: (t, k) => (k in t ? t[k] : anything) });
+  const cutWsFake = new Proxy({ getCurrentTime: () => cutCursor, getDuration: () => 71, setTime(t) { cutCursor = t; } },
+                           { get: (t, k) => (k in t ? t[k] : anything) });
+  context.__fws = cutWsFake; context.__frg = cutRegionsFake;
+  vm.runInContext("S.ws = __fws; S.regions = __frg;", context);
+  const importPlayerR = { ok: true, rec: "r-imp", url: "http://a/imp.wav", peaks: [0.1], duration: 71, rate: 48000, channels: 2,
+                         fp: "fp-imp", marks: [], reviewed: false, backup: { status: null, detail: "" },
+                         name: "Import 2026-10-03 21-05-09 (full).wav" };
+  api.live_stop = async () => {
+    lv.push(["stop"]);
+    // The suggestions are ready before Stop's answer reaches the page: they must not be lost.
+    window.onBackendEvent("import-suggest-done", { job: "s1", fp: "fp-imp", duration: 71, cuts: [10.5, 30.25] });
+    return { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0, player: importPlayerR,
+             suggest: { job: "s1", fp: "fp-imp" }, files: [{ id: "i0", name: "Import 2026-10-03 21-05-09 (full).wav", seconds: 71, marks: 0 }] };
+  };
+  await $("live-record").onclick();
+  await settle();
+  assert.strictEqual(vm.runInContext("S.view", context), "library", "the import opens in the player");
+  assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-imp");
+  assert.ok(!$("cut-bar").hidden);
+  const cutChips = () => $("cut-list").children.map((c) => c.children[0].textContent);
+  assert.deepStrictEqual(cutChips(), ["✂ 0:10.5", "✂ 0:30.3"]);
+  assert.deepStrictEqual([...cutsDrawn.keys()], ["cut-0", "cut-1"]);
+  assert.strictEqual($("cut-split").textContent, "Split into 3 recordings");
+  assert.ok(!html.slice(html.indexOf('id="cut-bar"'), html.indexOf('id="marks"')).includes("—"));
+  // Remove a suggestion (its ✕), add one at the play cutCursor, refuse one too close, remove by clicking it.
+  $("cut-list").children[1].children[1].onclick();
+  assert.strictEqual(cutChips().length, 1);
+  assert.deepStrictEqual([...cutsDrawn.keys()], ["cut-0"]);
+  assert.strictEqual($("cut-split").textContent, "Split into 2 recordings");
+  cutCursor = 50; $("cut-add").onclick();
+  cutCursor = 10.7; $("cut-add").onclick();
+  assert.ok(/at least 0.5 seconds/.test($("status").textContent));
+  sameJSON(vm.runInContext("LV.cuts.cuts", context), [10.5, 50]);
+  cutCursor = 60; $("cut-add").onclick();
+  context.regionClicked(cutsDrawn.get("cut-2"), { stopPropagation() {} });                      // clicking a cut removes it
+  sameJSON(vm.runInContext("LV.cuts.cuts", context), [10.5, 50]);
+  // Split: the confirmed cuts go to the backend; its progress may come before its answer.
+  const splitCalls = [], splitCancels = [];
+  api.split_import = async (rec, cuts) => {
+    splitCalls.push([rec, cuts]);
+    window.onBackendEvent("import-split-progress", { job: "j9", percent: 40 });
+    return { ok: true, job: "j9" };
+  };
+  api.cancel_import_split = async (job) => { splitCancels.push(job); return { ok: true }; };
+  await $("cut-split").onclick();
+  await settle();
+  sameJSON(splitCalls, [["r-imp", [10.5, 50]]]);
+  assert.strictEqual($("status").textContent, "Splitting the import into separate recordings… 40%");
+  assert.strictEqual($("progress-fill").style.width, "40%");
+  assert.strictEqual($("banner-action").textContent, "Cancel splitting");
+  assert.ok($("cut-add").disabled && $("cut-split").disabled && $("cut-keep").disabled);
+  window.onBackendEvent("import-split-progress", { job: "other", percent: 90 });         // another job's: kept aside
+  assert.strictEqual($("status").textContent, "Splitting the import into separate recordings… 40%");
+  await $("banner-action").onclick();
+  sameJSON(splitCancels, ["j9"]);
+  window.onBackendEvent("import-split-done", { job: "j9", folder: "OpenEVP", full: "Import 2026-10-03 21-05-09 (full).wav",
+                                               files: [{ id: "p1" }, { id: "p2" }, { id: "p3" }] });
+  assert.strictEqual($("banner-text").textContent,
+                     "✓ Split Import 2026-10-03 21-05-09 (full).wav into 3 recordings in OpenEVP. The whole import is kept too.");
+  assert.ok($("cut-bar").hidden && $("progress").hidden && $("status").textContent === "");
+  assert.strictEqual(cutsDrawn.size, 0);
+  // Keep as one: nothing is split; no gaps found: the bar says so; a failed split: said, the file kept.
+  vm.runInContext(`LV.cuts = { job: "s2", fp: "fp-imp", cuts: [12], suggested: 1, looking: false, splitJob: null }; showCuts();`, context);
+  assert.ok(!$("cut-bar").hidden);
+  $("cut-keep").onclick();
+  assert.ok($("cut-bar").hidden);
+  assert.strictEqual($("banner-text").textContent, "Kept as one recording.");
+  assert.strictEqual(splitCalls.length, 1);
+  vm.runInContext(`LV.cuts = { job: "s3", fp: "fp-imp", cuts: [], suggested: null, looking: true, splitJob: null };`, context);
+  context.registerJob("s3", context.suggestEvent);
+  window.onBackendEvent("import-suggest-done", { job: "s3", fp: "fp-imp", duration: 71, cuts: [] });
+  assert.ok(/^No gaps between recordings found/.test($("cut-text").textContent));
+  assert.ok($("cut-split").disabled);
+  vm.runInContext(`LV.cuts = { job: "s4", fp: "fp-imp", cuts: [20], suggested: 1, looking: false, splitJob: "j8" };`, context);
+  context.registerJob("j8", context.splitEvent);
+  window.onBackendEvent("import-split-failed", { job: "j8", cancelled: true, full: "Import x (full).wav",
+                                                 error: "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file." });
+  assert.strictEqual($("banner-text").textContent,
+                     "Import x (full).wav was not split into separate recordings: it was cancelled. It is kept as one file.");
+  // Another recording loaded in the player: the cuts go.
+  vm.runInContext(`LV.cuts = { job: "s5", fp: "fp-imp", cuts: [20], suggested: 1, looking: false, splitJob: null };`, context);
+  vm.runInContext(`setCurrent("other", { rec: "r2", fp: "fp-other", duration: 5, marks: [] });`, context);
+  assert.ok($("cut-bar").hidden && vm.runInContext("LV.cuts === null", context));
+  context.__ws = realPlayer[0]; context.__regions = realPlayer[1];
+  vm.runInContext("S.ws = __ws; S.regions = __regions;", context);
+  // A backend that stops the import by itself (a nearly full disk): said, and what was saved.
+  await context.openLive();
+  await settle();
+  const FULL = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free).";
+  chunkAnswer = (seq) => (seq === 0 ? { ok: true, seconds: 0.5, file: "Import 2026-10-03 21-05-09.wav", stopped: null }
+    : { ok: true, seconds: 1, file: null, stopped: FULL,
+        result: { ok: true, mode: "import", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                  files: [{ id: "i9", name: "Import 2026-10-03 21-05-09.wav", seconds: 1, marks: 0 }] } });
+  $("live-split").checked = false; $("live-split").onchange();
+  await $("live-record").onclick();
+  const tap4 = worklets[worklets.length - 1];
+  const feed4 = () => { const pcm = new Int16Array(24000 * 2); tap4.port.onmessage({ data: { pcm: pcm.buffer, frames: 24000, peak: 0, sumsq: 0 } }); };
+  const stopsMid = lv.filter((c) => c[0] === "stop").length;
+  feed4(); await settle();
+  feed4(); await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, `${FULL} ✓ Saved Import 2026-10-03 21-05-09.wav in OpenEVP.`);
+  assert.strictEqual(lv.filter((c) => c[0] === "stop").length, stopsMid, "already finished by the backend");
+  // Windows blocking the microphone: said plainly, with a way to the setting.
+  mics.fail = "NotAllowedError";
+  await context.openInput(null);
+  assert.ok(/Let desktop apps access your microphone/.test($("live-status").textContent));
+  assert.strictEqual($("banner-action").textContent, "Open microphone settings");
+  await $("banner-action").onclick();
+  sameJSON(lv.pop(), ["mic-settings"]);
+  assert.ok($("live-record").disabled);
+  mics.fail = null;
+  // A recording a crash cut off is finished at startup, and said once.
+  api.live_recover = async () => ({ ok: true, failed: [], recovered: [{ name: "Live 2026-10-02 22-00-00.wav", folder: "Old Mill", seconds: 1800, marks: 2 }] });
+  await context.liveRecover();
+  assert.strictEqual($("banner-text").textContent,
+                     "A recording was cut off last time; OpenEVP saved what it had: Live 2026-10-02 22-00-00.wav (in Old Mill).");
+  // ---- Resizing the window clears a canvas: the live waveform and spectrogram are drawn again
+  // from what they drew before, never left blank ----
+  {
+    const ops = [];
+    const fakeCanvas = (id, w, h) => {
+      const c = { id, tagName: "CANVAS", clientWidth: w, clientHeight: h, width: 0, height: 0, style: {} };
+      const g = { fillStyle: "", globalCompositeOperation: "source-over",
+                  clearRect: (...a) => ops.push([id, "clear", ...a]), fillRect: (x) => ops.push([id, "fill", x]),
+                  drawImage: () => ops.push([id, "shift"]),
+                  createImageData: (iw, ih) => ({ width: iw, height: ih, data: new Uint8ClampedArray(iw * ih * 4) }),
+                  putImageData: (img, x) => ops.push([id, "put", x, img.width, img.data.some((v, i) => i % 4 !== 3 && v > 0)]) };
+      c.getContext = () => g;
+      return c;
+    };
+    const wave = fakeCanvas("live-wave", 400, 100), spec = fakeCanvas("live-spec", 400, 120);
+    byId.set("live-wave", wave); byId.set("live-spec", spec);
+    await context.openLive();
+    await settle();
+    const tapR = worklets[worklets.length - 1];
+    const ctxR = tapR.ctx;
+    ctxR.nodes.find((n) => n.kind === "analyser").getByteFrequencyData = (arr) => arr.fill(180);
+    // Two seconds of audio: 80 waveform columns; frames drawn over two seconds: spectrogram columns.
+    for (let i = 0; i < 47; i++) {
+      const pcm = new Int16Array(2048 * 2).fill(i % 2 ? 12000 : -12000);
+      tapR.port.onmessage({ data: { pcm: pcm.buffer, frames: 2048, peak: 0.37, sumsq: 0 } });
+    }
+    for (let t = 1000; t <= 3000; t += 50) context.liveFrame(t);
+    const history = vm.runInContext("[LV.hist.waveN, LV.hist.specN]", context);
+    assert.ok(history[0] >= 80 && history[1] >= 60, String(history));
+    // The window is made narrower: the canvases get their new size and are drawn whole again.
+    ops.length = 0;
+    wave.clientWidth = 250; spec.clientWidth = 250;
+    context.liveFrame(3050);
+    assert.strictEqual(wave.width, 250);
+    const waveFills = ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length;
+    assert.ok(ops.some((o) => o[0] === "live-wave" && o[1] === "clear"));
+    assert.strictEqual(waveFills, Math.min(history[0], 250), "every column it had drawn, drawn again");
+    const specPut = ops.find((o) => o[0] === "live-spec" && o[1] === "put" && o[3] > 1);
+    assert.ok(specPut, "the spectrogram is drawn again in one piece");
+    assert.strictEqual(specPut[2] + specPut[3], 250, "at the right edge");
+    assert.ok(specPut[4], "with its colours, not blank");
+    // A pixel-ratio change (a window dragged to another screen), seen by the debounced redraw too.
+    ops.length = 0;
+    window.devicePixelRatio = 2;
+    context.liveRedraw();
+    assert.strictEqual(wave.width, 500);
+    assert.strictEqual(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length, Math.min(history[0], 500));
+    const specNow = vm.runInContext("LV.hist.specN", context);
+    assert.ok(ops.some((o) => o[0] === "live-spec" && o[1] === "put" && o[3] === Math.min(specNow, 500) && o[4]));
+    window.devicePixelRatio = 1;
+    byId.delete("live-wave"); byId.delete("live-spec");
+    vm.runInContext("showLibrary()", context);
+    await settle();
+  }
+  // ---- The touch screen: toggles and their memory, the night screen, the layout, the status strip,
+  // silence, and scopes that scroll even for a silent input ----
+  {
+    const ops = [];
+    const fakeCanvas = (id, w, h) => {
+      const c = { id, tagName: "CANVAS", clientWidth: w, clientHeight: h, width: 0, height: 0, style: {} };
+      const g = { fillStyle: "", globalCompositeOperation: "source-over", font: "",
+                  clearRect: () => {}, fillRect: (x, y, w2, h2) => ops.push([id, "fill", x, y, w2, h2]),
+                  fillText: (t) => ops.push([id, "text", t]), drawImage: () => {},
+                  createImageData: (iw, ih) => ({ width: iw, height: ih, data: new Uint8ClampedArray(iw * ih * 4) }),
+                  putImageData: (img, x) => ops.push([id, "put", x, img.width]) };
+      c.getContext = () => g;
+      return c;
+    };
+    byId.set("live-wave", fakeCanvas("live-wave", 400, 100)); byId.set("live-spec", fakeCanvas("live-spec", 400, 120));
+    vm.runInContext("LV.settings = null;", context);      // as after a restart: read from the backend again
+    await context.openLive();
+    await settle();
+    assert.ok(!$("live-monitor").checked, "Listen is never on by itself");
+    // Listen left on when the screen was closed (or restored by the browser): off again, with its
+    // panel hidden and nothing to the speakers, before the screen even shows. Its options stay.
+    vm.runInContext(`setEnhance({ boost: 4 })`, context);
+    $("live-monitor").checked = true; $("live-monitor").onchange();
+    assert.ok(!$("live-listen").hidden);
+    vm.runInContext("showLibrary()", context);
+    await settle();
+    assert.ok(!$("live-monitor").checked && $("live-listen").hidden, "Listen ends with the screen");
+    $("live-monitor").checked = true;                        // as if restored on its own
+    await context.openLive();
+    await settle();
+    assert.ok(!$("live-monitor").checked && $("live-listen").hidden, "off again on opening");
+    const ctxL = audioContexts[audioContexts.length - 1];
+    assert.ok(!ctxL.nodes.some((n) => n.outs.some((o) => o.kind === "destination")), "nothing to the speakers");
+    assert.strictEqual(vm.runInContext("S.enh.settings.boost", context), 4, "the options are remembered");
+    vm.runInContext(`setEnhance({ ...ENH_DEFAULT })`, context);
+    assert.ok(html.includes('id="live-monitor" autocomplete="off"'));
+    // The night screen, app wide: one setting (set_night), one switch, in the top bar (the Live
+    // screen has none of its own). It goes on the whole document (html.night), Live screen included.
+    assert.ok(!html.includes("live-field"), "no second Night screen switch on the Live screen");
+    const nights = [];
+    api.set_night = async (on) => { nights.push(on); return { ok: true, night: on, remembered: true }; };
+    const docEl = document.documentElement;
+    assert.ok(!docEl.classList.contains("night"));
+    $("night").checked = true; $("night").onchange();
+    await settle();
+    assert.ok(docEl.classList.contains("night") && $("night").checked);
+    {
+      const cssN = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+      assert.ok(/#live \{ --live-bg: var\(--bg\); --live-panel: var\(--panel\); --live-text: var\(--text\)/.test(cssN),
+                "the Live screen takes the app's colours, so the night theme covers it");
+    }
+    sameJSON(nights, [true]);
+    assert.ok(!lv.some((c) => c[0] === "set" && "field" in c[1]), "not a Live setting any more");
+    // The live scopes are drawn again in the night's colours: the spectrogram red on black.
+    assert.strictEqual(vm.runInContext("LV.spec.lut", context), null, "the colour map is picked again");
+    sameJSON(vm.runInContext("[...nightLut().slice(0, 3), ...nightLut().slice(765)]", context), [0, 0, 0, 230, 82, 8]);
+    assert.ok(vm.runInContext("(() => { const l = nightLut(); for (let i = 0; i < 256; i++) if (l[i * 3] < l[i * 3 + 1]) return false; return true; })()", context),
+              "red throughout");
+    // Off from the toolbar: off everywhere.
+    $("night").checked = false; $("night").onchange();
+    await settle();
+    assert.ok(!docEl.classList.contains("night"));
+    sameJSON(nights, [true, false]);
+    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, Suggest cuts;
+    // the Listen panel's options are buttons that show their state.
+    for (const id of ["live-monitor-label"]) {
+      assert.ok(html.includes(`<label class="toggle" id="${id}"`), id);
+    }
+    assert.ok(html.includes('<label class="toggle" title="After Stop, suggest cuts'));
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    assert.ok(css.includes("#live label.toggle:has(input:checked)") && css.includes('#live .live-opt[aria-pressed="true"]') &&
+              css.includes('#live .live-seg button[aria-pressed="true"]'));
+    assert.ok(/#live button, #live select[^{]*\{[^}]*min-height: 48px/.test(css), "touch targets of 48 px, on the Live screen only");
+    assert.ok(!/^button\s*\{[^}]*min-height/m.test(css), "the rest of the app keeps its sizes");
+    // The layout: no session panel; the waveform and spectrogram take the space.
+    assert.ok(!html.includes("live-session") && !css.includes("#live-session") && !css.includes("#live.wide"));
+    assert.ok(/#live-scopes \{ flex: 1;/.test(css));
+    // The status strip: the input and its format; the time left on the drive.
+    assert.strictEqual($("live-input-info").textContent, "Microphone (Realtek Audio) · 48 kHz stereo");
+    for (const [sec, text] of [[9 * 3600 + 1800, "about 9 h left"], [45 * 60, "about 45 min left"], [30, "under a minute left"]]) {
+      assert.strictEqual(context.fmtLeft(sec), text);
+    }
+    // Feeding the input: -120 dB (nothing at all), -85 dB (almost nothing), -20 dB (sound).
+    const tapZ = worklets[worklets.length - 1], spec = vm.runInContext("LV.analyser", context);
+    spec.getByteFrequencyData = (arr) => arr.fill(0);
+    let t = 5000;
+    const feedAt = (db, seconds) => {
+      const v = db <= -120 ? 0 : Math.round(32768 * Math.pow(10, db / 20));
+      for (let i = 0; i < Math.round(seconds * 48000 / 2048); i++) {
+        const pcm = new Int16Array(2048 * 2).fill(v);
+        tapZ.port.onmessage({ data: { pcm: pcm.buffer, frames: 2048, peak: v / 32768, sumsq: 2048 * 2 * (v / 32768) ** 2 } });
+        t += 2048 / 48;
+        context.liveFrame(t);
+      }
+    };
+    // Preview before Record: nothing at all coming in; after 3 s the screen says so, the meter says
+    // Silent, and the scopes still scroll (a flat line, dark columns): nothing is saved.
+    const chunksBefore = lv.filter((c) => c[0] === "chunk").length;
+    feedAt(-120, 2);
+    assert.ok($("live-silent").hidden, "not before 3 s");
+    feedAt(-120, 1.5);
+    assert.ok(!$("live-silent").hidden);
+    assert.ok(html.includes("No sound coming in. Is the mic muted, or is the wrong input selected?"));
+    context.drawMeter();
+    assert.strictEqual($("live-level").textContent, "Silent");
+    const waveCols = ops.filter((o) => o[0] === "live-wave" && o[1] === "fill" && o[4] === 1).length;
+    const specCols = ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length;
+    assert.ok(waveCols > 100, `the waveform scrolls a flat line (${waveCols} columns)`);
+    assert.ok(specCols > 100, `the spectrogram scrolls dark columns (${specCols})`);
+    assert.strictEqual(lv.filter((c) => c[0] === "chunk").length, chunksBefore, "nothing is sent before Record");
+    await $("live-sound-settings").onclick();
+    sameJSON(lv.pop(), ["sound-settings"]);
+    // Almost nothing (-85 dB): still "no sound coming in", but the meter shows the level.
+    feedAt(-85, 0.2);
+    context.drawMeter();
+    assert.ok(/^-8\d dB$/.test($("live-level").textContent), $("live-level").textContent);
+    assert.ok(!$("live-silent").hidden);
+    // Sound (-20 dB): the warning goes at once.
+    feedAt(-20, 0.1);
+    assert.ok($("live-silent").hidden);
+    // Too loud: clipping says so, clearly.
+    assert.ok($("live-clip").hidden);
+    tapZ.port.onmessage({ data: { pcm: new Int16Array(4096).fill(32767).buffer, frames: 2048, peak: 1, sumsq: 4096 } });
+    context.drawMeter();
+    assert.ok(!$("live-clip").hidden && $("live").classList !== undefined);
+    // While recording a near-silent input the scopes keep scrolling, and the time left is shown.
+    chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Live x.wav", stopped: null, left_seconds: 9 * 3600 + 120 });
+    api.live_start = async (o) => { lv.push(["start", o]); return { ok: true, session: "s9", file: "Live x.wav", folder: "OpenEVP", left_seconds: 10 * 3600 }; };
+    await $("live-record").onclick();
+    assert.strictEqual($("live-left").textContent, "about 10 h left");
+    ops.length = 0;
+    feedAt(-85, 1);
+    await settle();
+    assert.strictEqual($("live-left").textContent, "about 9 h left");
+    assert.ok(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length >= 35, "the waveform scrolls while recording");
+    assert.ok(ops.filter((o) => o[0] === "live-spec" && o[1] === "put").length >= 35, "so does the spectrogram");
+    // When Stop gives up on the marks (one goes unanswered), what is still queued is called off, never
+    // sent after the finish, and the user is told which marks may not be saved.
+    const realMark2 = api.live_mark;
+    fakeTimers();
+    const from = lv.length;
+    api.live_mark = (sid, at) => new Promise(() => { lv.push(["slow-mark", at]); });   // never answered
+    const c1 = context.liveMark(), c2 = context.liveMark();  // the second queued behind the first
+    await settle();
+    stopAnswer = { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0, files: [] };
+    const stopC = $("live-record").onclick();
+    await settle();
+    assert.ok(!lv.slice(from).some((c) => c[0] === "stop"));
+    await advance(15000);                                    // the first one's time limit
+    await Promise.all([c1, c2, stopC]);
+    await settle();
+    realTimers();
+    assert.strictEqual(lv.slice(from).filter((c) => c[0] === "slow-mark").length, 1, "the second is never sent");
+    assert.ok(lv.slice(from).some((c) => c[0] === "stop"));
+    const said = $("banner-text").textContent;
+    assert.ok(/These marks may not have been saved: the mark at \d+:\d\d; the mark at \d+:\d\d\. Check them in the player\./
+      .test(said), said);
+    // Closing the window with five marks queued, each answered 14 s after it is sent. The page has the
+    // budget app/main.py gives it (49.5 s of its 52.5 s); everything fits in it: the marks that make it
+    // are saved, the rest is called off and listed for the next start, and the finish is asked for,
+    // all before the window's own finish would take over.
+    const slowMarks = (into) => (sid, at) => new Promise((resolve) => {
+      lv.push(["slow-mark", at]);
+      context.setTimeout(() => { into.push(at); resolve({ ok: true, mark: { at, start: Math.max(0, at - 3), end: at, cls: "C" } }); }, 14000);
+    });
+    api.live_mark = realMark2;
+    await context.openLive();                                // back to Live (Stop showed the library)
+    await settle();
+    assert.ok((await $("live-record").onclick()).ok);       // another recording
+    await settle();
+    fakeTimers();
+    context.liveNow = () => clock.now;
+    const from3 = lv.length, answered = [];
+    api.live_mark = slowMarks(answered);
+    const five = [0, 1, 2, 3, 4].map(() => context.liveMark());
+    await settle();
+    window.__liveDrained = false;
+    const t0 = clock.now;                                    // (the clock goes on from earlier tests)
+    const closing = context.liveDrainForClose(49500);
+    let stoppedAt = null;
+    while (!window.__liveDrained && clock.now - t0 < 60000) {
+      await advance(500);
+      if (stoppedAt === null && lv.slice(from3).some((c) => c[0] === "stop")) stoppedAt = clock.now - t0;
+    }
+    assert.ok(window.__liveDrained && clock.now - t0 <= 49500, `the page finished inside its budget (${clock.now - t0} ms)`);
+    await closing;
+    await Promise.all(five);
+    assert.ok(stoppedAt !== null && stoppedAt <= 49500, "the finish was asked for in time");
+    const reported = context.liveUnsavedNow();
+    assert.strictEqual(answered.length >= 2, true);
+    assert.strictEqual(lv.slice(from3).filter((c) => c[0] === "slow-mark").length, 3, "the called-off marks are never sent");
+    assert.strictEqual(reported.items.length, 3);
+    assert.ok(reported.items.every((x) => /^the mark at \d+:\d\d$/.test(x)), JSON.stringify(reported));
+    assert.strictEqual(reported.file, "Live x.wav");
+    // The window closes while a Stop the user pressed is already under way (five marks queued, 14 s
+    // each: on its own it would take over a minute). The close's budget reaches the Stop running
+    // (every wait reads the one deadline), so it all ends inside the budget, the rest reported.
+    realTimers();
+    context.liveNow = () => Date.now();
+    api.live_mark = realMark2;
+    await context.openLive();
+    await settle();
+    assert.ok((await $("live-record").onclick()).ok);
+    await settle();
+    fakeTimers();
+    context.liveNow = () => clock.now;
+    const from4 = lv.length, answered4 = [];
+    api.live_mark = slowMarks(answered4);
+    const five4 = [0, 1, 2, 3, 4].map(() => context.liveMark());
+    await settle();
+    const manual = $("live-record").onclick();               // the user's Stop
+    await settle();
+    await advance(5000);
+    window.__liveDrained = false;
+    const t1 = clock.now;
+    const closing4 = context.liveDrainForClose(49500);       // then the window closes
+    let stopped4 = null;
+    while (!window.__liveDrained && clock.now - t1 < 70000) {
+      await advance(500);
+      if (stopped4 === null && lv.slice(from4).some((c) => c[0] === "stop")) stopped4 = clock.now - t1;
+    }
+    assert.ok(window.__liveDrained && clock.now - t1 <= 49500, `the running Stop fitted the close (${clock.now - t1} ms)`);
+    assert.ok(stopped4 !== null && stopped4 <= 49500, "the finish was asked for in time");
+    await closing4;
+    await manual;
+    await Promise.all(five4);
+    assert.strictEqual(lv.slice(from4).filter((c) => c[0] === "slow-mark").length, 4, "the called-off mark is never sent");
+    assert.strictEqual(context.liveUnsavedNow().items.length, 2);
+    context.liveNow = () => Date.now();
+    realTimers();
+    api.live_mark = realMark2;
+    byId.delete("live-wave"); byId.delete("live-spec");
+    vm.runInContext("showLibrary()", context);
+    await settle();
+  }
+  // Astra: leaving Live while the input is still opening (Windows asking, a slow driver) calls the
+  // open off: the stream that arrives late is let go and no microphone graph is built.
+  {
+    const streamsOf = () => vm.runInContext("LV.stream", context);
+    const nodesBefore = worklets.length;
+    const late = [];
+    const realGUM = navigator.mediaDevices.getUserMedia;
+    navigator.mediaDevices.getUserMedia = async (c) => { const st = await realGUM(c); late.push(st); return st; };
+    mics.hold = [];
+    const opening = context.openLive();
+    await settle();
+    assert.strictEqual(mics.hold.length, 1, "the input is being opened");
+    vm.runInContext("showLibrary()", context);                             // leave Live before it answers
+    await settle();
+    mics.hold.shift()();
+    await opening;
+    await settle();
+    assert.strictEqual(late.length, 1);
+    assert.ok(late[0].track.stopped, "the late stream is released");
+    assert.strictEqual(streamsOf(), null);
+    assert.strictEqual(vm.runInContext("LV.ctx", context), null);
+    assert.strictEqual(worklets.length, nodesBefore, "no microphone graph");
+    // An open called off, then another: the first one's late stream never becomes the input.
+    const first = context.openLive();
+    await settle();
+    vm.runInContext("showLibrary()", context);
+    await settle();
+    const second = context.openLive();
+    await settle();
+    assert.strictEqual(mics.hold.length, 2);
+    mics.hold.shift()();                                   // the first answers late
+    await first;
+    await settle();
+    assert.ok(late[1].track.stopped);
+    assert.strictEqual(streamsOf(), null);
+    mics.hold.shift()();                                   // the second: this one is the input
+    await second;
+    await settle();
+    assert.strictEqual(streamsOf(), late[2]);
+    assert.ok(!late[2].track.stopped);
+    mics.hold = null;
+    navigator.mediaDevices.getUserMedia = realGUM;
+    vm.runInContext("showLibrary()", context);
+    await settle();
+    assert.ok(late[2].track.stopped, "closing the view lets the input go");
+  }
+  // ---- A bridge that stalls: the audio waiting for it is bounded, and Stop never waits forever ----
+  const liveTimers = [];
+  context.setTimeout = (fn, ms) => { liveTimers.push({ fn, ms }); return liveTimers.length; };
+  const fireLiveTimers = async () => { const now = liveTimers.splice(0); for (const t of now) t.fn(); await settle(); };
+  const fireLiveTimersAt = async (ms) => {                 // only the timers of this length; the others stay pending
+    const now = liveTimers.filter((t) => t.ms === ms);
+    for (const t of now) liveTimers.splice(liveTimers.indexOf(t), 1);
+    for (const t of now) t.fn();
+    await settle();
+  };
+  const stalled = [];                                     // chunk calls that never answer
+  const stallingChunks = async (sid, seq) => { stalled.push(seq); return new Promise(() => {}); };
+  // 1. The backend never answers a chunk: after 10 s of audio waiting, recording stops with a clear
+  //    message, nothing more is queued, and what the backend has is saved.
+  context.setLiveMode("live");
+  await context.openLive();
+  await settle();
+  api.live_chunk = stallingChunks;
+  let stops = 0;
+  api.live_stop = async () => { stops++; return { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                                  files: [{ id: "s1", name: "Live 2026-10-03 21-07-00.wav", seconds: 0.5, marks: 0 }] }; };
+  await $("live-record").onclick();
+  const tapS = worklets[worklets.length - 1];
+  const half = () => tapS.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  for (let i = 0; i < 19; i++) half();                    // 9.5 s: still recording, one call in flight, the rest queued
+  await settle();
+  assert.ok(vm.runInContext("liveRecording() && !LV.rec.closing", context));
+  assert.strictEqual(stalled.length, 1, "one call at a time");
+  half(); half();                                          // past 10 s waiting: stopped
+  await settle();
+  assert.ok(vm.runInContext("LV.rec.closing && LV.rec.abandoned && LV.rec.queue.length === 0", context),
+            "the queue is dropped, not kept growing");
+  const queuedAfter = vm.runInContext("LV.rec.queuedFrames", context);
+  for (let i = 0; i < 40; i++) half();                     // more audio arrives: never taken
+  assert.strictEqual(vm.runInContext("LV.rec.queuedFrames + LV.rec.pendingFrames", context), queuedAfter);
+  await fireLiveTimers();                                      // the stalled call's time runs out
+  await settle();
+  assert.strictEqual(stops, 1);
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, `${vm.runInContext("QUEUE_FULL", context)} Saved Live 2026-10-03 21-07-00.wav ` +
+                     "in OpenEVP, but the last 10.5 seconds may be missing (it could not be saved fast enough; OpenEVP stopped answering).");
+  assert.strictEqual($("banner").className, "", "a warning, never a green tick");
+  // 2. The backend stops answering: a call that takes too long ends the recording; Stop itself
+  //    is bounded too, and says the file is finished when OpenEVP closes or starts again.
+  await context.openLive();
+  await settle();
+  stalled.length = 0;
+  api.live_stop = async () => { stops++; return new Promise(() => {}); };
+  await $("live-record").onclick();
+  const tapT = worklets[worklets.length - 1];
+  tapT.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  assert.strictEqual(stalled.length, 1);
+  assert.ok(liveTimers.some((t) => t.ms === vm.runInContext("LIVE_CALL_MS", context)));
+  await fireLiveTimers();                                      // the chunk call times out
+  assert.ok(vm.runInContext("LV.rec && LV.rec.dead && LV.rec.closing", context));
+  await fireLiveTimers();                                      // and so does live_stop
+  await fireLiveTimers();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.ok($("banner-text").textContent.startsWith("The recording could not be saved: OpenEVP is not answering."),
+            $("banner-text").textContent);
+  // 3. Stop when the worklet never answers its flush: bounded too, and the rest still saved.
+  await context.openLive();
+  await settle();
+  const sentNow = [];
+  api.live_chunk = async (sid, seq, data) => { sentNow.push(seq); return { ok: true, seconds: 1, file: "x", saved: 0, stopped: null }; };
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "u1", name: "Live 2026-10-03 21-08-00.wav", seconds: 0.1, marks: 0 }] });
+  await $("live-record").onclick();
+  const tapU = worklets[worklets.length - 1];
+  tapU.port.manual = true;
+  tapU.port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  const stopping = $("live-record").onclick();
+  await settle();
+  assert.ok(tapU.port.posted.some((m) => m.flush !== undefined), "the worklet was asked for its last samples");
+  assert.ok(vm.runInContext("liveRecording()", context), "waiting for the worklet");
+  await fireLiveTimers();                                      // no answer: Stop goes on without it
+  await stopping;
+  await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.deepStrictEqual(sentNow, [0], "what was held was still sent");
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-08-00.wav in OpenEVP, but the last moment " +
+                     "(under a tenth of a second) may be missing (the capture did not hand over its last samples).");
+  // 4. A chunk call times out while a manual Stop drains: the saved file may lack its end, and
+  //    the message says so (never "✓ Saved").
+  await context.openLive();
+  await settle();
+  stalled.length = 0;
+  api.live_chunk = stallingChunks;
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "v1", name: "Live 2026-10-03 21-09-00.wav", seconds: 0.5, marks: 0 }] });
+  await $("live-record").onclick();
+  const tapV = worklets[worklets.length - 1];
+  for (let i = 0; i < 4; i++) tapV.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  const stoppingV = $("live-record").onclick();
+  await settle();
+  // Only the call in flight times out (15 s); the drain's own 30 s limit is not reached. 2 s were
+  // never saved (the chunk in flight and three queued): the warning says 2 s, not 0.5 s.
+  await fireLiveTimersAt(vm.runInContext("LIVE_CALL_MS", context));
+  await stoppingV;
+  await settle();
+  assert.ok(liveTimers.some((t) => t.ms === vm.runInContext("LIVE_DRAIN_MS", context)), "the drain limit never fired");
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-09-00.wav in OpenEVP, but the last 2 seconds " +
+                     "may be missing (OpenEVP stopped answering).");
+  liveTimers.length = 0;
+  // 5. Stop pressed twice, and the window closing during "Saving…": one Stop, and closing waits for it.
+  await context.openLive();
+  await settle();
+  let stopCalls = 0;
+  api.live_chunk = async () => ({ ok: true, seconds: 1, file: "x", saved: 0, stopped: null });
+  api.live_stop = async () => { stopCalls++; return { ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                                      files: [{ id: "w1", name: "Live 2026-10-03 21-10-00.wav", seconds: 0.1, marks: 0 }] }; };
+  await $("live-record").onclick();
+  const tapW = worklets[worklets.length - 1];
+  tapW.port.manual = true;
+  tapW.port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+  const stopA = context.stopRecording();
+  const stopB = context.stopRecording();
+  const closing = context.liveDrainForClose();
+  await settle();
+  assert.strictEqual(stopA, stopB, "the same Stop");
+  assert.strictEqual(window.__liveDrained, false, "closing waits while Stop is still saving");
+  const flushId = tapW.port.posted.filter((m) => m.flush !== undefined).pop().flush;
+  tapW.port.onmessage({ data: { pcm: new Int16Array(200).fill(5).buffer, frames: 100, peak: 0, sumsq: 0 } });   // its tail
+  tapW.port.onmessage({ data: { flushed: flushId } });
+  await closing;
+  await settle();
+  assert.strictEqual(window.__liveDrained, true);
+  assert.strictEqual(stopCalls, 1);
+  assert.strictEqual(tapW.port.posted.filter((m) => m.flush !== undefined).length, 1, "one flush");
+  // 6. Astra's drain case: three half-second chunks, the first two answered late, the third never.
+  //    Stop's 30 s drain limit runs out with the third in flight: the warning says 0.5 s (never "✓").
+  await context.openLive();
+  await settle();
+  const answers = [];
+  api.live_chunk = (sid, seq) => new Promise((resolve) => { answers.push(resolve); });
+  api.live_stop = async () => ({ ok: true, mode: "live", folder: "OpenEVP", problems: [], dropped_marks: 0,
+                                 files: [{ id: "x1", name: "Live 2026-10-03 21-11-00.wav", seconds: 1, marks: 0 }] });
+  await $("live-record").onclick();
+  const tapX = worklets[worklets.length - 1];
+  for (let i = 0; i < 3; i++) tapX.port.onmessage({ data: { pcm: new Int16Array(24000 * 2).buffer, frames: 24000, peak: 0, sumsq: 0 } });
+  await settle();
+  const stoppingX = $("live-record").onclick();
+  await settle();
+  answers[0]({ ok: true, seconds: 0.5, file: "x", stopped: null }); await settle();
+  answers[1]({ ok: true, seconds: 1, file: "x", stopped: null }); await settle();
+  assert.strictEqual(answers.length, 3, "the third is in flight");
+  await fireLiveTimersAt(vm.runInContext("LIVE_DRAIN_MS", context));
+  await stoppingX;
+  await settle();
+  assert.ok(!vm.runInContext("liveRecording()", context));
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-11-00.wav in OpenEVP, but the last 0.5 seconds " +
+                     "may be missing (saving the last of it took too long).");
+  await fireLiveTimersAt(vm.runInContext("LIVE_CALL_MS", context));   // the third's own timeout later: not counted twice
+  assert.strictEqual($("banner-text").textContent, "Saved Live 2026-10-03 21-11-00.wav in OpenEVP, but the last 0.5 seconds " +
+                     "may be missing (saving the last of it took too long).");
+  liveTimers.length = 0;
+  context.setTimeout = () => 0;
+  vm.runInContext("showLibrary()", context);
+  await settle();
+  assert.strictEqual(vm.runInContext("S.view", context), "library");
+  finished = true;
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

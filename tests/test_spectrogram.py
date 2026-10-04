@@ -127,7 +127,12 @@ class ServerTests(unittest.TestCase):
         with urllib.request.urlopen(f"{base}/0/0.png", timeout=5) as resp:
             self.assertEqual((resp.status, resp.headers["Content-Type"]), (200, "image/png"))
             self.assertEqual(resp.read(), sp.tile(0, 0))
-        for bad in (f"{base}/0/99.png", f"{base}/12345/0.png", base.replace("/spec/", "/spec/0") + "/0/0.png",
+        # The colour map is part of the URL (so a night tile is never a cached day one): inferno and night.
+        for cmap in ("inferno", "night"):
+            with urllib.request.urlopen(f"{base}/{cmap}/0/0.png", timeout=5) as resp:
+                self.assertEqual(resp.read(), sp.tile(0, 0, cmap))
+        self.assertNotEqual(sp.tile(0, 0, "night"), sp.tile(0, 0))
+        for bad in (f"{base}/rainbow/0/0.png", f"{base}/0/99.png", f"{base}/12345/0.png", base.replace("/spec/", "/spec/0") + "/0/0.png",
                     base.replace(base.split("/")[3], "nottoken") + "/0/0.png"):
             with self.assertRaises(urllib.error.HTTPError) as cm:
                 urllib.request.urlopen(bad, timeout=5)
@@ -282,6 +287,33 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(other.spectrogram_shown())                  # the first window's "off"
         self.assertEqual(other.set_spectrogram(True)["remembered"], False)
         self.assertTrue(other.spectrogram_shown())
+
+
+
+class NightPaletteTests(unittest.TestCase):
+    """The night screen's colour map: red on black, never bright; tiles drawn in it on request."""
+
+    def test_red_on_black(self):
+        from openevp import spectrogram as sp
+        night = sp.PALETTES["night"]
+        self.assertEqual(len(night), 768)
+        rgb = [tuple(night[i * 3:i * 3 + 3]) for i in range(256)]
+        self.assertEqual(rgb[0], (0, 0, 0))
+        self.assertEqual(rgb[-1], (230, 82, 8))                   # the loudest: a dim orange red
+        self.assertTrue(all(r >= g >= b for r, g, b in rgb), "red throughout")
+        self.assertTrue(all(rgb[i][0] <= rgb[i + 1][0] for i in range(255)), "louder is brighter")
+        self.assertEqual(sp.PALETTES["inferno"], sp.palette())
+
+    def test_a_tile_in_each_map(self):
+        import numpy as np
+        from openevp import spectrogram as sp
+        cols = (np.arange(64 * 8) % 256).astype(np.uint8).reshape(64, 8)
+        spec = sp.Spectrogram(cols, 8000, 16, 8, 4000)
+        day, night = spec.tile(0, 0), spec.tile(0, 0, "night")
+        self.assertTrue(day.startswith(b"\x89PNG") and night.startswith(b"\x89PNG"))
+        self.assertNotEqual(day, night)
+        self.assertIn(sp.PALETTES["night"], night)
+        self.assertIsNone(spec.tile(0, 0, "rainbow"))
 
 
 if __name__ == "__main__":

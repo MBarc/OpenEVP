@@ -346,6 +346,80 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(store.marks("fp1"), [])
             store.close()
 
+    def test_close_is_bounded_when_a_write_is_stuck_and_keeps_the_folder_locked(self):
+        # A write holding the store's lock (stuck on the disk): close() stops waiting after
+        # CLOSE_LOCK_WAIT, says so in the log, refuses later calls, and keeps the folder lock: that
+        # writer may still replace a file, so no other instance may write until this process ends.
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.add_mark("fp1", 1.0, 2.0, "A", "voice")
+            held, never = threading.Event(), threading.Event()
+
+            def stuck():
+                store._lock.acquire()
+                held.set()
+                never.wait()
+                store._lock.release()
+            threading.Thread(target=stuck, daemon=True).start()
+            held.wait()
+            t0 = time.monotonic()
+            with mock.patch.object(store_module, "CLOSE_LOCK_WAIT", 0.2), \
+                    self.assertLogs("openevp.store", level="WARNING") as logged:
+                store.close()
+            self.assertLess(time.monotonic() - t0, 2)
+            self.assertIn("closing without waiting", logged.output[0])
+            second = AppData(d)
+            self.assertTrue(second.read_only, "never a second writer while the first may still replace files")
+            second.close()
+            never.set()                                          # the stuck write ends
+            with self.assertRaises(StoreUnavailable):
+                store.add_mark("fp1", 3.0, 4.0, "B", "")
+            store_module._release_lock(store._lock_file)         # what the process ending does
+            again = AppData(d)
+            self.assertFalse(again.read_only)
+            self.assertEqual(len(again.marks("fp1")), 1)         # nothing broken
+            again.close()
+
+    def test_shutdown_skips_the_fingerprint_cache_and_the_next_start_rebuilds_it(self):
+        # close(flush_index=False), as shutdown does: no cache write without a deadline. The cache on
+        # disk stays as it was (valid), and what it lacks is simply looked up again next time.
+        with tempfile.TemporaryDirectory() as d:
+            store = AppData(d)
+            store.remember_fp("C:/lib/a.wav", 10, 1, "fpa", 1.0)
+            store.flush_index()
+            store.remember_fp("C:/lib/b.wav", 20, 2, "fpb", 2.0)
+            with mock.patch.object(store_module, "_write_json", side_effect=AssertionError("no write at shutdown")):
+                store.close(flush_index=False)
+            again = AppData(d)
+            self.assertEqual(again.problems(), [])
+            self.assertEqual(again.cached_fp("C:/lib/a.wav", 10, 1)["fp"], "fpa")
+            self.assertIsNone(again.cached_fp("C:/lib/b.wav", 20, 2), "not cached: read again")
+            again.remember_fp("C:/lib/b.wav", 20, 2, "fpb", 2.0)
+            again.close()
+            third = AppData(d)
+            self.assertEqual(third.cached_fp("C:/lib/b.wav", 20, 2)["fp"], "fpb")
+            third.close()
+
+    def test_questions_a_test_build_left_in_marks_json_are_dropped_like_any_unknown_field(self):
+        # A test build of Live mode kept questions in marks.json; that feature is gone. They are
+        # read past like any unknown field, and the next write leaves them out. Marks are kept.
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "marks.json"), "w", encoding="utf-8") as f:
+                json.dump({"version": 1, "recordings": {"fp1": {
+                    "marks": [{"id": "m1", "start": 1.0, "end": 2.0, "cls": "A", "note": "voice", "created": ""}],
+                    "reviewed": False, "name": "Live x.wav", "duration": 10.0, "imported": False,
+                    "backup": {"status": None, "detail": "", "paths": []},
+                    "questions": [{"id": "q1", "at": 0.5, "text": "Is anyone here?", "created": ""}]}}}, f)
+            store = AppData(d)
+            self.assertEqual(store.problems(), [])
+            self.assertEqual([m["note"] for m in store.marks("fp1")], ["voice"])
+            self.assertNotIn("questions", store.recording("fp1"))
+            store.add_mark("fp1", 3.0, 4.0, "B", "")
+            store.close()
+            with open(os.path.join(d, "marks.json"), encoding="utf-8") as f:
+                self.assertNotIn("questions", json.load(f)["recordings"]["fp1"])
+            self.assertFalse(os.path.exists(os.path.join(d, "questions.json")))
+
     def test_second_appdata_same_folder_is_read_only(self):
         with tempfile.TemporaryDirectory() as d:
             first = AppData(d)

@@ -5,6 +5,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 
 import webview
@@ -12,9 +13,9 @@ import webview
 from openevp import __version__
 from openevp.paths import default_output
 
-from . import folders, native_share, sharing, updater
+from . import events, folders, mic_permission, native_share, sharing, updater
 from .audio_server import CACHE_PREFIX, AudioServer, clean_stale_caches, hold_cache
-from .backend import Api, recording_wav
+from .backend import Api, night_setting, recording_wav
 from .devices import DeviceManager
 from .driver_setup import set_up_driver
 from .store import AppData
@@ -125,10 +126,14 @@ def _open_store():
         return None, [f"EVP marks are off: OpenEVP could not open its data ({type(e).__name__}: {e})."]
 
 
-def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False):
+def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False,
+                    recording=False):
     """(title, text) for the close prompt while work is still running, or None."""
     backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
               "a backup that did not finish is shown as failed and can be retried later.")
+    if recording:
+        text = "A recording is running. Closing stops it and saves what was recorded. Close?"
+        return "Recording in progress", f"{backup} {text}" if backing_up else text
     if changing_files:
         text = ("Files in the library are still being renamed, moved or deleted. "
                 "OpenEVP closes once that is finished. Close?")
@@ -146,6 +151,116 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
     if backing_up:
         return "Backup in progress", f"{backup} Close?"
     return None
+
+
+NIGHT_BG = "#0A0505"                # the night screen's background (style.css html.night --bg)
+
+
+def _start_page(night):
+    """The page and the window's background: with the night screen on, both dark from the first
+    paint (index.html reads ?night=1 before its styles load), so the window never flashes white."""
+    return ("app/ui/index.html" + ("?night=1" if night else ""), NIGHT_BG if night else "#FFFFFF")
+
+CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
+CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
+CLOSE_PAGE_MARGIN = 3.0            # seconds of the page's share it is not told about: polling and the report after
+CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved, and again to write it
+CLOSE_LAST_WAIT = 5.0              # seconds the window's own last steps (before_close, destroy) are waited for
+_DRAIN_START_JS = "liveDrainForClose({ms}); true"
+_DRAIN_DONE_JS = "window.__liveDrained === true"
+_UNSAVED_JS = "JSON.stringify(liveUnsavedNow())"
+
+
+def _drain_start_js(page_seconds):
+    """The page's whole Stop (flush, chunks, marks, the backend's finish) fits in this budget."""
+    return _DRAIN_START_JS.format(ms=int(max(0.0, page_seconds - CLOSE_PAGE_MARGIN) * 1000))
+
+
+def _bounded(fn, seconds, name):
+    """Run fn on a thread of its own and wait for it at most `seconds`: True if it returned."""
+    done = threading.Event()
+
+    def run():
+        try:
+            fn()
+        except Exception:
+            pass
+        finally:
+            done.set()
+    threading.Thread(target=run, name=name, daemon=True).start()
+    return done.wait(max(0.0, seconds))
+
+
+def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
+                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None):
+    """Closing during a recording, on a worker thread: the page stops and saves it
+    as Stop does (the worklet's last samples, every queued chunk, then the backend
+    finishes the file: live.js liveDrainForClose). The whole close takes at most
+    timeout seconds, whatever hangs:
+    - the page is asked on a thread of its own (pywebview's evaluate_js waits for
+      the page without a time limit) and gets all but the last finalize_share of
+      the time; it is told its budget (less CLOSE_PAGE_MARGIN) and fits every one
+      of its waits into it;
+    - then the page's list of marks that may not have been
+      saved (liveUnsavedNow: called off, unanswered, or still waiting) is read,
+      briefly, and given to report() (Api.log_unsaved: a plain append to a log
+      file, flushed to the disk; never the store, whose lock a stalled write may
+      hold), which keeps it for the next start: a closing window cannot show it,
+      and it must never be lost without a word. report() runs on a thread of its
+      own, waited for at most CLOSE_REPORT_WAIT seconds;
+    - if it did not finish, finalize() (the backend finishing the file with what
+      has arrived) runs on a thread of its own too, until the deadline: it may wait
+      on the recording's lock or on the disk;
+    then before_close() and the window closes, finished or not (both on threads of
+    their own, waited for at most CLOSE_LAST_WAIT seconds: nothing here waits without
+    a limit). A file left unfinished is a .part that the next start recovers."""
+    start = time.monotonic()
+    drained = threading.Event()
+    page_seconds = timeout * (1 - finalize_share)
+    page_deadline = clock() + page_seconds
+    unsaved = []
+
+    def ask_page():
+        try:
+            window.evaluate_js(_drain_start_js(page_seconds))
+            while clock() < page_deadline:
+                if window.evaluate_js(_DRAIN_DONE_JS):
+                    drained.set()
+                    return
+                sleep(poll)
+        except Exception:
+            pass                                  # the page is gone
+
+    def read_unsaved():
+        try:
+            got = json.loads(window.evaluate_js(_UNSAVED_JS) or "null")
+            if got:
+                unsaved.append(got)
+        except Exception:
+            pass                                  # the page is gone, or hung
+
+    def run_finalize():
+        try:
+            finalize()
+        except Exception:
+            pass
+    try:
+        asker = threading.Thread(target=ask_page, name="close-drain-page", daemon=True)
+        asker.start()
+        asker.join(page_seconds)
+        if report is not None:
+            left = lambda: timeout - (time.monotonic() - start)     # noqa: E731
+            _bounded(read_unsaved, min(CLOSE_REPORT_WAIT, left()), "close-drain-unsaved")
+            if unsaved:
+                got = unsaved[0]
+                _bounded(lambda: report(got), min(CLOSE_REPORT_WAIT, left()), "close-drain-report")
+        if not drained.is_set() and finalize is not None:
+            finisher = threading.Thread(target=run_finalize, name="close-finalize", daemon=True)
+            finisher.start()
+            finisher.join(max(0.0, timeout - (time.monotonic() - start)))
+    finally:
+        _bounded(before_close, CLOSE_LAST_WAIT, "close-before")
+        _bounded(window.destroy, CLOSE_LAST_WAIT, "close-destroy")
 
 
 def _own_taskbar_identity():
@@ -194,11 +309,13 @@ _SMOKE_STATE_JS = """JSON.stringify({
   title: document.title,
   app_js: typeof window.onBackendEvent === "function",
   notes_js: typeof renderNotes === "function",
+  live_js: typeof liveSmoke === "function",
   wavesurfer: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.create === "function",
   regions: typeof WaveSurfer !== "undefined" && typeof WaveSurfer.Regions !== "undefined",
   style_css: Array.from(document.styleSheets).some(s => (s.href || "").endsWith("/style.css") && s.cssRules.length > 0),
   bridge: !!(window.pywebview && window.pywebview.api && window.pywebview.api.capabilities),
   version_shown: (document.getElementById("version") || {}).textContent || "",
+  started: window.__openevpStarted === true,
   smoke: window.__openevpSmoke === undefined ? null : window.__openevpSmoke
 })"""
 
@@ -225,7 +342,57 @@ def ui_files(ui_dir):
     return found
 
 
-def _smoke_check(window, report):
+# Live mode in the smoke test: Chromium's fake audio input (a beep) stands in for a
+# microphone, so no real input is ever opened; the app's own microphone permission
+# handler (app/mic_permission.py) must answer, or getUserMedia would wait for a prompt
+# nobody sees and the check times out.
+SMOKE_BROWSER_ARGS = "--use-fake-device-for-media-stream --autoplay-policy=no-user-gesture-required"
+SMOKE_LIVE_SECONDS = 1.5
+_SMOKE_LIVE_JS = """
+window.__openevpLive = null;
+liveSmoke(%s).then(r => { window.__openevpLive = JSON.stringify(r); },
+                   e => { window.__openevpLive = JSON.stringify({ok: false, error: String(e)}); });
+"true";
+"""
+
+
+def _smoke_live(window, report, home):
+    """Record a moment from the fake input through the Live view's own code (permission,
+    getUserMedia, the AudioWorklet, the bridge, the WAV writer, a mark), and check the
+    WAV it saved into the library folder."""
+    import wave
+    problems = report["problems"]
+    window.evaluate_js(_SMOKE_LIVE_JS % SMOKE_LIVE_SECONDS)
+    deadline = time.monotonic() + SMOKE_TIMEOUT
+    raw = None
+    while time.monotonic() < deadline:
+        raw = window.evaluate_js("window.__openevpLive")
+        if raw:
+            break
+        time.sleep(0.2)
+    if not raw:
+        problems.append(f"Live recording did not finish within {SMOKE_TIMEOUT} s (no microphone permission?)")
+        return
+    live = report["live"] = json.loads(raw)
+    if not live.get("ok") or not live.get("files"):
+        problems.append(f"Live recording failed: {live.get('error') or 'nothing was saved'}")
+        return
+    if not live.get("mark") or live["files"][0].get("marks") != 1:
+        problems.append("Live recording: the mark made while recording was not stored")
+    path = os.path.join(home, "save", live["files"][0]["name"])
+    try:
+        with wave.open(path) as w:
+            live["wav"] = {"rate": w.getframerate(), "channels": w.getnchannels(), "frames": w.getnframes(),
+                           "width": w.getsampwidth()}
+    except Exception as e:
+        problems.append(f"Live recording: the saved WAV could not be read ({type(e).__name__}: {e})")
+        return
+    got = live["wav"]
+    if got["width"] != 2 or got["rate"] != live.get("rate") or got["channels"] != live.get("channels")             or got["frames"] < 0.5 * SMOKE_LIVE_SECONDS * got["rate"]:
+        problems.append(f"Live recording: the saved WAV is wrong: {got}")
+
+
+def _smoke_check(window, report, home=None):
     """On pywebview's worker thread once the GUI loop runs: check the page, then
     close the window (which ends webview.start())."""
     problems = report["problems"]
@@ -244,17 +411,20 @@ def _smoke_check(window, report):
             if state["bridge"] and not started:
                 window.evaluate_js(_SMOKE_START_JS % json.dumps(files))
                 started = True
-            elif started and state["smoke"] and state["version_shown"] == want_version:
+            elif started and state["smoke"] and state["version_shown"] == want_version and state["started"]:
                 break
             time.sleep(0.2)
         report["page"] = {k: v for k, v in state.items() if k != "smoke"}
         if state.get("title") != "OpenEVP":
             problems.append(f"index.html did not load (title {state.get('title')!r})")
-        for key, what in (("app_js", "app.js"), ("notes_js", "notes.js"), ("wavesurfer", "vendor/wavesurfer.min.js"),
+        for key, what in (("app_js", "app.js"), ("notes_js", "notes.js"), ("live_js", "live.js"),
+                          ("wavesurfer", "vendor/wavesurfer.min.js"),
                           ("regions", "vendor/regions.min.js"), ("style_css", "style.css"),
                           ("bridge", "the JS bridge (window.pywebview.api)")):
             if not state.get(key):
                 problems.append(f"{what} did not load in the page")
+        if not state.get("started"):
+            problems.append("the page did not finish starting (an error stopped its startup)")
         if state.get("version_shown") != want_version:
             problems.append(f"app.js did not start up through the bridge (version shown "
                             f"{state.get('version_shown')!r}, not {want_version!r})")
@@ -271,6 +441,8 @@ def _smoke_check(window, report):
         for name, ok, status in smoke["files"]:
             if not ok:
                 problems.append(f"the page could not fetch {name} ({status})")
+        if home is not None and not problems:
+            _smoke_live(window, report, home)
     except Exception as e:
         problems.append(f"the smoke check failed: {type(e).__name__}: {e}")
     finally:
@@ -357,6 +529,8 @@ def _smoke_mp3(report):
 def _smoke_main(report_path):
     report = {"ok": False, "version": __version__, "problems": []}
     home = tempfile.mkdtemp(prefix="openevp-smoke-")
+    before = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = SMOKE_BROWSER_ARGS   # the fake audio input
     try:
         _smoke_decoders(report)
         _smoke_mp3(report)
@@ -364,6 +538,10 @@ def _smoke_main(report_path):
     except Exception as e:
         report["problems"].append(f"the app did not start: {type(e).__name__}: {e}")
     finally:
+        if before is None:
+            os.environ.pop("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", None)
+        else:
+            os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = before
         shutil.rmtree(home, ignore_errors=True)
     report["ok"] = not report["problems"]
     if report_path:
@@ -385,6 +563,7 @@ def _run_app(smoke=None):
     server = None
     api = None
     store = None
+    dispatcher = None
     try:
         # A playback decode stops early (formats.Cancelled) once the app is closing.
         server = AudioServer(lambda key: recording_wav(
@@ -394,12 +573,13 @@ def _run_app(smoke=None):
         server.start()
         window = None
 
-        def emit(event, payload):
+        def send(event, payload):                         # on the dispatcher's thread only (app/events.py)
             if window is not None:
-                try:
-                    window.evaluate_js(f"window.onBackendEvent({json.dumps(event)}, {json.dumps(payload)})")
-                except Exception:
-                    pass                                  # the window is already gone during shutdown
+                window.evaluate_js(f"window.onBackendEvent({json.dumps(event)}, {json.dumps(payload)})")
+
+        # Workers post events and never wait for the page: evaluate_js has no time limit.
+        dispatcher = events.Dispatcher(send)
+        emit = dispatcher.emit
 
         def pick_wav(start_dir):
             dialog = webview.FileDialog.OPEN if hasattr(webview, "FileDialog") else webview.OPEN_DIALOG
@@ -413,6 +593,7 @@ def _run_app(smoke=None):
             return result[0] if result else None
 
         closing_for_update = False
+        closing_after_recording = False
 
         def quit_for_update():
             nonlocal closing_for_update
@@ -442,11 +623,19 @@ def _run_app(smoke=None):
         api.watch_store()                               # read-only: keep trying for the store's lock
         # A relative URL is served by pywebview's built-in HTTP server, relative to the
         # entry script (or the PyInstaller bundle), so the UI files ship as data.
-        window = webview.create_window("OpenEVP", "app/ui/index.html", js_api=api,
-                                       width=1100, height=720, min_size=(800, 500), hidden=bool(smoke))
+        # The night screen is known before the window opens: the window's own background and the
+        # page's first paint (index.html reads ?night=1 before its styles) are dark from the start.
+        page, background = _start_page(night_setting(store))
+        window = webview.create_window("OpenEVP", page, js_api=api, width=1100, height=720, min_size=(800, 500),
+                                       hidden=bool(smoke), background_color=background)
+
+        def close_now():
+            nonlocal closing_after_recording
+            closing_after_recording = True
+            api.request_stop()
 
         def on_closing():
-            if closing_for_update:
+            if closing_for_update or closing_after_recording:
                 return True
             if api.updating():
                 proceed = window.create_confirmation_dialog(
@@ -455,9 +644,16 @@ def _run_app(smoke=None):
                     api.request_stop()
                 return proceed
             question = _close_question(api.exporting(), api.backing_up(), api.saving_marked(),
-                                       api.clips_running(), api.changing_files())
+                                       api.clips_running(), api.changing_files(), api.recording())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
+                if proceed and api.recording():
+                    # Not yet: the page first saves what it still holds (bounded), then the
+                    # window closes (close_now lets that close through).
+                    threading.Thread(target=_close_after_drain, args=(window, close_now, api.finish_recording),
+                                     kwargs={"report": api.log_unsaved},
+                                     name="close-drain", daemon=True).start()
+                    return False
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the
                     # api.shutdown() after it) may not return for a while yet.
@@ -466,11 +662,15 @@ def _run_app(smoke=None):
             return True
 
         window.events.closing += on_closing
+        # Live mode: the app's own page may use the microphone without a prompt (app/mic_permission.py).
+        mic_permission.install_early(
+            window, on_problem=(lambda e: smoke[0]["problems"].append(
+                f"the microphone permission handler could not be added: {type(e).__name__}: {e}")) if smoke else None)
         try:
             # Require WebView2: pywebview would otherwise fall back to the old MSHTML
             # engine, which cannot run this UI.
             if smoke:
-                webview.start(_smoke_check, (window, smoke[0]), gui="edgechromium", http_server=True,
+                webview.start(_smoke_check, (window, smoke[0], smoke[1]), gui="edgechromium", http_server=True,
                               icon=_icon())
             else:
                 webview.start(gui="edgechromium", http_server=True, icon=_icon())
@@ -482,6 +682,8 @@ def _run_app(smoke=None):
     finally:
         if api is not None:
             api.shutdown()                              # joins the workers, then closes the store
+        if dispatcher is not None:
+            dispatcher.close()                          # bounded: a hung page never holds the exit
         elif store is not None:
             store.close()
         if server is not None:
