@@ -2760,6 +2760,60 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await context.liveRecover();
   assert.strictEqual($("banner-text").textContent,
                      "A recording was cut off last time; OpenEVP saved what it had: Live 2026-10-02 22-00-00.wav (in Old Mill).");
+  // ---- Resizing the window clears a canvas: the live waveform and spectrogram are drawn again
+  // from what they drew before, never left blank ----
+  {
+    const ops = [];
+    const fakeCanvas = (id, w, h) => {
+      const c = { id, tagName: "CANVAS", clientWidth: w, clientHeight: h, width: 0, height: 0, style: {} };
+      const g = { fillStyle: "", globalCompositeOperation: "source-over",
+                  clearRect: (...a) => ops.push([id, "clear", ...a]), fillRect: (x) => ops.push([id, "fill", x]),
+                  drawImage: () => ops.push([id, "shift"]),
+                  createImageData: (iw, ih) => ({ width: iw, height: ih, data: new Uint8ClampedArray(iw * ih * 4) }),
+                  putImageData: (img, x) => ops.push([id, "put", x, img.width, img.data.some((v, i) => i % 4 !== 3 && v > 0)]) };
+      c.getContext = () => g;
+      return c;
+    };
+    const wave = fakeCanvas("live-wave", 400, 100), spec = fakeCanvas("live-spec", 400, 120);
+    byId.set("live-wave", wave); byId.set("live-spec", spec);
+    await context.openLive();
+    await settle();
+    const tapR = worklets[worklets.length - 1];
+    const ctxR = tapR.ctx;
+    ctxR.nodes.find((n) => n.kind === "analyser").getByteFrequencyData = (arr) => arr.fill(180);
+    // Two seconds of audio: 80 waveform columns; frames drawn over two seconds: spectrogram columns.
+    for (let i = 0; i < 47; i++) {
+      const pcm = new Int16Array(2048 * 2).fill(i % 2 ? 12000 : -12000);
+      tapR.port.onmessage({ data: { pcm: pcm.buffer, frames: 2048, peak: 0.37, sumsq: 0 } });
+    }
+    for (let t = 1000; t <= 3000; t += 50) context.liveFrame(t);
+    const history = vm.runInContext("[LV.hist.waveN, LV.hist.specN]", context);
+    assert.ok(history[0] >= 80 && history[1] >= 60, String(history));
+    // The window is made narrower: the canvases get their new size and are drawn whole again.
+    ops.length = 0;
+    wave.clientWidth = 250; spec.clientWidth = 250;
+    context.liveFrame(3050);
+    assert.strictEqual(wave.width, 250);
+    const waveFills = ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length;
+    assert.ok(ops.some((o) => o[0] === "live-wave" && o[1] === "clear"));
+    assert.strictEqual(waveFills, Math.min(history[0], 250), "every column it had drawn, drawn again");
+    const specPut = ops.find((o) => o[0] === "live-spec" && o[1] === "put" && o[3] > 1);
+    assert.ok(specPut, "the spectrogram is drawn again in one piece");
+    assert.strictEqual(specPut[2] + specPut[3], 250, "at the right edge");
+    assert.ok(specPut[4], "with its colours, not blank");
+    // A pixel-ratio change (a window dragged to another screen), seen by the debounced redraw too.
+    ops.length = 0;
+    window.devicePixelRatio = 2;
+    context.liveRedraw();
+    assert.strictEqual(wave.width, 500);
+    assert.strictEqual(ops.filter((o) => o[0] === "live-wave" && o[1] === "fill").length, Math.min(history[0], 500));
+    const specNow = vm.runInContext("LV.hist.specN", context);
+    assert.ok(ops.some((o) => o[0] === "live-spec" && o[1] === "put" && o[3] === Math.min(specNow, 500) && o[4]));
+    window.devicePixelRatio = 1;
+    byId.delete("live-wave"); byId.delete("live-spec");
+    $("live-close").onclick();
+    await settle();
+  }
   // ---- A bridge that stalls: the audio waiting for it is bounded, and Stop never waits forever ----
   const liveTimers = [];
   context.setTimeout = (fn, ms) => { liveTimers.push({ fn, ms }); return liveTimers.length; };

@@ -20,6 +20,7 @@ const LV = {
   wave: { cols: [], min: 32768, max: -32769, n: 0, perCol: 0 },
   spec: { bins: null, last: 0, lut: null, img: null },
   raf: 0, lastStatus: 0, drawn: 0, color: "",
+  hist: null, redrawTimer: 0, sizeWatch: null, ratioWatch: null,   // drawn columns kept for redrawing (historyReset)
   cuts: null,                            // an import's cuts: {job, fp, cuts, suggested, looking, splitJob}
   cutRegions: [],                        // the cuts drawn on the waveform
   jobs: new Map(), jobEvents: new Map(), // import jobs the page knows (job -> handler); events of jobs it does not yet
@@ -248,6 +249,7 @@ async function startGraph(stream) {
     Object.assign(LV, { stream, ctx, src, node, analyser, rate: ctx.sampleRate, channels,
                         deviceId: st.deviceId || "", label: track.label || "" });
     LV.wave.perCol = Math.max(1, Math.round(ctx.sampleRate / LIVE_COLS_PER_SEC));
+    historyReset();                                     // another input: its own history
     LV.spec.bins = new Uint8Array(analyser.frequencyBinCount);
     track.onended = inputEnded;
     if (ctx.resume) await ctx.resume();
@@ -813,16 +815,111 @@ function shiftLeft(g, c, n) {
   g.globalCompositeOperation = "source-over";
 }
 
+// ---- what was drawn, kept to draw it again: a canvas is cleared whenever it is resized (the window
+// resized, or moved to a screen with another pixel ratio). The last LIVE_HISTORY_COLS columns of
+// each (more than the widest canvas) live in ring buffers: the waveform's low/high, and the
+// spectrogram's frequency bins up to its top. A resize redraws the whole canvas from them.
+const LIVE_HISTORY_COLS = 8192;
+function historyReset() {
+  LV.hist = { wave: new Float32Array(LIVE_HISTORY_COLS * 2), waveN: 0, spec: null, specN: 0, specBins: 0 };
+}
+
+function pushWave(lo, hi) {
+  const h = LV.hist, i = (h.waveN++ % LIVE_HISTORY_COLS) * 2;
+  h.wave[i] = lo; h.wave[i + 1] = hi;
+}
+
+function pushSpec(bins, kept, times) {
+  const h = LV.hist;
+  if (!h.spec || h.specBins !== kept) { h.spec = new Uint8Array(LIVE_HISTORY_COLS * kept); h.specBins = kept; h.specN = 0; }
+  for (let t = 0; t < times; t++) h.spec.set(bins.subarray(0, kept), (h.specN++ % LIVE_HISTORY_COLS) * kept);
+}
+
+function waveColor() {
+  if (!LV.color) LV.color = getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#2f6f5e";
+  return LV.color;
+}
+
+function redrawWave(c, g) {
+  const h = LV.hist, m = Math.min(h.waveN, LIVE_HISTORY_COLS, c.width), mid = c.height / 2;
+  g.clearRect(0, 0, c.width, c.height);
+  g.fillStyle = waveColor();
+  for (let k = 0; k < m; k++) {
+    const i = ((h.waveN - m + k) % LIVE_HISTORY_COLS) * 2;
+    const y0 = mid - h.wave[i + 1] * mid, y1 = mid - h.wave[i] * mid;
+    g.fillRect(c.width - m + k, y0, 1, Math.max(1, y1 - y0));
+  }
+}
+
+// For each row of a canvas this tall, the spectrogram bin it shows (0 Hz at the bottom).
+function specRows(height) {
+  const top = Math.min(LIVE_SPEC_HZ, LV.rate / 2), binHz = LV.rate / (LV.analyser ? LV.analyser.fftSize : 2048);
+  const rows = new Int32Array(height);
+  for (let y = 0; y < height; y++) rows[y] = Math.round((height - 1 - y) / Math.max(1, height - 1) * top / binHz);
+  return rows;
+}
+
+function redrawSpec(c, g) {
+  const h = LV.hist, sp = LV.spec;
+  g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
+  sp.img = g.createImageData(1, c.height);
+  sp.rows = specRows(c.height);
+  const m = h.spec ? Math.min(h.specN, LIVE_HISTORY_COLS, c.width) : 0;
+  if (!m) return;
+  if (!sp.lut) sp.lut = infernoLut();
+  const img = g.createImageData(m, c.height), px = img.data, kept = h.specBins;
+  for (let k = 0; k < m; k++) {
+    const base = ((h.specN - m + k) % LIVE_HISTORY_COLS) * kept;
+    for (let y = 0; y < c.height; y++) {
+      const v = h.spec[base + Math.min(kept - 1, sp.rows[y])], o = (y * m + k) * 4;
+      px[o] = sp.lut[v * 3]; px[o + 1] = sp.lut[v * 3 + 1]; px[o + 2] = sp.lut[v * 3 + 2]; px[o + 3] = 255;
+    }
+  }
+  g.putImageData(img, c.width - m, 0);
+}
+
+// Both live canvases drawn again from their history, sized to their boxes (debounced: a resize
+// fires many times while the window is dragged).
+function liveRedraw() {
+  LV.redrawTimer = 0;
+  for (const [id, redraw] of [["live-wave", redrawWave], ["live-spec", redrawSpec]]) {
+    const c = $(id);
+    if (!c.getContext || (id === "live-spec" && !LV.analyser)) continue;
+    canvasSize(c);
+    redraw(c, c.getContext("2d"));
+  }
+}
+
+function scheduleRedraw() {
+  if (LV.redrawTimer) clearTimeout(LV.redrawTimer);
+  LV.redrawTimer = setTimeout(liveRedraw, 100);
+}
+
+// A resize of either canvas, or a change of the screen's pixel ratio, redraws them from history.
+function watchLiveSizes() {
+  if (typeof ResizeObserver !== "undefined" && !LV.sizeWatch) {
+    LV.sizeWatch = new ResizeObserver(scheduleRedraw);
+    for (const id of ["live-wave", "live-spec"]) LV.sizeWatch.observe($(id));
+  }
+  if (window.matchMedia && !LV.ratioWatch) {
+    const arm = () => {
+      LV.ratioWatch = window.matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`);
+      LV.ratioWatch.addEventListener("change", () => { LV.ratioWatch = null; scheduleRedraw(); arm(); }, { once: true });
+    };
+    arm();
+  }
+}
+
 function drawWave() {
   const c = $("live-wave"), cols = LV.wave.cols;
   if (!c.getContext) return;
   const g = c.getContext("2d");
-  if (canvasSize(c)) g.clearRect(0, 0, c.width, c.height);
+  for (const [lo, hi] of cols) pushWave(lo, hi);
+  if (canvasSize(c)) { cols.length = 0; redrawWave(c, g); return; }   // resized: everything again
   if (!cols.length) return;
   const n = Math.min(cols.length, c.width), mid = c.height / 2;
   shiftLeft(g, c, n);
-  if (!LV.color) LV.color = getComputedStyle(document.body).getPropertyValue("--accent").trim() || "#2f6f5e";
-  g.fillStyle = LV.color;
+  g.fillStyle = waveColor();
   const from = cols.length - n;
   for (let i = 0; i < n; i++) {
     const [lo, hi] = cols[from + i];
@@ -857,10 +954,7 @@ function drawSpec(now) {
   const c = $("live-spec"), a = LV.analyser, sp = LV.spec;
   if (!a || !c.getContext) return;
   const g = c.getContext("2d");
-  if (canvasSize(c) || !sp.img || sp.img.height !== c.height) {
-    g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height);
-    sp.img = g.createImageData(1, c.height);
-  }
+  if (canvasSize(c) || !sp.img || sp.img.height !== c.height) redrawSpec(c, g);   // resized: everything again
   if (!sp.last || now - sp.last > 1000) { sp.last = now; return; }    // first frame, or back after a pause
   const due = Math.min(c.width, Math.floor((now - sp.last) * LIVE_COLS_PER_SEC / 1000));
   if (due < 1) return;
@@ -868,10 +962,10 @@ function drawSpec(now) {
   if (!sp.lut) sp.lut = infernoLut();
   a.getByteFrequencyData(sp.bins);
   const top = Math.min(LIVE_SPEC_HZ, LV.rate / 2), binHz = LV.rate / a.fftSize, h = c.height;
+  pushSpec(sp.bins, Math.min(sp.bins.length, Math.ceil(top / binHz) + 1), due);
   const px = sp.img.data;
   for (let y = 0; y < h; y++) {
-    const hz = (h - 1 - y) / (h - 1) * top;
-    const v = sp.bins[Math.min(sp.bins.length - 1, Math.round(hz / binHz))];
+    const v = sp.bins[Math.min(sp.bins.length - 1, sp.rows[y])];
     px[y * 4] = sp.lut[v * 3]; px[y * 4 + 1] = sp.lut[v * 3 + 1]; px[y * 4 + 2] = sp.lut[v * 3 + 2]; px[y * 4 + 3] = 255;
   }
   shiftLeft(g, c, due);
@@ -896,6 +990,8 @@ async function liveRecover() {
 
 // ---- wiring ----
 function setupLive() {
+  historyReset();
+  watchLiveSizes();
   $("live-entry").onclick = openLive;
   $("open-live").onclick = openLive;
   $("live-close").onclick = () => { if (!liveRecording()) showLibrary(); };
