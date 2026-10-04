@@ -408,6 +408,15 @@ class LiveApiTests(Tmp):
         self.assertFalse(os.path.exists(part + ".json"))
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
+    def test_record_unsaved_is_said_once_at_the_next_start(self):
+        a = self.api()
+        self.assertTrue(a.record_unsaved({"file": "Live x.wav", "items": ["class B for the mark at 0:04", 5, ""]}))
+        self.assertFalse(a.record_unsaved({"items": []}))
+        self.assertFalse(a.record_unsaved("nonsense"))
+        b = self.api()                                    # the next start
+        self.assertEqual(b.live_recover()["unsaved"], [{"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}])
+        self.assertEqual(b.live_recover()["unsaved"], [])
+
     def test_questions_survive_a_crash(self):
         a = self.api()
         sid = self.start(a)["session"]
@@ -829,7 +838,7 @@ class LiveApiTests(Tmp):
         with open(part + ".json", "w", encoding="utf-8") as f:
             json.dump({"name": "Import x (1).wav", "rate": RATE, "channels": 1, "derived": True, "marks": []}, f)
         self.store.set_setting(live.PARTS_SETTING, [part])
-        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": []})
+        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": [], "unsaved": []})
         self.assertEqual(os.listdir(self.lib), [])
 
     @unittest.skipUnless(sys.platform == "win32", "folders are held open only on Windows")
@@ -1077,7 +1086,7 @@ class LiveApiTests(Tmp):
         a = self.api()
         sid = self.start(a)["session"]
         self.send(a, sid, tone(1.0), 0)
-        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": []})
+        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": [], "unsaved": []})
         self.assertTrue(a.recording())
         a.live_stop(sid)
 
@@ -1120,7 +1129,7 @@ class LiveApiTests(Tmp):
         with open(part, "wb") as f:
             f.write(b"x" * 44)
         self.store.set_setting(live.PARTS_SETTING, [part])
-        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": []})
+        self.assertEqual(a.live_recover(), {"ok": True, "recovered": [], "failed": [], "unsaved": []})
         self.assertEqual(os.listdir(self.lib), [])
 
     def test_settings_are_remembered(self):
@@ -1319,7 +1328,7 @@ class CloseDrainTests(unittest.TestCase):
         from app import main
         w, order = self.Window([False, False, True]), []
         main._close_after_drain(w, lambda: order.append("before_close"), sleep=lambda s: None)
-        self.assertEqual(w.js[0], main._DRAIN_START_JS)
+        self.assertEqual(w.js[0], "liveDrainForClose(49500); true")   # 70 s: 52.5 s for the page, less the margin
         self.assertEqual(w.js.count(main._DRAIN_DONE_JS), 3)
         self.assertEqual((order, w.destroyed), (["before_close"], True))
 
@@ -1380,6 +1389,31 @@ class CloseDrainTests(unittest.TestCase):
         main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"),
                                 sleep=lambda s: None)
         self.assertEqual(order, ["close"])
+
+    def test_changes_the_page_could_not_save_are_kept_for_the_next_start(self):
+        # Astra: the page's list of changes called off at close is read (whether or not it finished)
+        # and handed to report() before the backend's finish and the close.
+        import json as js
+        from app import main
+        order = []
+        listed = {"file": "Live x.wav", "items": ["class B for the mark at 0:04"]}
+
+        class Page(self.Window):
+            def evaluate_js(self, code):
+                if code == main._UNSAVED_JS:
+                    order.append("read")
+                    return js.dumps(listed)
+                return super().evaluate_js(code)
+        w = Page([False] * 1000)
+        t = [0.0]
+
+        def sleep(s):
+            t[0] += s
+        main._close_after_drain(w, lambda: order.append("close"), finalize=lambda: order.append("finalize"),
+                                timeout=4, poll=1, clock=lambda: t[0], sleep=sleep,
+                                report=lambda got: order.append(("report", got)))
+        self.assertEqual(order, ["read", ("report", listed), "finalize", "close"])
+        self.assertEqual(w.js[0], "liveDrainForClose(0); true")         # 3 s for the page: all margin
 
     def test_a_page_that_is_gone_still_closes(self):
         from app import main

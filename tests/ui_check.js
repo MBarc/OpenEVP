@@ -3087,6 +3087,49 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     const said = $("banner-text").textContent;
     assert.ok(/These changes may not have been saved: class A for the mark at \d+:\d\d; class B for the mark at \d+:\d\d\. Check them in the player\./
       .test(said), said);
+    // Astra: closing the window with five edits queued, each answered 14 s after it is sent. The page
+    // has the budget app/main.py gives it (49.5 s of its 52.5 s); everything fits in it: the edits
+    // that make it are saved, the rest is called off and listed for the next start, and the finish
+    // is asked for, all before the window's own finish would take over.
+    await context.openLive();                                // back to Live (Stop showed the library)
+    await settle();
+    assert.ok((await $("live-record").onclick()).ok);       // another recording
+    await settle();
+    await context.liveMark();
+    await settle();
+    const markLi3 = $("live-marks").children[$("live-marks").children.length - 1];
+    fakeTimers();
+    context.liveNow = () => clock.now;
+    const from3 = lv.length, answered = [];
+    api.live_mark_update = (sid, id, cls, note) => new Promise((resolve) => {
+      lv.push(["edit", cls || note]);
+      context.setTimeout(() => { answered.push(cls || note); resolve({ ok: true, mark: {}, applied: [cls ? "cls" : "note"] }); }, 14000);
+    });
+    markLi3.children[4].value = "louder";
+    const five = [markLi3.children[1].onclick(), markLi3.children[2].onclick(), markLi3.children[3].onclick(),
+                  markLi3.children[4].onchange(), markLi3.children[1].onclick()];
+    await settle();
+    window.__liveDrained = false;
+    const t0 = clock.now;                                    // (the clock goes on from earlier tests)
+    const closing = context.liveDrainForClose(49500);
+    let stoppedAt = null;
+    while (!window.__liveDrained && clock.now - t0 < 60000) {
+      await advance(500);
+      if (stoppedAt === null && lv.slice(from3).some((c) => c[0] === "stop")) stoppedAt = clock.now - t0;
+    }
+    assert.ok(window.__liveDrained && clock.now - t0 <= 49500, `the page finished inside its budget (${clock.now - t0} ms)`);
+    await closing;
+    await Promise.all(five);
+    assert.ok(stoppedAt !== null && stoppedAt <= 49500, "the finish was asked for in time");
+    const reported = context.liveUnsavedNow();
+    assert.deepStrictEqual(answered.slice(0, 2), ["A", "B"]);
+    assert.strictEqual(lv.slice(from3).filter((c) => c[0] === "edit").length, 3, "the called-off edits are never sent");
+    assert.deepStrictEqual(reported.items.length, 3);
+    assert.ok(reported.items[0].startsWith("class C for the mark at") && reported.items[1].startsWith("the note for the mark at") &&
+              reported.items[2].startsWith("class A for the mark at"), JSON.stringify(reported));
+    assert.strictEqual(reported.file, "Live x.wav");
+    context.liveNow = () => Date.now();
+    realTimers();
     byId.delete("live-wave"); byId.delete("live-spec");
     $("live-close").onclick();
     await settle();

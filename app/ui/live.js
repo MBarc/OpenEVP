@@ -40,7 +40,8 @@ const LIVE_MAX_QUEUE_SEC = 10;           // audio captured but not yet taken by 
 const LIVE_CALL_MS = 15000;              // a bridge call slower than this: the backend is not answering
 const LIVE_FLUSH_MS = 2000;              // the worklet's answer to a flush, at most
 const LIVE_META_DRAIN_MS = 60000;        // Stop gives the marks, edits and questions still queued this long in all
-const LIVE_DRAIN_MS = 30000;             // Stop waits at most this long for the queued audio to be taken
+const LIVE_DRAIN_MS = 30000;
+const LIVE_STOP_RESERVE_MS = 8000;       // of a close's budget, kept for the backend's finish at the end             // Stop waits at most this long for the queued audio to be taken
 const QUEUE_FULL = "Recording stopped: OpenEVP could not save the audio as fast as it came in, so it stopped " +
                    "rather than hold more and more of it in memory. What was saved until then is kept.";
 const NOT_ANSWERING = "OpenEVP stopped answering while saving the recording. What was saved until then is kept.";
@@ -467,6 +468,15 @@ function callWithTimeout(call, ms) {
   });
 }
 
+function liveNow() { return Date.now(); }
+
+// A wait during Stop: its own limit, or less when the window is closing (rec.deadline, the budget
+// app/main.py gave the page): every step fits, with LIVE_STOP_RESERVE_MS left for the finish.
+function within(rec, ms) {
+  if (!rec.deadline) return ms;
+  return Math.max(0, Math.min(ms, rec.deadline - LIVE_STOP_RESERVE_MS - liveNow()));
+}
+
 // Resolves after ms (or never sooner): a bound for waiting on something else.
 function liveDelay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
@@ -515,9 +525,9 @@ async function pump(rec) {
 
 // Until every chunk queued so far has been answered (or ms passed): true if it was.
 async function drained(rec, ms) {
-  const deadline = Date.now() + ms;
+  const deadline = liveNow() + ms;
   while (rec.sending) {
-    const left = deadline - Date.now();
+    const left = deadline - liveNow();
     if (left <= 0) return false;
     if (await Promise.race([rec.sending.then(() => "sent"), liveDelay(left).then(() => "late")]) === "late") return false;
   }
@@ -565,7 +575,8 @@ async function startRecording() {
   LV.rec = { session: r.session, seq: 0, pending: [], pendingFrames: 0, frames: 0, queue: [], queuedFrames: 0,
              sending: null, closing: false, stopping: false, ended: false, dead: false, abandoned: false,
              overflow: false, marks: [], folder, status: null, failed: null, stoppedBy: null,
-             meta: Promise.resolve(), metaSeq: 0, metaCancelled: false, unsaved: [],
+             meta: Promise.resolve(), metaSeq: 0, metaCancelled: false, unsaved: [], metaPending: [],
+             metaInflight: null, deadline: null, file: r.file,
              stopPromise: null, lostFrames: 0, losses: [], tailUnknown: false, inflightFrames: 0 };
   LV.wave.cols = [];
   $("live-marks").textContent = "";
@@ -584,7 +595,7 @@ async function liveMark() {
   queueChunk(rec);                                     // the audio up to now, before the mark
   await drained(rec, LIVE_CALL_MS);
   if (LV.rec !== rec || rec.closing) return null;
-  const r = await metaOp(rec, () => callWithTimeout(() => api().live_mark(rec.session, at), LIVE_CALL_MS),
+  const r = await metaOp(rec, (ms) => callWithTimeout(() => api().live_mark(rec.session, at), ms),
                          `the mark at ${fmtTime(at)}`);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   rec.marks.push(r.mark);
@@ -628,12 +639,17 @@ function markItem(rec, mark, at) {
 // should a call that timed out still arrive late, the backend ignores it for a field changed since.
 // Whatever did not get through is listed (rec.unsaved: `what`) and said when the recording is saved.
 function metaOp(rec, fn, what) {
+  rec.metaPending.push(what);
   const step = async () => {
-    if (rec.metaCancelled) {                            // Stop gave up waiting: never sent after the finish
+    rec.metaPending.splice(rec.metaPending.indexOf(what), 1);
+    const ms = within(rec, LIVE_CALL_MS);
+    if (rec.metaCancelled || ms <= 0) {                 // Stop gave up waiting: never sent after the finish
       rec.unsaved.push(what);
       return { ok: false, cancelled: true, error: "The recording was saved before this change got through." };
     }
-    const r = await fn();
+    rec.metaInflight = what;
+    const r = await fn(ms);
+    rec.metaInflight = null;
     if (!r || !r.ok) {
       rec.unsaved.push(what);
       if (r && r.timeout && rec.closing) rec.metaCancelled = true;   // not answering: the rest is not sent
@@ -649,7 +665,8 @@ function metaOp(rec, fn, what) {
 // unanswered, what is still queued is called off (not sent after the finish) and the one under way
 // ends within its own time limit; recordingDone says which did not get through.
 async function drainMeta(rec) {
-  const all = await Promise.race([rec.meta.then(() => true), liveDelay(LIVE_META_DRAIN_MS).then(() => false)]);
+  const all = await Promise.race([rec.meta.then(() => true),
+                                  liveDelay(within(rec, LIVE_META_DRAIN_MS)).then(() => false)]);
   if (all) return;
   rec.metaCancelled = true;
   await rec.meta;
@@ -660,8 +677,8 @@ async function editMark(rec, mark, change, done) {
   const seq = ++rec.metaSeq;
   const when = fmtTime(mark.at ?? mark.end ?? 0);
   const what = change.cls ? `class ${change.cls} for the mark at ${when}` : `the note for the mark at ${when}`;
-  const r = await metaOp(rec, () => callWithTimeout(
-    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), LIVE_CALL_MS), what);
+  const r = await metaOp(rec, (ms) => callWithTimeout(
+    () => api().live_mark_update(rec.session, mark.id, change.cls ?? null, change.note ?? null, seq), ms), what);
   if (!r.ok) { liveStatus(r.error, "warn"); return; }
   if (r.stale) return;                                  // a newer change of it already applied
   const applied = r.applied || Object.keys(change);     // only the fields not changed since
@@ -675,7 +692,7 @@ async function logQuestion() {
   if (!rec || rec.closing || rec.ended) { liveStatus("Questions are logged while recording.", "warn"); return null; }
   if (!text) { box.focus(); return null; }
   const at = rec.frames / LV.rate;
-  const r = await metaOp(rec, () => callWithTimeout(() => api().live_question(rec.session, at, text), LIVE_CALL_MS),
+  const r = await metaOp(rec, (ms) => callWithTimeout(() => api().live_question(rec.session, at, text), ms),
                          `the question "${text}"`);
   if (!r.ok) { liveStatus(r.error, "warn"); return r; }
   box.value = "";
@@ -740,13 +757,14 @@ async function runStop(rec, opts) {
   renderLive();
   liveStatus("Saving…");
   const drain = opts.drain !== false && !rec.dead;
-  if (drain && !rec.ended && !await flushWorklet(LIVE_FLUSH_MS)) {  // batches still arrive until its answer
+  if (opts.deadline) rec.deadline = opts.deadline;               // closing: every wait fits in it
+  if (drain && !rec.ended && !await flushWorklet(within(rec, LIVE_FLUSH_MS))) {  // batches still arrive until its answer
     rec.tailUnknown = true;                                       // the worklet's last samples never came
   }
   rec.stopping = true;                                            // from here on nothing more is taken
   if (drain && !rec.ended) {
     queueChunk(rec);
-    if (!await drained(rec, LIVE_DRAIN_MS)) {
+    if (!await drained(rec, within(rec, LIVE_DRAIN_MS))) {
       rec.abandoned = true;                             // the chunk in flight, the queue and the rest: missing
       const why = "saving the last of it took too long";
       loseInflight(rec, why);
@@ -757,7 +775,7 @@ async function runStop(rec, opts) {
     rec.abandoned = true;
     lose(rec, rec.queuedFrames + rec.pendingFrames, rec.overflow ? "it could not be saved fast enough" : "");
     rec.queue = []; rec.queuedFrames = 0; rec.pending = []; rec.pendingFrames = 0;
-    if (rec.sending) await Promise.race([rec.sending, liveDelay(LIVE_CALL_MS)]);
+    if (rec.sending) await Promise.race([rec.sending, liveDelay(within(rec, LIVE_CALL_MS))]);
     loseInflight(rec, rec.overflow ? "it could not be saved fast enough" : "OpenEVP stopped answering");
   }
   let r;
@@ -765,7 +783,9 @@ async function runStop(rec, opts) {
   else {
     // Marks, edits and questions made before Stop reach the backend first, all of them.
     await drainMeta(rec);
-    r = await callWithTimeout(() => api().live_stop(rec.session), LIVE_CALL_MS);
+    // The finish: its own limit, or what is left of a close's budget (the reserve kept for it).
+    const stopMs = rec.deadline ? Math.max(0, Math.min(LIVE_CALL_MS, rec.deadline - liveNow())) : LIVE_CALL_MS;
+    r = await callWithTimeout(() => api().live_stop(rec.session), stopMs);
     if (r.timeout) r = { ok: false, error: STOP_NOT_ANSWERING };
   }
   return recordingDone(rec, r, opts.reason || (rec.stoppedBy && rec.stoppedBy.stopped) || "", opts);
@@ -773,11 +793,24 @@ async function runStop(rec, opts) {
 
 // The window is closing during a recording (app/main.py waits for this, bounded): stop and save
 // as Stop does, without opening the player.
-async function liveDrainForClose() {
+// budgetMs: the time app/main.py gives the page for all of it; the window's own finish follows.
+async function liveDrainForClose(budgetMs) {
   window.__liveDrained = false;
-  try { if (LV.rec) await stopRecording({ open: false, reason: "OpenEVP is closing." }); }
+  LV.closingRec = LV.rec;
+  const deadline = budgetMs > 0 ? liveNow() + budgetMs : null;
+  try { if (LV.rec) await stopRecording({ open: false, reason: "OpenEVP is closing.", deadline }); }
   finally { window.__liveDrained = true; }
   return true;
+}
+
+// What of the recording being saved as the window closes may not have been saved: changes called
+// off or unanswered, the one under way, and any still waiting. app/main.py reads this (whether or not
+// the page finished in time) and keeps it for the next start.
+function liveUnsavedNow() {
+  const rec = LV.closingRec;
+  if (!rec) return null;
+  const items = [...rec.unsaved, ...(rec.metaInflight ? [rec.metaInflight] : []), ...rec.metaPending];
+  return items.length ? { file: rec.file || "", items } : null;
 }
 
 // The recording is over (Stop, or the backend stopped it): say what was saved; a Live recording
@@ -1241,7 +1274,8 @@ function drawSpec(now) {
 // ---- crash recovery: files a crash left unfinished are finished at startup ----
 async function liveRecover() {
   const r = await api().live_recover();
-  if (!r.ok || (!r.recovered.length && !r.failed.length)) return r;
+  const unsaved = r.unsaved || [];
+  if (!r.ok || (!r.recovered.length && !r.failed.length && !unsaved.length)) return r;
   const parts = [];
   if (r.recovered.length) {
     const names = r.recovered.map((f) => `${f.name} (in ${f.folder})`).join(", ");
@@ -1249,7 +1283,11 @@ async function liveRecover() {
                                         : `${r.recovered.length} recordings were cut off last time; OpenEVP saved what it had: ${names}.`);
   }
   if (r.failed.length) parts.push(`Could not finish: ${r.failed.join(" · ")}`);
-  banner(parts.join(" "), r.failed.length ? "warn" : "ok");
+  for (const u of unsaved) {
+    parts.push(`OpenEVP closed while saving ${u.file || "a recording"}, and these changes may not have been saved: ` +
+               `${u.items.join("; ")}. Check them in the player.`);
+  }
+  banner(parts.join(" "), r.failed.length || unsaved.length ? "warn" : "ok");
   loadLibrary();
   return r;
 }

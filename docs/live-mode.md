@@ -134,7 +134,14 @@ after Stop (an import with a silence gap set): it opens in the player with
   the page's `liveDrainForClose()` (the same Stop) and waits for it. The whole
   close takes at most 70 s, whatever hangs: the page is asked on a thread of its
   own (pywebview's `evaluate_js` waits for the page with no time limit) and gets
-  the first three quarters; if it did not finish, `Api.finish_recording()`
+  the first three quarters (52.5 s). It is told its budget, less a 3 s margin
+  (`liveDrainForClose(49500)`), and fits its whole Stop in it: every wait
+  (flush, chunks, each mark/edit/question call, the queue as a whole) is cut to
+  what is left less 8 s kept for `live_stop`. What is called off, unanswered or
+  still waiting (`liveUnsavedNow()`) is then read by the window (at most 2 s) and
+  kept by `Api.record_unsaved` in the setting `live_unsaved`; the next start
+  says it (`live_recover` returns it as `unsaved`, once). If the page did not
+  finish, `Api.finish_recording()`
   (which may wait on the recording's lock or the disk) runs on a thread of its
   own until the deadline; then the window closes regardless. `shutdown()` waits
   at most 10 s for the recording's lock. A file left unfinished is a `.part` that

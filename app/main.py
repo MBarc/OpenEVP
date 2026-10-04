@@ -155,19 +155,32 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
 
 CLOSE_FINALIZE_SHARE = 0.25         # the part of the close's time kept for the backend's own finish
 CLOSE_DRAIN_TIMEOUT = 70           # seconds closing waits for the page to save a recording (its own steps are bounded too)
-_DRAIN_START_JS = "liveDrainForClose(); true"
+CLOSE_PAGE_MARGIN = 3.0            # seconds of the page's share it is not told about: polling and the report after
+CLOSE_REPORT_WAIT = 2.0            # seconds the window waits for the page's list of changes not saved
+_DRAIN_START_JS = "liveDrainForClose({ms}); true"
 _DRAIN_DONE_JS = "window.__liveDrained === true"
+_UNSAVED_JS = "JSON.stringify(liveUnsavedNow())"
+
+
+def _drain_start_js(page_seconds):
+    """The page's whole Stop (flush, chunks, marks and edits, the backend's finish) fits in this budget."""
+    return _DRAIN_START_JS.format(ms=int(max(0.0, page_seconds - CLOSE_PAGE_MARGIN) * 1000))
 
 
 def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_TIMEOUT, poll=0.2,
-                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE):
+                       clock=time.monotonic, sleep=time.sleep, finalize_share=CLOSE_FINALIZE_SHARE, report=None):
     """Closing during a recording, on a worker thread: the page stops and saves it
     as Stop does (the worklet's last samples, every queued chunk, then the backend
     finishes the file: live.js liveDrainForClose). The whole close takes at most
     timeout seconds, whatever hangs:
     - the page is asked on a thread of its own (pywebview's evaluate_js waits for
       the page without a time limit) and gets all but the last finalize_share of
-      the time;
+      the time; it is told its budget (less CLOSE_PAGE_MARGIN) and fits every one
+      of its waits into it;
+    - then the page's list of marks, edits and questions that may not have been
+      saved (liveUnsavedNow: called off, unanswered, or still waiting) is read,
+      briefly, and given to report(), which keeps it for the next start: a closing
+      window cannot show it, and it must never be lost without a word;
     - if it did not finish, finalize() (the backend finishing the file with what
       has arrived) runs on a thread of its own too, until the deadline: it may wait
       on the recording's lock or on the disk;
@@ -175,11 +188,13 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
     unfinished is a .part that the next start recovers."""
     start = time.monotonic()
     drained = threading.Event()
-    page_deadline = clock() + timeout * (1 - finalize_share)
+    page_seconds = timeout * (1 - finalize_share)
+    page_deadline = clock() + page_seconds
+    unsaved = []
 
     def ask_page():
         try:
-            window.evaluate_js(_DRAIN_START_JS)
+            window.evaluate_js(_drain_start_js(page_seconds))
             while clock() < page_deadline:
                 if window.evaluate_js(_DRAIN_DONE_JS):
                     drained.set()
@@ -187,6 +202,14 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
                 sleep(poll)
         except Exception:
             pass                                  # the page is gone
+
+    def read_unsaved():
+        try:
+            got = json.loads(window.evaluate_js(_UNSAVED_JS) or "null")
+            if got:
+                unsaved.append(got)
+        except Exception:
+            pass                                  # the page is gone, or hung
 
     def run_finalize():
         try:
@@ -196,7 +219,16 @@ def _close_after_drain(window, before_close, finalize=None, timeout=CLOSE_DRAIN_
     try:
         asker = threading.Thread(target=ask_page, name="close-drain-page", daemon=True)
         asker.start()
-        asker.join(timeout * (1 - finalize_share))
+        asker.join(page_seconds)
+        if report is not None:
+            reader = threading.Thread(target=read_unsaved, name="close-drain-unsaved", daemon=True)
+            reader.start()
+            reader.join(max(0.0, min(CLOSE_REPORT_WAIT, timeout - (time.monotonic() - start))))
+            if unsaved:
+                try:
+                    report(unsaved[0])
+                except Exception:
+                    pass
         if not drained.is_set() and finalize is not None:
             finisher = threading.Thread(target=run_finalize, name="close-finalize", daemon=True)
             finisher.start()
@@ -588,7 +620,7 @@ def _run_app(smoke=None):
                     # Not yet: the page first saves what it still holds (bounded), then the
                     # window closes (close_now lets that close through).
                     threading.Thread(target=_close_after_drain, args=(window, close_now, api.finish_recording),
-                                     name="close-drain", daemon=True).start()
+                                     kwargs={"report": api.record_unsaved}, name="close-drain", daemon=True).start()
                     return False
                 if proceed:
                     # Refuse further downloads right away: webview.start() (and the

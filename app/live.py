@@ -52,6 +52,9 @@ from .library_ops import CLOSING, ROOT_CHANGED, _fail, _file_id, _plain, _root_i
 from .store import MIN_MARK_LENGTH, StoreReadOnly, StoreUnavailable
 
 PARTS_SETTING = "live_parts"     # the .part files not finished yet (absolute paths)
+UNSAVED_SETTING = "live_unsaved"  # changes made while recording that may not have been saved when
+                                  # OpenEVP closed: [{"file", "items": [text]}], said at the next start
+MAX_UNSAVED = 200
 LIVE_SETTING = "live"            # {"input": {"id", "label"}, "split": seconds (0 = off), "import": bool, "heard": bool,
                                  #  "field": bool (the dark night screen)}
 RESERVE_BYTES = 500 << 20        # recording stops before the disk has less than this free
@@ -1034,13 +1037,40 @@ class LiveOps:
             pins.close()
 
     # ---- crash recovery ----
+    def record_unsaved(self, report):
+        """The window closed while a recording was being saved, and these marks, edits or
+        questions may not have been saved ({"file", "items": [text]} from the page): kept for
+        the next start (live_recover says them), so they are never lost without a word."""
+        if not isinstance(report, dict) or not isinstance(report.get("items"), list):
+            return False
+        items = [x[:400] for x in report["items"] if isinstance(x, str) and x][:MAX_UNSAVED]
+        if not items or self._store is None:
+            return False
+        name = report.get("file") if isinstance(report.get("file"), str) else ""
+        try:
+            kept = self._store.get_setting(UNSAVED_SETTING, [])
+            kept = kept if isinstance(kept, list) else []
+            self._store.set_setting(UNSAVED_SETTING, (kept + [{"file": name[:300], "items": items}])[-20:])
+            return True
+        except (StoreReadOnly, StoreUnavailable):
+            return False
+
     def live_recover(self):
         """Finish the .part files a crash left behind (once the store is writable):
-        {"ok", "recovered": [{"name", "folder", "seconds", "marks"}], "failed": [text]}."""
-        out = {"ok": True, "recovered": [], "failed": []}
+        {"ok", "recovered": [{"name", "folder", "seconds", "marks"}], "failed": [text],
+        "unsaved": [{"file", "items"}] (changes that may not have been saved when OpenEVP
+        last closed during a recording; said once)}."""
+        out = {"ok": True, "recovered": [], "failed": [], "unsaved": []}
         store = self._store
         if store is None or store.read_only:
             return out
+        kept = store.get_setting(UNSAVED_SETTING, [])
+        if isinstance(kept, list) and kept:
+            out["unsaved"] = [k for k in kept if isinstance(k, dict) and isinstance(k.get("items"), list)]
+            try:
+                store.set_setting(UNSAVED_SETTING, [])
+            except (StoreReadOnly, StoreUnavailable):
+                pass
         with self._live_lock:
             active = set()
             if self._live is not None and self._live.piece is not None:
