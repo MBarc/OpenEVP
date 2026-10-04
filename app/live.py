@@ -12,22 +12,27 @@ header is rewritten every few seconds, so a crash leaves a playable file, and
 every .part is listed in the setting "live_parts" until it is finished; the
 next start finishes any left behind (live_recover) and says so.
 
-Live mode makes one file, "Live YYYY-MM-DD HH-MM-SS.wav". Import mode (a
-recorder's headphone output into line-in) records one file the same way,
+Live mode makes one file, "Live YYYY-MM-DD HH-MM-SS.wav". A WAV file holds at most
+4 GB (about 6 hours of 48 kHz stereo): a recording that reaches that goes on, with no
+gap and not a sample lost or doubled, into "Live ... (part 2).wav", then (part 3), and
+so on; each part is finished (named, its marks stored) as the next one starts. Import
+mode (a recorder's headphone output into line-in) records one file the same way,
 "Import YYYY-MM-DD HH-MM-SS (full).wav" when it is to be split on silence:
 after Stop it opens in the player with suggested cuts (openevp.silence: one
 pass over the whole file, in the background), which the user edits and
 confirms (split_import); a background job then writes one file per part beside
 it, "Import YYYY-MM-DD HH-MM-SS (n).wav", which together are the whole file;
 the whole file is always kept. Stop (or a
-nearly full disk, or a file reaching 4 GB) finishes the file: the .part gets its
+nearly full disk) finishes the file: the .part gets its
 final name (never over an existing file), the marks made while recording are
 stored against its fingerprint (computed while writing) and its fingerprint is
 put in the library's index, so the library never reads it again to list it.
 
 A mark (M) is a 3-second region ending at the moment it was made (shorter at
 the very start), class C, note MARK_NOTE: the marks store holds regions, and
-class and note are set later in the EVP Library (the player).
+class and note are set later in the EVP Library (the player). A mark belongs to the
+part its end falls in; one that would reach back into the part before starts at the
+start of its own part (clamped, as at the very start of a recording).
 
 Recording needs the writable store (the list of unfinished files and the marks
 live there): a second OpenEVP window cannot record. While a recording runs, the
@@ -76,7 +81,6 @@ IN_CLIPS = "A Clips folder is for EVP clips only. Choose another folder to recor
 NO_SPACE = ("There is not enough free space on that drive to record (OpenEVP keeps at least 500 MB free). "
             "Free some space or choose a folder on another drive.")
 STOPPED_DISK = "Recording stopped because the drive is nearly full (OpenEVP keeps at least 500 MB free)."
-STOPPED_SIZE = "Recording stopped because the file reached 4 GB, the most a WAV file can hold."
 UPDATING = "An update is being installed, so OpenEVP is about to close. Record after it restarts."
 SPLITTING = "Wait for the import to be split into separate recordings, or cancel that."
 SPLIT_NO_SPACE = "there is not enough free space on the drive for the separate files"
@@ -167,6 +171,15 @@ def _sidecar_marks(meta):
         and m.get("cls") in ("A", "B", "C") and isinstance(m.get("note"), str)]
 
 
+def _part_name(name, n):
+    """The name of part n of a recording named `name` (part 1 is `name` itself):
+    "Live 2026-10-03 21-05-09 (part 2).wav"."""
+    if n <= 1:
+        return name
+    stem, ext = os.path.splitext(name)
+    return f"{stem} (part {n}){ext}"
+
+
 def _clamped(mark, duration):
     """A mark (start, end in the file's seconds) fitted into a file of `duration`
     seconds, or None when too little of it is left."""
@@ -217,16 +230,16 @@ class _Session:
         self.stamp = _stamp(datetime.datetime.now())
         self.seq = 0
         self.frames = 0                          # frames received
-        self.saved = []                          # the finished file: {"path", "fp", "frames", "marks"}
+        self.saved = []                          # the finished files (parts): {"path", "fp", "frames", "marks", "start"}
         self.problems = []
         self.dropped_marks = 0
         self.stopped = None                      # why it stopped by itself (a sentence), once it has
-        self.full = False                        # the file reached livewav.MAX_DATA
         self.done = False
         if mode == "live":
             name = f"Live {self.stamp}.wav"
         else:
             name = f"Import {self.stamp} (full).wav" if self.split else f"Import {self.stamp}.wav"
+        self.name, self.part_no = name, 1        # a recording past 4 GB goes on in parts (_roll_over)
         if not self.contained():
             raise _Moved()
         self.piece = _Piece(folder, name, rate, channels, 0, mode)
@@ -243,13 +256,37 @@ class _Session:
             folders.inside(self.root, self.folder, allow_root=True)
 
     def feed(self, data):
+        """Write whole frames. What does not fit in the part being written (4 GB) starts the
+        next part: split at a frame, nothing lost or written twice."""
         self.frames += len(data) // self.align
-        if self.full or self.piece is None:
+        if self.piece is None:
             return
+        while data:
+            room = self.piece.writer.room()
+            room -= room % self.align
+            if len(data) <= room:
+                self.piece.writer.write(data)
+                return
+            if room:
+                self.piece.writer.write(data[:room])
+                data = data[room:]
+            self._roll_over()
+
+    def _roll_over(self):
+        """The part being written is full: the next one starts (registered for recovery before
+        anything is written to it), then the full one is finished (named, its marks stored)."""
+        old = self.piece
+        self.part_no += 1
+        new = _Piece(self.folder, _part_name(self.name, self.part_no), self.rate, self.channels,
+                     old.start_frame + old.writer.frames, self.mode)
         try:
-            self.piece.writer.write(data)
-        except livewav.Full:                     # 4 GB: the rest is dropped and the recording stops
-            self.full = True
+            self.ops._register_part(new.part)
+        except Exception:
+            new.writer.abort()
+            _remove(new.sidecar)
+            raise OSError("the next part could not be started") from None
+        self.piece = new
+        self.ops._finish_piece(self, old)
 
     def finish(self):
         """Stop: finish the file. Never raises; problems are kept in self.problems."""
@@ -272,7 +309,8 @@ class _Session:
 
     def status(self):
         return {"ok": True, "seconds": round(self.frames / self.rate, 3),
-                "file": self.piece.name if self.piece is not None else None, "stopped": self.stopped}
+                "file": self.piece.name if self.piece is not None else None, "part": self.part_no,
+                "stopped": self.stopped}
 
 
 class LiveOps:
@@ -473,8 +511,7 @@ class LiveOps:
                 self._live = session
         threading.Thread(target=self._live_watch, args=(session,), name="live-watch", daemon=True).start()
         return {"ok": True, "session": session.id, "file": session.piece.name,
-                "left_seconds": max(0, int(min((free - RESERVE_BYTES) / session.byte_rate,
-                                               session.piece.writer.room() / session.byte_rate))),
+                "left_seconds": max(0, int((free - RESERVE_BYTES) / session.byte_rate)),   # the disk only
                 "folder": os.path.basename(os.path.normpath(folder)), "rate": rate, "channels": channels}
 
     def _session(self, sid):
@@ -499,7 +536,7 @@ class LiveOps:
     def live_chunk(self, sid, seq, data):
         """Write the next chunk (seq: 0, 1, 2... in order; data: base64 16-bit PCM,
         whole frames). The status: seconds received, the file being written, files
-        saved, a warning when the disk is getting full or the file nears 4 GB, and
+        saved, the part being written, a warning when the disk is getting full, and
         "stopped" (with the result of finishing) once the recording stopped by itself."""
         with self._live_lock:
             s = self._session(sid)
@@ -526,21 +563,16 @@ class LiveOps:
                 s.feed(pcm)
             except OSError as e:
                 return self._live_end(s, f"Recording stopped: the file could not be written ({_plain(e)}).")
-            if s.full:
-                return self._live_end(s, STOPPED_SIZE)
             out = s.status()
-            left = None
             if free is not None:
-                left = (free - RESERVE_BYTES) / s.byte_rate
-            if s.piece is not None:
-                room = s.piece.writer.room() / s.byte_rate
-                left = room if left is None else min(left, room)
-            if left is not None:
-                out["left_seconds"] = max(0, int(left))      # the status strip: "about 9 h left"
-            if left is not None and left < WARN_SECONDS:
-                minutes = max(1, int(left // 60))
-                out["warning"] = (f"Only about {minutes} minute{'s' if minutes != 1 else ''} of recording "
-                                  "left before OpenEVP stops it (disk space or the 4 GB file limit).")
+                # The status strip's "about 9 h left": the disk only (a file reaching 4 GB goes on in
+                # another part), less the room OpenEVP always keeps free.
+                left = (free - len(pcm) - RESERVE_BYTES) / s.byte_rate
+                out["left_seconds"] = max(0, int(left))
+                if left < WARN_SECONDS:
+                    minutes = max(1, int(left // 60))
+                    out["warning"] = (f"Only about {minutes} minute{'s' if minutes != 1 else ''} of recording "
+                                      "left before the drive is nearly full and OpenEVP stops it.")
             return out
 
     def _live_end(self, s, reason):
@@ -560,7 +592,11 @@ class LiveOps:
             if s is None or s.piece is None:
                 return _fail(NOT_RECORDING)
             at = min(float(at), s.frames / s.rate + MARK_SLACK)
-            mark = {"start": round(max(0.0, at - MARK_SECONDS), 3), "end": round(at, 3),
+            begin = s.piece.start_frame / s.rate             # where the part being written starts
+            if at <= begin and s.saved:
+                return self._mark_finished_part(s, at)
+            end = at - begin                                 # in the part's own seconds
+            mark = {"start": round(max(0.0, end - MARK_SECONDS), 3), "end": round(end, 3),
                     "cls": MARK_CLASS, "note": MARK_NOTE}
             if mark["end"] - mark["start"] < MIN_MARK_LENGTH:
                 mark["end"] = round(mark["start"] + MIN_MARK_LENGTH, 3)
@@ -570,6 +606,21 @@ class LiveOps:
             except OSError:
                 pass                             # kept in memory: stored when the file is finished
             return {"ok": True, "mark": {"at": at, "file": s.piece.name, **mark}}
+
+    def _mark_finished_part(self, s, at):
+        """A mark whose end falls in a part already finished (M pressed just as the next part
+        started): stored with that part's file at once."""
+        f = next((f for f in reversed(s.saved) if f["start"] / s.rate < at), s.saved[-1])
+        begin, seconds = f["start"] / s.rate, f["frames"] / s.rate
+        end = min(at - begin, seconds)
+        mark = {"start": round(max(0.0, end - MARK_SECONDS), 3), "end": round(end, 3),
+                "cls": MARK_CLASS, "note": MARK_NOTE}
+        stored, why = self._store_live_marks(f["fp"], f["path"], seconds, [mark], s)
+        f["marks"] += stored
+        if why is not None:
+            s.problems.append(f"A mark in {os.path.basename(f['path'])} could not be saved: {why}")
+            return _fail(f"The mark could not be saved: {why}")
+        return {"ok": True, "mark": {"at": at, "file": os.path.basename(f["path"]), **mark}}
 
     def live_stop(self, sid):
         """Stop and save: {"ok", "files": [{"id", "name", "seconds", "marks"}], "folder",
@@ -596,7 +647,12 @@ class LiveOps:
                     "seconds": round(f["frames"] / s.rate, 1), "marks": f["marks"]}
         files = [row(f) for f in s.saved]
         out = {"ok": True, "files": files, "folder": os.path.basename(os.path.normpath(s.folder)),
-               "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode}
+               "problems": list(s.problems), "dropped_marks": s.dropped_marks, "mode": s.mode,
+               "parts": len(files) > 1}
+        if s.split and len(files) > 1:
+            out["problems"].append(f"The import was longer than one WAV file holds (4 GB), so it is saved in "
+                                   f"{len(files)} parts. Cuts are suggested for part 1, which opens in the "
+                                   "player; the other parts are kept as they are.")
         if s.split and s.saved and not self._stop.is_set():
             # An import: the cuts are suggested in the background ("import-suggest-*"), shown on
             # the waveform for the user to confirm (split_import) or not.
@@ -604,9 +660,10 @@ class LiveOps:
             if isinstance(job, str):
                 out["suggest"] = {"job": job, "fp": s.saved[0]["fp"]}
         if (s.mode == "live" or s.split) and s.saved and open_player and not self._stop.is_set():
-            # Saved either way; if it cannot be opened in the player, the page says why.
+            # Saved either way; if it cannot be opened in the player, the page says why. A recording
+            # in parts opens at its first part (its start; the library lists every part).
             try:
-                loaded = self._play_file(s.saved[-1]["path"], root=s.root, library=True)
+                loaded = self._play_file(s.saved[0]["path"], root=s.root, library=True)
             except Exception as e:
                 loaded = _fail(f"{type(e).__name__}: {e}")
             if loaded.get("ok"):
@@ -646,7 +703,7 @@ class LiveOps:
             # place in the recovery list: the next start stores what is missing.
             s.problems.append(_meta_later(os.path.basename(path), why))
         self._index_live(path, fp, seconds)
-        s.saved.append({"path": path, "fp": fp, "frames": frames, "marks": stored})
+        s.saved.append({"path": path, "fp": fp, "frames": frames, "marks": stored, "start": piece.start_frame})
 
     def _store_live_marks(self, fp, path, seconds, marks, s=None):
         """Store marks made while recording against the finished file. A mark already

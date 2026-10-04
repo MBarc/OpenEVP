@@ -136,7 +136,8 @@ screen.
 
 Across the top is the status strip: the time recorded, in big numbers you can
 read at arm's length; the level meter; how much recording time is left on the
-drive ("about 9 h left"); and the input with its format.
+drive ("about 9 h left", worked out from its free space, less the 500 MB
+OpenEVP always keeps free); and the input with its format.
 
 ### Choosing an input
 
@@ -242,8 +243,20 @@ file is too damaged to read as audio, it's never deleted: OpenEVP keeps it as
 
 OpenEVP always keeps at least 500 MB free on the drive. When there's less than
 15 minutes of recording left before that, it warns you, and at the limit it
-stops by itself and saves the recording. It also stops at 4 GB, the most a WAV
-file can hold (about 6 hours of 48 kHz stereo).
+stops by itself and saves the recording.
+
+### Very long recordings
+
+A WAV file holds at most 4 GB, about 6 hours of 48 kHz stereo. A recording
+that gets that long simply goes on into a second file, `Live ... (part 2).wav`,
+then `(part 3)`, and so on, with nothing lost or repeated where one part ends
+and the next begins. The status strip shows the part being written. Each mark
+goes into the part its moment falls in; one made right at the start of a part
+starts at the start of that part. When you stop, part 1 opens in the player,
+and the EVP Library lists every part.
+
+An import that long is saved in parts the same way. Cuts are suggested for
+part 1, which opens in the player; the other parts are kept as they are.
 
 ### If the input won't open
 
@@ -750,8 +763,8 @@ to guess what has and hasn't been tested.
 
 - **Record live and Import:** tested with Chromium's built-in test input and
   generated audio, not yet with a real microphone, a USB audio adapter or a
-  real RR-DR60. Recordings stop at 4 GB, the most a WAV file can hold (about
-  6 hours of 48 kHz stereo).
+  real RR-DR60. A recording past 4 GB (about 6 hours of 48 kHz stereo) goes on
+  in parts; for an import that long, cuts are suggested for part 1 only.
 
 - **What's been tested:** on Linux, against one ICD-ST25 with 20 LP-mode
   recordings in folder A (with an owner name set, some dated and some not) and

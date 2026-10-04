@@ -380,7 +380,8 @@ test opens a real input):
     each mark is class C, "Marked while recording, not graded yet", 3 s long;
     grade one in the EVP Library. A mark in the first second is shorter (it
     starts at 0:00). "about N h left" in the status strip matches the free space
-    on the drive.
+    on the drive less 500 MB, at the input's rate (94 GB free at 48 kHz stereo:
+    about 135 h), not the 6 h a 4 GB file holds.
 60. **Night screen, app wide.** Tick **Night screen** in the top bar: the EVP
     Library, the player, the recording screen, the About and other dialogs,
     the right-click menus, banners and the scrollbars turn dark red on black;

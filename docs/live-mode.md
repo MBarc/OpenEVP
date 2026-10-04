@@ -222,17 +222,35 @@ costs the same as a minute. Waveform and spectrogram share one time scale
   or `Import YYYY-MM-DD HH-MM-SS (full).wav` when it is to be split, and then its
   pieces `Import YYYY-MM-DD HH-MM-SS (n).wav` (the time Record was pressed).
 - Limits: recording stops (and saves) when the drive would have less than
-  500 MB free, warning from 15 minutes before; and at 4 GiB - 2 MiB of audio per file
-  (RIFF's limit), about 6.2 h of 48 kHz stereo. Start is refused with less than
-  500 MB + one minute free.
+  500 MB free, warning from 15 minutes before. Start is refused with less than
+  500 MB + one minute free. The status strip's time left (`left_seconds`, in
+  `live_start` and every `live_chunk` answer) is the disk only: free space less
+  that reserve, at the input's byte rate.
+- **Parts past 4 GB:** a file holds 4 GiB - 2 MiB of audio (RIFF's limit), about
+  6.2 h of 48 kHz stereo. `_Session.feed` writes what fits in the part being
+  written (whole frames) and the rest goes to the next part (`_roll_over`): the
+  new `.part` is created and registered for recovery first, then the full one is
+  finished like any file (named, marks stored, journal removed). The next parts
+  are named `Live ... (part 2).wav`, `(part 3)` and so on (an import:
+  `Import ... (full) (part 2).wav`); each part is its own file in the library,
+  with its own fingerprint, marks and recovery entry, so a crash leaves only the
+  part being written to recover. `live_chunk` answers with the part being
+  written (`file`, `part`), which the page shows. Stop's answer has
+  `"parts": true` and opens part 1 in the player (its start). An import in parts
+  gets suggested cuts for part 1 only (the one in the player); the other parts
+  are kept as they are, and Stop says so.
 
 ## Marks
 
-A mark (M) is a region of 2 s ending at the moment M was pressed (shorter at
-the very start), class C, note "Marked while recording". The marks store holds
-regions with a minimum length (point markers exist only as imports), and a
-region shows on the waveform and plays like any other mark; class and note are
-edited in the player afterwards. The page sends the time it counted (frames
+A mark (M) is a region of 3 s ending at the moment M was pressed (shorter at
+the very start), class C, note "Marked while recording, not graded yet". The
+marks store holds regions with a minimum length (point markers exist only as
+imports), and a region shows on the waveform and plays like any other mark;
+class and note are set in the player afterwards. In a recording in parts (past
+4 GB) a mark belongs to the part its end falls in, and starts no earlier than
+that part's start (clamped, not split); one whose end falls in a part already
+finished (M pressed as the next part began) is stored with that part's file at
+once (`_mark_finished_part`). The page sends the time it counted (frames
 captured since Record) after its queued audio has been taken; the backend keeps
 the mark in memory and in the sidecar and stores it against the fingerprint
 when the file is finished (clamped to the file's length, times rounded down to
@@ -429,7 +447,10 @@ report without a good `live` section.
     whole file, marks in the right part, the user's own cuts, bad cut lists, keep
     as one, no gaps, cancelled, folder moved, half-written parts deleted at the
     next start, the job id registered before its thread, shutdown with a blocked
-    page and with a job stuck in its emit), the disk-space and 4 GB stops, a second
+    page and with a job stuck in its emit), the disk-space stop, a recording and an
+    import going on in parts past 4 GB (nothing lost or doubled, marks in their
+    part, a mark in a finished part, a crash in part 2), the time left as the
+    disk only, a second
     window, folder operations and updates waiting (both directions), the
     destination held and re-checked, closing saves, an idle session finished,
     crash recovery (a cut-off `.part`, a crash between rename and marks, a
@@ -455,7 +476,7 @@ report without a good `live` section.
   AudioContext accepts; the saved rate is the AudioContext's.
 - On Stop, the player's audio server reads the whole file once for peaks (a few
   seconds for an hour of 48 kHz stereo).
-- A file stops at 4 GB rather than continuing into a second file.
+- An import past 4 GB gets suggested cuts for its first part only.
 - While recording, the library folder and the folders down to the destination
   cannot be renamed in File Explorer either (they are held open).
 - The import splitter errs towards not splitting: a recording whose own

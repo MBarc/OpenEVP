@@ -835,16 +835,114 @@ class LiveApiTests(Tmp):
             r = a.live_start({"mode": "live", "folder": "root", "rate": RATE, "channels": 1})
         self.assertEqual(r["error"], live.NO_SPACE)
 
-    def test_a_file_reaching_4_gb_stops_and_is_saved(self):
+    def test_a_recording_past_4_gb_goes_on_in_parts(self):
+        # 1 s of 8 kHz mono stands in for 4 GB. Chunks that do not line up with the limit: each part
+        # is full to the frame, the next goes on from the very next frame, and together they are
+        # exactly what was sent. Marks go into the part their end falls in, clamped at its start.
         a = self.api()
-        with mock.patch.object(livewav, "MAX_DATA", 3 * RATE * 2):        # 3 s of 8 kHz mono stands in for 4 GB
+        with mock.patch.object(livewav, "MAX_DATA", RATE * 2), mock.patch("app.live.datetime") as dt:
+            dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 4, 1, 2, 3)
+            r = self.start(a)
+            sid = r["session"]
+            x = tone(3.5, hz=437.3)                        # not whole cycles a second: every part differs
+            step = int(0.3 * RATE)
+            for seq, k in enumerate(range(0, len(x), step)):
+                st = self.send(a, sid, x[k:k + step], seq)
+                done = (k + step) / RATE
+                if 0.5 <= done < 0.5 + 0.3:
+                    self.assertEqual(a.live_mark(sid, 0.5)["mark"]["file"], "Live 2026-10-04 01-02-03.wav")
+                if 1.5 <= done < 1.5 + 0.3:
+                    m = a.live_mark(sid, 1.5)["mark"]         # reaches back over the start of part 2
+                    self.assertEqual((m["file"], m["start"], m["end"]), ("Live 2026-10-04 01-02-03 (part 2).wav", 0.0, 0.5))
+                if 3.4 <= done < 3.4 + 0.3:
+                    m = a.live_mark(sid, 3.4)["mark"]
+                    self.assertEqual((m["file"], m["start"], m["end"]), ("Live 2026-10-04 01-02-03 (part 4).wav", 0.0, 0.4))
+            self.assertEqual((st["file"], st["part"]), ("Live 2026-10-04 01-02-03 (part 4).wav", 4))
+            self.assertEqual(sorted(n for n in os.listdir(self.lib) if n.endswith(".wav")),
+                             ["Live 2026-10-04 01-02-03 (part 2).wav", "Live 2026-10-04 01-02-03 (part 3).wav",
+                              "Live 2026-10-04 01-02-03.wav"], "each full part is finished as the next starts")
+            stop = a.live_stop(sid)
+        names = [f["name"] for f in stop["files"]]
+        self.assertEqual(names, ["Live 2026-10-04 01-02-03.wav", "Live 2026-10-04 01-02-03 (part 2).wav",
+                                 "Live 2026-10-04 01-02-03 (part 3).wav", "Live 2026-10-04 01-02-03 (part 4).wav"])
+        self.assertTrue(stop["parts"])
+        self.assertEqual(b"".join(self.audio_of(n) for n in names), pcm(x), "nothing lost or doubled at the boundaries")
+        self.assertEqual([len(self.audio_of(n)) for n in names], [RATE * 2] * 3 + [RATE])
+        marks = {n: [(m["start"], m["end"]) for m in self.store.marks(wavinfo.wav_fingerprint(os.path.join(self.lib, n)))]
+                 for n in names}
+        self.assertEqual(marks[names[0]], [(0.0, 0.5)])
+        self.assertEqual(marks[names[1]], [(0.0, 0.5)])
+        self.assertEqual(marks[names[2]], [])
+        self.assertEqual(marks[names[3]], [(0.0, 0.4)])
+        self.assertEqual([f["marks"] for f in stop["files"]], [1, 1, 0, 1])
+        self.assertEqual(stop["player"]["name"], names[0], "the first part opens")
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+
+    def test_a_mark_ending_in_a_finished_part_goes_to_that_part(self):
+        # M pressed just as the next part started: its moment is still in part 1, which is already
+        # finished, so the mark is stored with part 1's file at once.
+        a = self.api()
+        with mock.patch.object(livewav, "MAX_DATA", RATE * 2), mock.patch("app.live.datetime") as dt:
+            dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 4, 1, 2, 3)
             sid = self.start(a)["session"]
-            self.send(a, sid, tone(2.0), 0)
-            r = a.live_chunk(sid, 1, base64.b64encode(pcm(tone(2.0))).decode())
-        self.assertEqual(r["stopped"], live.STOPPED_SIZE)
-        f = r["result"]["files"][0]
-        self.assertEqual(f["seconds"], 2.0)                               # the chunk that did not fit is left out
-        self.assertFalse(a.recording())
+            x = tone(1.2, hz=437.3)
+            self.send(a, sid, x, 0)                        # part 1 full, part 2 begun
+            m = a.live_mark(sid, 0.9)["mark"]
+            stop = a.live_stop(sid)
+        self.assertEqual((m["file"], m["start"], m["end"]), ("Live 2026-10-04 01-02-03.wav", 0.0, 0.9))
+        fp1 = wavinfo.wav_fingerprint(os.path.join(self.lib, "Live 2026-10-04 01-02-03.wav"))
+        self.assertEqual([(q["start"], q["end"]) for q in self.store.marks(fp1)], [(0.0, 0.9)])
+        self.assertEqual([f["marks"] for f in stop["files"]], [1, 0])
+
+    def test_an_import_past_4_gb_goes_on_in_parts_with_cuts_suggested_for_part_1(self):
+        a = self.api()
+        with mock.patch.object(livewav, "MAX_DATA", 8 * RATE * 2):        # 8 s stands in for 4 GB
+            r, stop = self.record_import(a, self.import_stream())         # 15 s
+        names = [f["name"] for f in stop["files"]]
+        self.assertEqual(names, ["Import 2026-10-03 09-00-00 (full).wav", "Import 2026-10-03 09-00-00 (full) (part 2).wav"])
+        self.assertEqual(b"".join(self.audio_of(n) for n in names), pcm(self.import_stream()))
+        self.assertEqual(stop["player"]["name"], names[0])
+        self.assertTrue(any("2 parts" in p and "part 1" in p for p in stop["problems"]), stop["problems"])
+        name, got = self.wait_event({"import-suggest-done", "import-suggest-failed"})
+        self.assertEqual((name, got["fp"]), ("import-suggest-done", stop["player"]["fp"]))
+        self.wait_idle(a)
+
+    def test_a_crash_in_part_2_recovers_part_2(self):
+        a = self.api()
+        with mock.patch.object(livewav, "MAX_DATA", RATE * 2), mock.patch("app.live.datetime") as dt:
+            dt.datetime.now.return_value = __import__("datetime").datetime(2026, 10, 4, 1, 2, 3)
+            sid = self.start(a)["session"]
+            x = tone(1.6, hz=437.3)
+            self.send(a, sid, x[:int(0.8 * RATE)], 0)
+            self.send(a, sid, x[int(0.8 * RATE):], 1)
+            a.live_mark(sid, 1.5)
+            s = a._live                                    # the crash: part 2 is never finished
+            s.piece.writer._f.close()
+            s.pins.close()
+            a._live = None
+        part2 = os.path.join(self.lib, "Live 2026-10-04 01-02-03 (part 2).wav.part")
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [part2], "only part 2 is unfinished")
+        got = self.api().live_recover()["recovered"]
+        self.assertEqual([(f["name"], f["marks"]) for f in got], [("Live 2026-10-04 01-02-03 (part 2).wav", 1)])
+        whole = self.audio_of("Live 2026-10-04 01-02-03.wav") + self.audio_of("Live 2026-10-04 01-02-03 (part 2).wav")
+        self.assertEqual(whole, pcm(x))
+        fp2 = wavinfo.wav_fingerprint(os.path.join(self.lib, "Live 2026-10-04 01-02-03 (part 2).wav"))
+        self.assertEqual([(m["start"], m["end"]) for m in self.store.marks(fp2)], [(0.0, 0.5)])
+        self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
+
+    def test_the_time_left_is_the_disk_only(self):
+        # 94 GB free at 48 kHz stereo: about 135 hours, not the 6 or so a 4 GB file holds.
+        a = self.api()
+        free = collections.namedtuple("usage", "total used free")
+        rate, byte_rate = 48000, 48000 * 2 * 2
+        with mock.patch("app.live.shutil.disk_usage", return_value=free(0, 0, 94 * 10 ** 9)):
+            r = a.live_start({"mode": "live", "folder": "root", "rate": rate, "channels": 2, "split": 0})
+            self.assertEqual(r["left_seconds"], int((94 * 10 ** 9 - live.RESERVE_BYTES) / byte_rate))
+            self.assertGreater(r["left_seconds"], 130 * 3600)
+            st = a.live_chunk(r["session"], 0, base64.b64encode(b"\0" * 4 * 4800).decode())
+            self.assertEqual(st["left_seconds"], int((94 * 10 ** 9 - 4 * 4800 - live.RESERVE_BYTES) / byte_rate))
+            self.assertNotIn("warning", st)
+        a.live_stop(r["session"])
 
     def test_a_second_window_cannot_record_and_bad_settings_are_refused(self):
         a = self.api()

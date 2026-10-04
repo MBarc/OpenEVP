@@ -2790,6 +2790,28 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("banner-text").textContent, "✓ Saved Live 2026-10-03 21-06-00.wav in Old Mill. " +
                      "It could not be opened in the player (Could not play x: no space); find it in the EVP Library.");
   assert.strictEqual($("banner").className, "");                    // a warning, not a plain success
+  // A recording past 4 GB: the status shows the part being written; Stop says it is in parts, part 1 open.
+  await context.openLive();
+  await settle();
+  {
+    const realChunk = chunkAnswer;
+    chunkAnswer = () => ({ ok: true, seconds: 0.5, file: "Live 2026-10-03 21-07-00 (part 2).wav", part: 2, stopped: null, left_seconds: 3600 });
+    stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, parts: true,
+                   files: [{ id: "p1", name: "Live 2026-10-03 21-07-00.wav", seconds: 0.3, marks: 0 },
+                           { id: "p2", name: "Live 2026-10-03 21-07-00 (part 2).wav", seconds: 0.2, marks: 0 }],
+                   player: { ok: true, rec: "r-p1", url: "http://a/p1.wav", peaks: [0.1], duration: 0.3, rate: 48000, channels: 2,
+                             fp: "fp-p1", marks: [], reviewed: false, backup: { status: null, detail: "" }, name: "Live 2026-10-03 21-07-00.wav" } };
+    await $("live-record").onclick();
+    for (let i = 0; i < 12; i++) worklets[worklets.length - 1].port.onmessage({ data: { pcm: new Int16Array(4096).buffer, frames: 2048, peak: 0, sumsq: 0 } });
+    await settle();
+    assert.strictEqual($("live-file").textContent, "Recording Live 2026-10-03 21-07-00 (part 2).wav");
+    await $("live-record").onclick();
+    await settle();
+    assert.strictEqual($("banner-text").textContent,
+                       "✓ Saved Live 2026-10-03 21-07-00.wav in 2 parts (a WAV file holds at most 4 GB) in Old Mill. Part 1 is open.");
+    assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-p1");
+    chunkAnswer = realChunk;
+  }
 
   // Import: the toggle, the silence setting, the guide; pieces come and go as the backend says.
   await context.openLive();

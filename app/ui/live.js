@@ -577,6 +577,7 @@ function afterChunk(rec) {
   if (rec.stoppedBy && !rec.closing) { recordingDone(rec, rec.stoppedBy.result, rec.stoppedBy.stopped); return; }
   const r = rec.status;
   if (!r) return;
+  if (r.file && r.part > 1) $("live-file").textContent = `Recording ${r.file}`;   // the next part (past 4 GB)
   liveStatus(r.warning || "", r.warning ? "warn" : "");
   if (typeof r.left_seconds === "number") $("live-left").textContent = fmtLeft(r.left_seconds);
 }
@@ -814,6 +815,10 @@ async function recordingDone(rec, r, reason, opts = {}) {
   let msg;
   if (!files.length) msg = LV.mode === "import" ? "Nothing was saved: no sound arrived." : "Nothing was saved.";
   else if (files.length === 1) msg = `Saved ${files[0].name} in ${r.folder}`;
+  else if (r.parts) {
+    msg = `Saved ${files[0].name} in ${files.length} parts (a WAV file holds at most 4 GB) in ${r.folder}` +
+          (r.player ? ". Part 1 is open" : "");
+  }
   else msg = `Saved ${plural(files.length, "recording")} in ${r.folder}`;
   if (files.length) msg = truncated ? `${msg}, but ${missingText} (${why}).` : `✓ ${msg}.`;
   if (r.suggest) {                         // an import: cuts are suggested, then the user decides
