@@ -76,8 +76,6 @@
         <button type="button" id="live-mode-import" aria-pressed="false" title="Copy recordings off a recorder that only has a headphone jack, played into this PC">Import from a recorder</button>
       </span>
       <span class="spacer"></span>
-      <label class="toggle" id="live-field-label" title="Dark red on black for the whole app: easier on your eyes in the dark"><input type="checkbox" id="live-field"> Night screen</label>
-      <button id="live-close" type="button" class="live-plain" title="Back to the EVP Library">Close</button>
     </div>
     <div id="live-strip">
       <span id="live-time" aria-label="Time recorded">0:00</span>
@@ -120,7 +118,7 @@
       <button id="live-record" type="button" class="primary" disabled>● Record</button>
       <span id="live-file"></span>
       <span id="live-toggles">
-      <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor"> Listen</label>
+      <label class="toggle" id="live-monitor-label" title="Hear the input through your speakers or headphones. Use headphones: speakers near a microphone can feed back and squeal."><input type="checkbox" id="live-monitor" autocomplete="off"> Listen</label>
       </span>
       <span id="live-mark-box">
         <span id="live-marked" role="status" hidden>Marked</span>
@@ -260,6 +258,15 @@
   </div>
 </footer>
 <div id="status"></div>
+<!-- Leaving the Record live screen (the sidebar) while it records or saves: live.js liveLeaveAsked -->
+<div id="live-leave" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-labelledby="live-leave-title" aria-describedby="live-leave-text">
+    <h2 id="live-leave-title">Stop recording and save it?</h2>
+    <p id="live-leave-text">Leaving this screen stops the recording. Everything recorded so far is saved.</p>
+    <div class="modal-buttons"><button id="live-leave-keep" type="button">Keep recording</button>
+      <button id="live-leave-stop" type="button" class="primary">Stop and save</button></div>
+  </div>
+</div>
 <div id="about-dialog" class="modal" hidden>
   <div class="modal-card" role="dialog" aria-labelledby="about-title">
     <h2 id="about-title">About OpenEVP <span id="about-version" class="muted"></span></h2>

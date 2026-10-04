@@ -434,6 +434,23 @@ class LiveOps:
             return _fail(NO_FOLDER)
         return root, path
 
+    def live_space(self, folder, rate, channels):
+        """The recording time left on the drive of a library folder (folder id, "root" for the
+        library folder) at this rate and channel count, before Record is pressed: the status
+        strip shows it from the moment the Live screen opens. {"ok", "left_seconds"}: free space
+        less the 500 MB OpenEVP keeps free (the disk only, as while recording)."""
+        if isinstance(rate, bool) or not isinstance(rate, int) or not RATES[0] <= rate <= RATES[1] \
+                or channels not in (1, 2) or isinstance(channels, bool):
+            return _fail("Unknown recording settings.")
+        got = self._live_folder(folder)
+        if isinstance(got, dict):
+            return got
+        try:
+            free = shutil.disk_usage(got[1]).free
+        except OSError as e:
+            return _fail(f"Could not check the free space: {_plain(e)}")
+        return {"ok": True, "left_seconds": max(0, int((free - RESERVE_BYTES) / (rate * channels * livewav.WIDTH)))}
+
     def live_start(self, options):
         """Start recording: options {"mode": "live" | "import", "folder": a library folder
         id ("root" for the library folder), "rate", "channels" (1 or 2), "split": seconds

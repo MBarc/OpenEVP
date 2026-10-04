@@ -967,6 +967,21 @@ class LiveApiTests(Tmp):
         self.assertEqual([(m["start"], m["end"]) for m in self.store.marks(fp2)], [(0.0, 0.5)])
         self.assertEqual(self.store.get_setting(live.PARTS_SETTING), [])
 
+    def test_the_time_left_is_known_before_record(self):
+        # The status strip shows it from the moment the Live screen opens: the drive of the folder
+        # picked, at the input's rate, the disk only.
+        a = self.api()
+        os.makedirs(self.lib, exist_ok=True)
+        a.list_library()
+        free = collections.namedtuple("usage", "total used free")
+        with mock.patch("app.live.shutil.disk_usage", return_value=free(0, 0, 94 * 10 ** 9)):
+            r = a.live_space("root", 48000, 2)
+        self.assertEqual(r, {"ok": True, "left_seconds": int((94 * 10 ** 9 - live.RESERVE_BYTES) / (48000 * 4))})
+        self.assertFalse(a.recording())
+        for bad in ((48000, 3), (True, 2), (12, 1)):
+            self.assertFalse(a.live_space("root", *bad)["ok"], bad)
+        self.assertFalse(a.live_space("no-such-folder", 48000, 2)["ok"])
+
     def test_the_time_left_is_the_disk_only(self):
         # 94 GB free at 48 kHz stereo: about 135 hours, not the 6 or so a 4 GB file holds.
         a = self.api()

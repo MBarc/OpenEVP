@@ -2584,6 +2584,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     live_stop: async (sid) => { lv.push(["stop", sid]); return stopAnswer; },
     open_mic_settings: async () => { lv.push(["mic-settings"]); return { ok: true }; },
     open_sound_settings: async () => { lv.push(["sound-settings"]); return { ok: true }; },
+    live_space: async (folder, rate, channels) => { lv.push(["space", folder, rate, channels]);
+                                                    return { ok: true, left_seconds: folder === "root" ? 50 * 3600 : 135 * 3600 + 120 }; },
   });
   assert.ok(html.includes('id="live-entry"') && html.includes('id="open-live"') && html.includes('src="live.js"'));
   vm.runInContext(`S.lib.folders = [{ id: "root", name: "OpenEVP", rel: [], parent: null, in_clips: false },
@@ -2615,6 +2617,13 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.deepStrictEqual(stream.outs.map((n) => n.kind), ["worklet", "analyser"]);   // not to the speakers
   assert.ok(!$("live-monitor").checked, "Listen is off when the view opens");
   assert.ok(!$("live-record").disabled && $("live-mark").disabled);
+  // Before Record, the status strip already shows the time left on the drive of the folder picked
+  // (at the input's rate), and it follows the folder.
+  sameJSON(lv.filter((c) => c[0] === "space").pop(), ["space", "f1", 48000, 2]);
+  assert.strictEqual($("live-left").textContent, "about 135 h left");
+  $("live-folder").value = "root"; await $("live-folder").onchange();
+  assert.strictEqual($("live-left").textContent, "about 50 h left");
+  $("live-folder").value = "f1"; await $("live-folder").onchange();
   // The Listen panel: hidden until Listen is on; there is no separate Enhance toggle any more.
   assert.ok(!html.includes("live-enhance-open") && !html.includes("Enhance what I hear"));
   assert.ok($("live-listen").hidden, "no Listen, no panel");
@@ -2722,7 +2731,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   await $("live-record").onclick();
   sameJSON(lv.filter((c) => c[0] === "start").pop()[1], { mode: "live", folder: "f1", rate: 48000, channels: 2, split: 0 });
   assert.strictEqual($("live-record").textContent, "■ Stop");
-  assert.ok($("live-input").disabled && $("live-folder").disabled && $("live-mode-import").disabled && $("live-close").disabled);
+  assert.ok($("live-input").disabled && $("live-folder").disabled && $("live-mode-import").disabled);
   assert.ok(document.body.classList.contains("recording") && !$("live-mark").disabled);
   assert.strictEqual($("live-file").textContent, "Recording Live 2026-10-03 21-05-09.wav");
   // Half a second of audio goes as one chunk: numbered, base64 16-bit PCM, exactly the samples.
@@ -2839,6 +2848,41 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                        "✓ Saved Live 2026-10-03 21-07-00.wav in 2 parts (a WAV file holds at most 4 GB) in Old Mill. Part 1 is open.");
     assert.strictEqual(vm.runInContext("S.current && S.current.rec", context), "r-p1");
     chunkAnswer = realChunk;
+  }
+  // No Close link: the sidebar is how one leaves. Not recording, the screen just goes and the
+  // microphone is let go. Recording (or saving), the user is asked first, and the move waits for
+  // the recording to be saved.
+  assert.ok(!html.includes('id="live-close"'), "no Close link on the Live screen")
+  await context.openLive();
+  await settle();
+  {
+    const tapL = worklets[worklets.length - 1];
+    const went = [];
+    const libEntry = Object.assign(new Element("div", "lib-entry"), { click() { went.push("library"); vm.runInContext("showLibrary()", context); } });
+    $("live-leave").hidden = true;                           // as index.html has it
+    const idle = fire([$("sidebar")], "click", { target: libEntry });
+    assert.ok(!idle.defaultPrevented && $("live-leave").hidden, "not recording: nothing in the way");
+    stopAnswer = { ok: true, mode: "live", folder: "Old Mill", problems: [], dropped_marks: 0, files: [] };
+    await $("live-record").onclick();
+    await settle();
+    const ask = fire([$("sidebar")], "click", { target: libEntry });
+    assert.ok(ask.defaultPrevented && !$("live-leave").hidden, "recording: asked first");
+    assert.deepStrictEqual([$("live-leave-title").textContent, $("live-leave-stop").textContent, $("live-leave-keep").textContent],
+                           ["Stop recording and save it?", "Stop and save", "Keep recording"]);
+    assert.ok(html.includes("Everything recorded so far is saved."));
+    $("live-leave-keep").onclick();
+    assert.ok($("live-leave").hidden && vm.runInContext("liveRecording()", context) && went.length === 0, "Keep recording: still recording");
+    const fromStop = lv.length;
+    fire([$("sidebar")], "click", { target: libEntry });
+    await $("live-leave-stop").onclick();
+    await settle();
+    assert.ok(lv.slice(fromStop).some((c) => c[0] === "stop"), "saved");
+    assert.ok(!vm.runInContext("liveRecording()", context));
+    sameJSON(went, ["library"]);                             // then the move the user asked for
+    assert.strictEqual(tapL.ctx.state, "closed", "the microphone is let go");
+    const css = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+    assert.ok(!css.includes("body.recording #sidebar"), "the sidebar stays usable while recording");
+    assert.ok(/#live-leave \.modal-buttons button \{ min-height: 48px/.test(css), "touch sized");
   }
 
   // Import: the toggle, the silence setting, the guide; pieces come and go as the backend says.
@@ -3045,7 +3089,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.ok(ops.some((o) => o[0] === "live-spec" && o[1] === "put" && o[3] === Math.min(specNow, 500) && o[4]));
     window.devicePixelRatio = 1;
     byId.delete("live-wave"); byId.delete("live-spec");
-    $("live-close").onclick();
+    vm.runInContext("showLibrary()", context);
     await settle();
   }
   // ---- The touch screen: toggles and their memory, the night screen, the layout, the status strip,
@@ -3067,15 +3111,38 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     await context.openLive();
     await settle();
     assert.ok(!$("live-monitor").checked, "Listen is never on by itself");
-    // The night screen, app wide: one setting (set_night), the toolbar's switch and the Live screen's
-    // are the same. It goes on the whole document (html.night), so every view takes it.
+    // Listen left on when the screen was closed (or restored by the browser): off again, with its
+    // panel hidden and nothing to the speakers, before the screen even shows. Its options stay.
+    vm.runInContext(`setEnhance({ boost: 4 })`, context);
+    $("live-monitor").checked = true; $("live-monitor").onchange();
+    assert.ok(!$("live-listen").hidden);
+    vm.runInContext("showLibrary()", context);
+    await settle();
+    assert.ok(!$("live-monitor").checked && $("live-listen").hidden, "Listen ends with the screen");
+    $("live-monitor").checked = true;                        // as if restored on its own
+    await context.openLive();
+    await settle();
+    assert.ok(!$("live-monitor").checked && $("live-listen").hidden, "off again on opening");
+    const ctxL = audioContexts[audioContexts.length - 1];
+    assert.ok(!ctxL.nodes.some((n) => n.outs.some((o) => o.kind === "destination")), "nothing to the speakers");
+    assert.strictEqual(vm.runInContext("S.enh.settings.boost", context), 4, "the options are remembered");
+    vm.runInContext(`setEnhance({ ...ENH_DEFAULT })`, context);
+    assert.ok(html.includes('id="live-monitor" autocomplete="off"'));
+    // The night screen, app wide: one setting (set_night), one switch, in the top bar (the Live
+    // screen has none of its own). It goes on the whole document (html.night), Live screen included.
+    assert.ok(!html.includes("live-field"), "no second Night screen switch on the Live screen");
     const nights = [];
     api.set_night = async (on) => { nights.push(on); return { ok: true, night: on, remembered: true }; };
     const docEl = document.documentElement;
     assert.ok(!docEl.classList.contains("night"));
-    $("live-field").checked = true; $("live-field").onchange();
+    $("night").checked = true; $("night").onchange();
     await settle();
-    assert.ok(docEl.classList.contains("night") && $("night").checked && $("live-field").checked);
+    assert.ok(docEl.classList.contains("night") && $("night").checked);
+    {
+      const cssN = fs.readFileSync(path.join(__dirname, "..", "app", "ui", "style.css"), "utf8");
+      assert.ok(/#live \{ --live-bg: var\(--bg\); --live-panel: var\(--panel\); --live-text: var\(--text\)/.test(cssN),
+                "the Live screen takes the app's colours, so the night theme covers it");
+    }
     sameJSON(nights, [true]);
     assert.ok(!lv.some((c) => c[0] === "set" && "field" in c[1]), "not a Live setting any more");
     // The live scopes are drawn again in the night's colours: the spectrogram red on black.
@@ -3086,11 +3153,11 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     // Off from the toolbar: off everywhere.
     $("night").checked = false; $("night").onchange();
     await settle();
-    assert.ok(!docEl.classList.contains("night") && !$("live-field").checked);
+    assert.ok(!docEl.classList.contains("night"));
     sameJSON(nights, [true, false]);
-    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, the night screen,
-    // Suggest cuts; the Listen panel's options are buttons that show their state.
-    for (const id of ["live-monitor-label", "live-field-label"]) {
+    // Every on/off choice here is a toggle button (a checkbox drawn as one): Listen, Suggest cuts;
+    // the Listen panel's options are buttons that show their state.
+    for (const id of ["live-monitor-label"]) {
       assert.ok(html.includes(`<label class="toggle" id="${id}"`), id);
     }
     assert.ok(html.includes('<label class="toggle" title="After Stop, suggest cuts'));
@@ -3257,7 +3324,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     realTimers();
     api.live_mark = realMark2;
     byId.delete("live-wave"); byId.delete("live-spec");
-    $("live-close").onclick();
+    vm.runInContext("showLibrary()", context);
     await settle();
   }
   // Astra: leaving Live while the input is still opening (Windows asking, a slow driver) calls the
@@ -3272,7 +3339,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     const opening = context.openLive();
     await settle();
     assert.strictEqual(mics.hold.length, 1, "the input is being opened");
-    $("live-close").onclick();                             // leave Live before it answers
+    vm.runInContext("showLibrary()", context);                             // leave Live before it answers
     await settle();
     mics.hold.shift()();
     await opening;
@@ -3285,7 +3352,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     // An open called off, then another: the first one's late stream never becomes the input.
     const first = context.openLive();
     await settle();
-    $("live-close").onclick();
+    vm.runInContext("showLibrary()", context);
     await settle();
     const second = context.openLive();
     await settle();
@@ -3302,7 +3369,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.ok(!late[2].track.stopped);
     mics.hold = null;
     navigator.mediaDevices.getUserMedia = realGUM;
-    $("live-close").onclick();
+    vm.runInContext("showLibrary()", context);
     await settle();
     assert.ok(late[2].track.stopped, "closing the view lets the input go");
   }
@@ -3466,7 +3533,7 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
                      "may be missing (saving the last of it took too long).");
   liveTimers.length = 0;
   context.setTimeout = () => 0;
-  $("live-close").onclick();
+  vm.runInContext("showLibrary()", context);
   await settle();
   assert.strictEqual(vm.runInContext("S.view", context), "library");
   finished = true;

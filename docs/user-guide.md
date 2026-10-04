@@ -130,14 +130,15 @@ marking it in one place marks it everywhere.
 
 Click **Record live** in the sidebar (under On this PC), or **Record live…**
 next to Open audio file. The recording screen takes over the window until you
-close it. It's made for a tablet or touchscreen laptop in the field: the
+pick something else in the sidebar (such as **EVP Library**). It's made for a tablet or touchscreen laptop in the field: the
 buttons are big enough to tap, and the waveform and spectrogram fill the
 screen.
 
 Across the top is the status strip: the time recorded, in big numbers you can
 read at arm's length; the level meter; how much recording time is left on the
 drive ("about 9 h left", worked out from its free space, less the 500 MB
-OpenEVP always keeps free); and the input with its format.
+OpenEVP always keeps free, and shown as soon as the screen opens); and the
+input with its format.
 
 ### Choosing an input
 
@@ -187,8 +188,12 @@ They're saved as WAV, at the rate the input works at (often 48 kHz), in mono
 or stereo depending on the input, 16-bit. An hour of 48 kHz stereo is about
 690 MB. If you want an MP3 to share, record first and convert it later.
 
-While recording, the rest of the app waits: the sidebar is greyed out, and
-renaming, moving or deleting library folders waits until you stop. The folder
+While recording, renaming, moving or deleting library folders waits until you
+stop. If you pick something in the sidebar while recording (or while the
+recording is being saved), OpenEVP asks first: **Stop and save** saves the
+recording and then goes there, **Keep recording** stays. Nothing recorded is
+lost either way. When you're not recording, leaving the screen simply stops
+the preview and lets go of the microphone. The folder
 you're recording into (and the library folder above it) can't be renamed in
 File Explorer either until you stop, so the recording always lands where you
 chose.
@@ -196,16 +201,13 @@ chose.
 If you close OpenEVP while recording, it asks first, then saves the recording
 the same way Stop does before the window closes.
 
-### The night screen
-
-The recording screen has its own **Night screen** button (top right). It's
-the same switch as the one in the top bar: see [The night screen](#the-night-screen-1).
-
 ### Listening while you record
 
 Tap **Listen** to hear the input through your speakers or headphones. It's
-off every time you open the screen, and it's best used with headphones: a
-microphone near speakers picks up its own sound and squeals.
+always off when you open the screen (its options are remembered), and it's
+best used with headphones: a microphone near speakers picks up its own sound
+and squeals. For the dark, use **Night screen** in the top bar: see
+[The night screen](#the-night-screen).
 
 While Listen is on, its options show under it:
 

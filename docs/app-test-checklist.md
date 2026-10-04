@@ -309,7 +309,7 @@ test opens a real input):
     (Voice only, Cut rumble, Cut hiss), Hum (Off, 60 Hz, 50 Hz) and Reset, in that
     order, all easy to tap. Set Volume to +12 dB: louder in the headphones at
     once; the saved file is not louder (compare its waveform with one recorded
-    without). Close the Live view: the player's Enhance tab shows Boost +12 dB
+    without). Click EVP Library in the sidebar: the player's Enhance tab shows Boost +12 dB
     too; change it there, go back to Live: the same. With a hum in the input,
     turn on Hum 60 Hz: the hum lines go from the spectrogram at once, the
     waveform is unchanged; turn Listen off: the hum lines come back (the
@@ -348,7 +348,10 @@ test opens a real input):
 53. **Disk nearly full.** On a USB stick with a little over 500 MB free,
     record into a library folder on it: a warning appears when less than 15
     minutes fit, then it stops by itself and saves; at least 500 MB stay free.
-54. **While recording**, the sidebar is greyed out, closing the window asks
+54. **While recording**, clicking EVP Library in the sidebar asks "Stop recording
+    and save it?" (big buttons): Keep recording goes on recording; Stop and save
+    saves it, then shows the library. Not recording, the same click leaves at once
+    and the microphone is let go (Windows' microphone icon goes). Closing the window asks
     first (and saves the recording if you close), Check for updates won't
     install, and a second OpenEVP window cannot record (it says why).
 55. **Closing mid-recording.** Record live for a minute, speak right before
@@ -367,9 +370,11 @@ test opens a real input):
     Task Manager.
 58. **Touch screen in the field.** On a tablet or touchscreen laptop, open Record
     live: every button and toggle is easy to hit with a finger; MARK is bottom
-    right under the thumb. Turn on **Night screen**: the whole app goes dark
-    red, and the toolbar's Night screen is ticked too; reopen OpenEVP: it is
-    still on, and the window opens dark with no white flash. Rotate or resize the window: the
+    right under the thumb. There is no Night screen button on this screen; turn
+    on **Night screen** in the top bar: the whole app goes dark red, this screen
+    included; reopen OpenEVP: it is still on, and the window opens dark with no
+    white flash. "about N h left" shows before Record. Turn Listen on, close the
+    screen and open it again: Listen is off and its options are hidden. Rotate or resize the window: the
     waveform and spectrogram fill the space and keep their picture. Mute the microphone: within about 3 s the screen says "No sound
     coming in…", the meter says Silent, the waveform shows a flat line and the
     spectrogram a dark band moving in; **Open sound settings** opens Windows'

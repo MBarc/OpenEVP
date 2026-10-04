@@ -328,7 +328,8 @@ html.night #live-clip { background: #8f2a2a; color: #f0c0c0; }
 #live-status { margin: 0; min-height: 1.4em; }
 #live-status.warn { color: var(--warn); background: var(--warn-bg); padding: 4px 8px; border-radius: 4px; }
 #live button.live-plain { background: none; border-color: transparent; text-decoration: underline; color: var(--live-accent); }
-body.recording #sidebar { pointer-events: none; opacity: .55; }
+/* Leaving the Record live screen while it records: touch sized, as the screen is */
+#live-leave .modal-buttons button { min-height: 48px; padding: 0 18px; font-size: 16px; }
 .player-start { display: inline-flex; gap: 8px; }
 /* An import's suggested cuts (live.js): under the waveform, until split or kept as one */
 #cut-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; padding: 4px 0; font-size: 13px; }

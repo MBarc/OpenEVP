@@ -347,8 +347,13 @@ candidates take milliseconds), cancellable throughout:
 - Closing the window asks ("Recording in progress"), then saves as Stop does
   (see "Bounds on the page"); `shutdown()` finishes the session before closing
   the store.
-- The page greys out the sidebar; the input's track ending (unplugged) stops and
-  saves.
+- There is no Close link: the sidebar is how one leaves. Not recording, the
+  screen goes (`liveViewLeft`: the preview stops, the input is let go). Recording
+  or saving, a capture listener on the sidebar holds the click back and asks
+  ("Stop recording and save it?": Stop and save, Keep recording; while saving:
+  Leave when saved, Stay here); Stop and save runs the same Stop (or waits for the
+  one under way) and only then repeats the click (`liveLeaveAsked`,
+  `leaveAfterSaving`). The input's track ending (unplugged) stops and saves.
 - The input remembered is `{id, label}` (setting `live`, with the split and the
   Import toggle). Device ids are per-origin and change between sessions in
   private mode, so the page asks for the remembered id as `ideal`, then
@@ -380,20 +385,21 @@ Only the Live screen is touch sized; the rest of the app keeps its sizes.
 
 - **Layout:** a status strip (the elapsed time at 44 px; a 260 px meter with
   "Too loud" while it clips and "Silent" under -90 dB, its number the peak held
-  for 1.5 s; the time left on the drive from the backend's `left_seconds`, in
+  for 1.5 s; the time left on the drive from the backend's `left_seconds`, from
+  `live_space` as soon as the input opens (and when the folder changes), then
   `live_start` and every `live_chunk` answer, as "about 9 h left"; the input and
   its format), then the scopes. The scopes fill the space that is left
   (spectrogram 7, waveform 3) and redraw from their history on any resize.
 - **Touch:** every button, select and field on this screen is at least 48 px;
-  Listen, Night screen and Suggest cuts are checkboxes drawn as big toggle
+  Listen and Suggest cuts are checkboxes drawn as big toggle
   buttons (CSS `label:has(input:checked)`, the checkbox kept for keyboards and
   screen readers); the Listen panel's options are buttons showing their state
   (`aria-pressed`), the segmented ones built by `segButtons`. Record is bottom
   left, MARK bottom right under the thumb, with Listen on the row below; M still
   works.
 - **Night screen:** the app's (backend `NIGHT`, `set_night`, `capabilities().night`;
-  the test builds' `live.field` moved into it once, `backend.night_setting`). The
-  Live screen's button is the same switch as the toolbar's. While it is on, the
+  the test builds' `live.field` moved into it once, `backend.night_setting`). Its
+  one switch is in the top bar; the Live screen has none of its own. While it is on, the
   scopes draw in its colours: the waveform from `--live-accent`, the spectrogram
   with `nightLut()` (the same red on black map as the player's tiles,
   `openevp/spectrogram.py night_palette`).

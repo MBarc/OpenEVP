@@ -63,6 +63,10 @@ async function openLive() {
     return;
   }
   if (S.current && S.ws) S.ws.pause();
+  // Listen is never on by itself (speakers next to a microphone feed back): off before the
+  // screen is shown, every time. Its options (the Enhance settings) stay as they were.
+  $("live-monitor").checked = false;
+  showListen();
   S.view = "live"; banner("");
   renderDevices(); renderMain();
   if (!LV.settings) {
@@ -73,8 +77,6 @@ async function openLive() {
   $("live-split").checked = LV.settings.split > 0;
   $("live-gap").value = String(LV.settings.split > 0 ? LV.settings.split : 3);
   $("live-gap").disabled = !$("live-split").checked;
-  $("live-monitor").checked = false;          // never on by itself: speakers next to a microphone feed back
-  showListen();
   if (!S.lib.listed) await loadLibrary();
   liveFolders();
   renderLive();
@@ -84,7 +86,17 @@ async function openLive() {
 
 // Called by renderMain whenever another view is shown: the input is let go of.
 function liveViewLeft() {
+  $("live-monitor").checked = false;                // Listen ends with the screen
+  showListen();
   closeInput();                                     // always: an input still opening is called off too
+}
+
+// The status strip's "about N h left" before Record: the drive of the folder picked, at the
+// input's rate (while recording, every chunk's answer brings it).
+async function showSpace() {
+  if (!liveOpen() || liveRecording() || !LV.rate) return;
+  const r = await api().live_space($("live-folder").value || "root", LV.rate, LV.channels);
+  if (r && r.ok && liveOpen() && !liveRecording()) $("live-left").textContent = fmtLeft(r.left_seconds);
 }
 
 // The rate Enhance works at while the Live view is open (app.js enhRate), else 0.
@@ -211,7 +223,7 @@ function renderLive() {
   $("live-record").disabled = stopping || (!rec && !ready);
   $("live-record").classList.toggle("recording", rec);
   $("live-mark").disabled = !rec || stopping;
-  for (const id of ["live-input", "live-folder", "live-mode-live", "live-mode-import", "live-split", "live-close"]) $(id).disabled = rec;
+  for (const id of ["live-input", "live-folder", "live-mode-live", "live-mode-import", "live-split"]) $(id).disabled = rec;
   $("live-gap").disabled = rec || !$("live-split").checked;
   document.body.classList.toggle("recording", rec);
   if (!rec) $("live-time").textContent = "0:00";
@@ -270,6 +282,7 @@ async function openInput(want) {
     }
     if (!await startGraph(stream, stale)) return false;
     LV.opening = 0;
+    showSpace();
     liveStatus(want && target === undefined && want.label
       ? `"${want.label}" is not connected, so ${LV.label || "the default input"} is used.` : "");
     showInputs();
@@ -1286,7 +1299,11 @@ function setupLive() {
   watchLiveSizes();
   $("live-entry").onclick = openLive;
   $("open-live").onclick = openLive;
-  $("live-close").onclick = () => { if (!liveRecording()) showLibrary(); };
+  // The sidebar is how one leaves this screen. Not recording: the screen just goes (the preview
+  // stops and the microphone is let go: liveViewLeft). Recording or saving: asked first.
+  $("sidebar").addEventListener("click", liveLeaveAsked, true);
+  $("live-leave-keep").onclick = () => { $("live-leave").hidden = true; LV.leaveTo = null; };
+  $("live-leave-stop").onclick = leaveAfterSaving;
   $("live-mode-live").onclick = () => setLiveMode("live");
   $("live-mode-import").onclick = () => setLiveMode("import");
   $("live-input").onchange = async () => {
@@ -1295,10 +1312,10 @@ function setupLive() {
     const want = { id: d.deviceId, label: d.label };
     if (await openInput(want)) saveLive({ input: { id: LV.deviceId, label: LV.label } });
   };
+  $("live-folder").onchange = showSpace;              // another drive, another time left
   $("live-split").onchange = splitChanged;
   $("live-gap").onchange = splitChanged;
   $("live-monitor").onchange = () => { applyMonitor(); showListen(); renderLive(); };
-  $("live-field").onchange = () => setNight($("live-field").checked);   // the app's night screen, the same switch
   $("live-sound-settings").onclick = () => api().open_sound_settings();
   setupListen();
   $("live-record").onclick = () => (liveRecording() ? stopRecording() : startRecording());
@@ -1310,6 +1327,36 @@ function setupLive() {
   if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) {
     navigator.mediaDevices.addEventListener("devicechange", inputsChanged);
   }
+}
+
+// A click in the sidebar while recording (or saving): held back, and the user asked. Record live
+// itself (this screen) is no move at all.
+function liveLeaveAsked(e) {
+  if (!liveOpen() || !liveRecording()) return;
+  const target = e.target;
+  e.preventDefault(); e.stopPropagation();
+  if (target && target.closest && target.closest("#live-entry")) return;
+  LV.leaveTo = target;
+  const saving = LV.rec.closing;
+  $("live-leave-title").textContent = saving ? "The recording is being saved" : "Stop recording and save it?";
+  $("live-leave-text").textContent = saving
+    ? "It will be saved before you leave this screen."
+    : "Leaving this screen stops the recording. Everything recorded so far is saved.";
+  $("live-leave-stop").textContent = saving ? "Leave when saved" : "Stop and save";
+  $("live-leave-keep").textContent = saving ? "Stay here" : "Keep recording";
+  $("live-leave").hidden = false;
+}
+
+// Stop and save (the same Stop as the button, or the one already under way), then go where the
+// user clicked. Nothing is lost: the move happens only once the recording is saved.
+async function leaveAfterSaving() {
+  $("live-leave").hidden = true;
+  const to = LV.leaveTo;
+  LV.leaveTo = null;
+  await stopRecording();
+  if (liveRecording() || !to) return;
+  if (typeof to.click === "function") to.click();
+  else if (typeof to.onclick === "function") to.onclick();
 }
 
 // M while the Live view is open: a mark (when recording).

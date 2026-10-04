@@ -3012,7 +3012,7 @@ function renderSpectrogram() {
 // ---- The night screen: the whole app dark red on black, one setting (capabilities().night) ----
 // app/main.py opens the page with ?night=1 when it is on, and index.html sets html.night before the
 // styles load, so it never flashes white; the window's own background is dark too. Switched here
-// (the toolbar's Night screen) or on the Live screen (the same setting): colours come from style.css
+// (the toolbar's Night screen, the only switch): colours come from style.css
 // (html.night); what is drawn by script follows: the waveform, the marks, the selection, the
 // spectrogram tiles (drawn in the "night" colour map by the backend) and the Live scopes.
 function nightOn() { return document.documentElement.classList.contains("night"); }
@@ -3031,7 +3031,6 @@ async function setNight(on) {
 function applyNight(on) {
   document.documentElement.classList.toggle("night", on);
   $("night").checked = on;
-  $("live-field").checked = on;
   const css = getComputedStyle(document.documentElement);
   if (S.ws && S.ws.setOptions) {
     S.ws.setOptions({ waveColor: css.getPropertyValue("--muted").trim(), progressColor: css.getPropertyValue("--accent").trim() });
