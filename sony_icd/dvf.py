@@ -51,8 +51,9 @@ can be compared: the LP template with codec 0x24, 2 channels (bytes 62..63),
 48234 bit/s (64..67) and 6029 bytes/s (68..71, the codec bytes: 280 per 2048
 samples at 44.1 kHz). validate() accepts it for good, so files saved with it
 keep counting as "already saved". Its frames are checked: each block's frame
-offset, whole frames, and counters that go up by one or restart at 0 (the
-recorder starts a segment with a counter-0 frame).
+offset and whole frames. Frame counters are not checked: they skip ahead
+where the recorder wrote nothing (an ICD-ST10's A-012 went 339 -> 341,
+555 -> 1607, ...), and Sony's lcstde.ax decodes such a stream like any other.
 
 The LPEC SP header is OpenEVP's own too, by analogy with LP (DVE's LPEC SP/LP
 pair is 0x2A/0x2C): the LP template with codec 0x2A, 1 channel, 16000 bit/s
@@ -178,24 +179,15 @@ def sp_seconds(payload):
 def _st_problem(blocks):
     """Why the audio blocks [(block bytes, valid)] are not an LPEC ST frame
     stream, or None: each block's frame offset must point at the next frame
-    start, the stream must end on a whole frame, and each frame counter must
-    follow the one before or restart at 0."""
+    start and the stream must end on a whole frame."""
     at = 0
-    stream = bytearray()
     for k, (b, v) in enumerate(blocks):
         want = BLOCK_HEADER + (-at) % ST_FRAME
         if struct.unpack(">H", b[0:2])[0] != want:
             return f"block {k} is not LPEC ST data (frame offset {struct.unpack('>H', b[0:2])[0]}, expected {want})"
-        stream += b[BLOCK_HEADER:v]
         at += v - BLOCK_HEADER
-    if not stream or len(stream) % ST_FRAME:
-        return f"the LPEC ST data ({len(stream)} bytes) is not a whole number of {ST_FRAME}-byte frames"
-    prev = None
-    for i in range(0, len(stream), ST_FRAME):
-        c = struct.unpack(">H", stream[i:i + 2])[0]
-        if prev is not None and c != 0 and c != (prev + 1) & 0xFFFF:
-            return f"LPEC ST frame {i // ST_FRAME} has counter {c} after {prev}"
-        prev = c
+    if not at or at % ST_FRAME:
+        return f"the LPEC ST data ({at} bytes) is not a whole number of {ST_FRAME}-byte frames"
     return None
 
 
@@ -211,8 +203,8 @@ def build(raw, entry_date, owner_name, expected_length=None, mode=MODE_LP):
 
     expected_length (valid bytes from the folder table) is checked against the
     block headers, so truncated or mismatched data is rejected. mode is the
-    folder table's mode byte; LPEC ST data must also be whole, consecutive
-    frames (see the module docstring), so a table that names the wrong mode
+    folder table's mode byte; LPEC ST data must also be whole frames
+    (see the module docstring), so a table that names the wrong mode
     stops the download instead of producing a mislabelled file.
     """
     if mode not in _TEMPLATES:

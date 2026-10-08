@@ -40,11 +40,30 @@ class FolderTests(unittest.TestCase):
         self.assertAlmostEqual(m[0].seconds(), 3.904, places=3)
         self.assertFalse(m[0].problem or m[1].problem)
 
-    def test_slot_beyond_64_uses_next_range_page(self):
+    def test_slot_beyond_64(self):
         m = parse(make_table([(70, 0x1000, 0x200000, 5000, DATE, "X")]))
         self.assertEqual(m[0].blocks, 5)
         self.assertEqual(m[0].start_counter, 0x1000)
         self.assertEqual(m[0].problem, "")
+
+    def test_split_recording_joins_its_extents(self):
+        # The real ICD-ST25 table: A-002 recorded into a gap, so its first extent is
+        # open (no bit 31) and its second closes it; the recorder served 45,762 bytes.
+        t = bytearray(make_table([(0, 1, 0x1D0000, 5820, DATE, "X"), (1, 2, 0x1D1800, 10240, DATE, "X")]))
+        t[5 * PAGE + 8:5 * PAGE + 24] = struct.pack(">IIII", 0x1D1800, 0x1D3FFF, 0x106C000, 0x81074AC1)
+        m = parse(bytes(t))
+        self.assertEqual([(x.length, x.blocks, x.problem) for x in m], [(5820, 6, ""), (45762, 45, "")])
+
+    def test_extents_continue_on_the_next_range_page(self):
+        msgs = [(s, s, 0x1000 * s, 3000, DATE, "X") for s in range(70)]
+        m = parse(make_table(msgs))
+        self.assertEqual([x.problem for x in m], [""] * 70)
+        self.assertEqual(m[69].length, 3000)
+
+    def test_an_extent_run_that_never_closes_is_a_problem(self):
+        t = bytearray(make_table([(0, 1, 0x1000, 3000, DATE, "X")]))
+        t[5 * PAGE + 4:5 * PAGE + 8] = struct.pack(">I", 0x1000 + 2999)    # end flag gone
+        self.assertIn("no address range", parse(bytes(t))[0].problem)
 
     def test_missing_range_is_a_problem_not_a_crash(self):
         t = bytearray(make_table([(0, 1, 0x1000, 3000, DATE, "X")]))

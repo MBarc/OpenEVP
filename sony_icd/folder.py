@@ -6,8 +6,12 @@ Pages used (offsets are page numbers):
       ICD-ST10: sony_icd.dvf.MODES); 0xFFFFFFFF ends the list (all 0xFF = empty
       folder)
   2   start timestamp of each slot's first block (u32 BE; 128 per page)
-  5   flash address range of each slot: start u32, end u32 with bit 31 set
-      (64 per page)
+  5-8 flash address ranges (extents): start u32, end u32 (64 per page), in
+      slot order. A recording takes one or more extents; bit 31 of the end
+      marks its last one. A recording made into the gaps left by deleted
+      ones is split (seen on an ICD-ST25: A-002 in 0x1D1800..0x1D3FFF,
+      open, then 0x106C000..0x81074AC1; the recorder served exactly the sum
+      of both lengths). The first unused entry has start 0xFFFFFFFF.
   9+  one entry page per slot: owner name at 276 after a 03 00 tag at 274,
       date/time at 452..459 (the ICD-ST10 has a 90 00 tag at 274 instead,
       which is not parsed: its recordings get no owner name)
@@ -17,10 +21,11 @@ slots listed on page 0 are used.
 
 Verified on one ICD-ST25 with slots 0..19, and one ICD-ST10 with slots 0..2
 (its start timestamps and dates were all 0xFF: its clock had not been set).
-Slots >= 64 would need the range table to continue onto page 6; that is
-assumed, and each message is cross-checked against its downloaded data (start
-counter, block lengths, LPEC ST framing), so a wrong assumption stops the
-download instead of producing a bad file. A mode byte other than the known
+Extents are matched to the listed slots in slot order; seen only with slots
+0..n-1 and one split recording (the last one). More than 64 extents
+continuing onto page 6 is assumed. Each message is cross-checked against its
+downloaded data (start counter, block lengths, LPEC ST framing), so a wrong
+assumption stops the download instead of producing a bad file. A mode byte other than the known
 ones is a problem for that message only; the rest of the table is still used.
 """
 import math
@@ -34,6 +39,7 @@ TABLE_PAGES = 137
 TABLE_SIZE = TABLE_PAGES * PAGE
 FIRST_ENTRY_PAGE = 9
 COUNTERS_PER_PAGE, RANGES_PER_PAGE = PAGE_DATA // 4, PAGE_DATA // 8
+RANGE_PAGE, RANGE_ENTRIES = 5, (FIRST_ENTRY_PAGE - 5) * (PAGE_DATA // 8)
 MAX_SLOT = TABLE_PAGES - FIRST_ENTRY_PAGE - 1
 MAX_LENGTH = 32 * 1024 * 1024          # the ICD-ST25 has 32 MB of flash (the ST10's size is not known)
 # The address range is used only to derive a message's length (bounded above);
@@ -103,36 +109,52 @@ def parse(table):
     if len({slot for slot, _mode in order}) != len(order):
         raise TableError("message list contains a slot twice")
 
+    groups = _ranges(table)
+    rank = {slot: i for i, slot in enumerate(sorted(slot for slot, _mode in order))}
     msgs = []
     for number, (slot, mode) in enumerate(order, 1):
         m = Message(number=number, slot=slot, start_counter=0, length=0, blocks=0,
                     date=b"\xff" * 8, owner="", mode=mode)
         msgs.append(m)
-        _fill(m, table)
+        _fill(m, table, groups[rank[slot]] if rank[slot] < len(groups) else None)
         if not m.problem and mode not in dvf.MODES:
             m.problem = f"unknown recording mode 0x{mode:02x} for slot {slot}"
     return msgs
 
 
-def _fill(m, table):
-    """Read message m's start counter, length, owner and date from the table;
-    what makes it unsafe to download goes into m.problem."""
+def _ranges(table):
+    """Each recording's extents, in order: [(start, end)] per recording, the
+    end flag removed. An open run at the end of the entries is dropped."""
+    groups, run = [], []
+    for i in range(RANGE_ENTRIES):
+        page = _page(table, RANGE_PAGE + i // RANGES_PER_PAGE)
+        r = i % RANGES_PER_PAGE
+        start, end = _u32(page, 2 * r), _u32(page, 2 * r + 1)
+        if start == 0xFFFFFFFF:
+            break
+        run.append((start, end & 0x7FFFFFFF))
+        if end & 0x80000000:
+            groups.append(run)
+            run = []
+    return groups
+
+
+def _fill(m, table, extents):
+    """Read message m's start counter, length, owner and date from the table
+    (extents: its address ranges, or None if it has none); what makes it
+    unsafe to download goes into m.problem."""
     slot = m.slot
     if slot > MAX_SLOT:
         m.problem = f"slot {slot} is outside the table"
         return
     m.start_counter = _u32(_page(table, 2 + slot // COUNTERS_PER_PAGE), slot % COUNTERS_PER_PAGE)
-    rpage = _page(table, 5 + slot // RANGES_PER_PAGE)
-    r = slot % RANGES_PER_PAGE
-    start, end = _u32(rpage, 2 * r), _u32(rpage, 2 * r + 1)
-    if start == 0xFFFFFFFF or not end & 0x80000000:
+    if not extents:
         m.problem = f"no address range found for slot {slot}"
         return
-    end &= 0x7FFFFFFF
-    if end < start:
+    if any(end < start for start, end in extents):
         m.problem = f"reversed address range for slot {slot}"
         return
-    length = end - start + 1
+    length = sum(end - start + 1 for start, end in extents)
     if length > MAX_LENGTH:
         m.problem = f"implausible length {length} bytes for slot {slot} (an ICD-ST25 holds 32 MB)"
         return

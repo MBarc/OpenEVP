@@ -146,10 +146,11 @@ class St10DvfTests(unittest.TestCase):
         with self.assertRaises(dvf.FormatError):
             self.build(FRAMES[:-5])
 
-    def test_frame_counters_must_follow_on(self):
-        bad = make_st_frames(list(range(2, 30)) + [40] + list(range(41, 50)))
-        with self.assertRaises(dvf.FormatError):
-            self.build(bad)
+    def test_frame_counters_may_skip_ahead(self):
+        # The real ICD-ST10's A-012 went 339 -> 341, 555 -> 1607, 1678 -> 3098, ...;
+        # Sony's lcstde.ax decoded all of it, bit for bit like OpenEVP.
+        gaps = make_st_frames(list(range(2, 30)) + [40] + list(range(1607, 1620)) + [9231])
+        self.assertIsNone(dvf.validate(self.build(gaps)))
 
     def test_frame_counter_wraps_or_restarts(self):
         ok = make_st_frames([65534, 65535, 0, 1, 2, 0, 1])
@@ -163,7 +164,7 @@ class St10DvfTests(unittest.TestCase):
 
     def test_validate_checks_the_frames_too(self):
         f = bytearray(self.build())
-        f[1024 + 10 + ST_FRAME + 1] ^= 0x10         # the second frame's counter
+        f[1024 + 1024 + 1] ^= 4                     # the second block's frame offset
         self.assertIsNotNone(dvf.validate(bytes(f)))
         self.assertIsNone(dvf.audio_fingerprint(bytes(f)))
 
@@ -224,11 +225,11 @@ class St10FormatTests(unittest.TestCase):
     @release_gate.require(_st_tables(), NO_ST_TABLES)
     def test_a_damaged_st10_file_is_the_files_fault(self):
         f = bytearray(st10_dvf(st_audio_frames()))
-        f[1024 + 10:1024 + 12] = b"\x00\x09"      # the first frame's counter: 9 after nothing, then 3
+        f[1024 + 1024 + 1] ^= 4                    # the second block's frame offset
         for call in (lambda: formats.DVF.decoder.to_wav(bytes(f)),
                      lambda: formats.write_wav(formats.DVF, bytes(f), io.BytesIO()),
                      lambda: formats.analyze(formats.DVF, bytes(f))):
-            with self.assertRaisesRegex(formats.DecodeError, "counter"):
+            with self.assertRaisesRegex(formats.DecodeError, "frame offset"):
                 call()
 
     @release_gate.require(_st_tables(), NO_ST_TABLES)
@@ -354,7 +355,7 @@ class St10SessionTests(unittest.TestCase):
 
     def test_data_that_is_not_st_frames_is_a_problem_not_a_bad_file(self):
         raw = bytearray(make_st_raw(FRAMES))
-        raw[10 + ST_FRAME + 1] ^= 0x10              # the second frame's counter
+        raw[1056 + 1] ^= 4                          # the second block's frame offset
         s, _ = session(self.FOLDERS, {(1, 1): bytes(raw)})
         d = s.download("A", 1)
         self.assertEqual(d.dvf, b"")
