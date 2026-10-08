@@ -721,7 +721,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         number = row["number"]
         key = (device_id, folder_id, number)
         self._opening = key              # a newer play of another recording stops this one's decode
-        report = self._open_progress(key)
+        report = self._open_progress("/".join(str(k) for k in key))
 
         def stopped():
             return self._stop.is_set() or self._opening != key
@@ -760,11 +760,11 @@ class Api(ShareOps, LibraryOps, LiveOps):
                   "native": dl.data if dl else None, "native_name": dl.filename if dl else None}
         return self._loaded(info, dl.filename if dl else label, label, source)
 
-    def _open_progress(self, key):
-        """report(stage, fraction) for opening recording ``key``: "open-progress"
-        events {"job", "stage", "fraction"} (stage "download", "convert" or
-        "finish"), at most one per whole percent of a stage."""
-        job = "/".join(str(k) for k in key)
+    def _open_progress(self, job):
+        """report(stage, fraction) for opening a recording: "open-progress"
+        events {"job", "stage", "fraction"} (job: "<device>/<folder>/<number>",
+        "lib/<file id>" or "file"; stage "download", "convert" or "finish"), at
+        most one per whole percent of a stage."""
         last = [None]
 
         def report(stage, fraction):
@@ -2039,7 +2039,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         return None
 
     # ---- files on disk (library files and WAVs opened from the file dialog) -------
-    def _play_file(self, path, root=None, library=False):
+    def _play_file(self, path, root=None, library=False, job="file"):
         """The player's result for a .wav (served in place, its embedded markers
         imported once unless it is a clip: see _is_clip, with root the library
         folder) or another recording file, e.g. a .dvf (decoded through the
@@ -2048,6 +2048,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         if not path or not os.path.isfile(path):
             return _fail("That file is no longer there. Refresh the list.")
         name = os.path.basename(path)
+        self._opening = ("file", path)       # any newer play (a WAV too) stops an older decode
         source = {"kind": "file", "path": path}
         if library:
             source.update(library=root, library_id=_root_identity(root))
@@ -2071,12 +2072,16 @@ class Api(ShareOps, LibraryOps, LiveOps):
             if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
                 return _fail(f"{name} is too large to be {fmt.a_recording()}.")
             key = (fmt.ext[1:], os.path.normcase(path), st.st_size, st.st_mtime_ns)
+            self._opening = key              # as in audio(): a newer play stops this decode
+            report = self._open_progress(job)
 
             def write(out):
                 with open(path, "rb") as f:
                     data = f.read()
                 self._reserve(fmt, data)
-                formats.write_wav(fmt, data, out, should_stop=self._stop.is_set)
+                formats.write_wav(fmt, data, out, should_stop=lambda: self._stop.is_set() or self._opening != key,
+                                  progress=lambda fraction: report("convert", fraction))
+                report("finish", 1.0)
             return self._loaded(self._server.prepare(key, write=write), name, name, source, {"name": name})
         except Exception as e:
             return _fail(f"Could not play {name}: {_plain(e)}")
@@ -2441,7 +2446,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
             if isinstance(got, dict):
                 return got
             root, path = got
-            return self._play_file(path, root=root, library=True)
+            return self._play_file(path, root=root, library=True, job=f"lib/{file_id}")
 
     def library_marks(self, file_id):
         """The marks of a library file's recording, by its cached fingerprint

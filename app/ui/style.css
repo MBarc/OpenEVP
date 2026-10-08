@@ -138,6 +138,43 @@ td.note { color: var(--warn); }
 #player { padding: 8px 12px; border-top: 1px solid var(--line); background: var(--panel); min-height: 120px; }
 #player-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 104px; color: var(--muted); }
 #player-empty[hidden], #player-loaded[hidden] { display: none; }
+/* Opening a recording (app.js openingStart): covers the player, empty or loaded, until it is ready.
+   The ghost is the logo (assets/logo.svg): its seven bars move like a level meter, rippling out from
+   the middle; the three that hold the eyes move less, so the eyes always sit on the body. */
+#player { position: relative; }
+#player-opening { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center;
+                  gap: 16px; padding: 8px 12px; background: var(--panel); }
+#player-opening[hidden] { display: none; }
+#player-opening .ghost { width: 64px; height: 64px; flex: none; }
+.ghost-bg { fill: #15201c; }
+.ghost-bars rect { fill: #7fe0bf; transform-box: fill-box; transform-origin: 50% 100%;
+                   animation: ghost-meter 1.1s ease-in-out infinite alternate; }
+.ghost-bars rect:nth-child(1), .ghost-bars rect:nth-child(7) { --low: .45; animation-delay: -.36s; }
+.ghost-bars rect:nth-child(2), .ghost-bars rect:nth-child(6) { --low: .6; animation-delay: -.24s; }
+.ghost-bars rect:nth-child(3), .ghost-bars rect:nth-child(5) { --low: .88; animation-delay: -.12s; }
+.ghost-bars rect:nth-child(4) { --low: .9; }
+@keyframes ghost-meter { from { transform: scaleY(1); } to { transform: scaleY(var(--low)); } }
+.ghost-socket { fill: #15201c; }
+.ghost-pupil { fill: #ecece8; animation: ghost-glance 4.2s ease-in-out infinite; }
+.ghost-eye { transform-box: fill-box; transform-origin: 50% 50%; animation: ghost-blink 5.3s infinite; }
+@keyframes ghost-glance { 0%, 30% { transform: translateX(0); } 40%, 55% { transform: translateX(-2.2px); }
+                          65%, 80% { transform: translateX(.6px); } 90%, 100% { transform: translateX(0); } }
+@keyframes ghost-blink { 0%, 93%, 100% { transform: scaleY(1); } 96% { transform: scaleY(.1); } }
+html.night .ghost-bg, html.night .ghost-socket { fill: #1a0909; }     /* no bright white at night */
+html.night .ghost-bars rect { fill: #7a2626; }
+html.night .ghost-pupil { fill: #c05050; }
+@media (prefers-reduced-motion: reduce) {
+  .ghost-bars rect, .ghost-pupil, .ghost-eye { animation: none; }
+}
+.opening-text { width: min(320px, 60vw); }
+.opening-text p { margin: 0; }
+#opening-title { font-weight: 600; }
+#opening-detail { color: var(--muted); font-size: 12px; min-height: 1.3em; font-variant-numeric: tabular-nums; }
+.opening-track { height: 4px; margin: 6px 0; border-radius: 2px; background: var(--line); overflow: hidden; }
+#opening-fill { height: 100%; width: 0; background: var(--accent); transition: width .25s linear; }
+#opening-fill.unknown { width: 30%; animation: opening-sweep 1.4s ease-in-out infinite; }   /* before the first report */
+@keyframes opening-sweep { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+@media (prefers-reduced-motion: reduce) { #opening-fill { transition: none; } #opening-fill.unknown { animation: none; } }
 #player-hint { margin: 0; }
 #player-loaded { display: grid; grid-template-columns: auto 1fr auto auto auto; gap: 12px; align-items: center; }
 #player-main { min-width: 0; }

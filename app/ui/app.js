@@ -295,7 +295,9 @@ async function loadIntoPlayer(seq, label, r, autoplay) {
 
 async function openWav() {
   const seq = ++S.playSeq;
+  openingStart("file", "", true);                        // the file is picked in the backend's dialog
   const r = await api().open_wav();
+  openingDone("file");
   if (seq !== S.playSeq || r.cancelled) return;
   if (!r.ok) { showError(r); return; }
   banner("");
@@ -1262,7 +1264,9 @@ async function playLibrary(g, mark) {
   if (!f) { banner(whyUnplayable(g) + (g.main.unplayable ? "" : " WAV files still play.")); return; }
   const seq = ++S.playSeq;
   banner(""); status(`Loading ${f.name}…`);
+  openingStart(`lib/${f.id}`, f.name);
   const r = await api().play_library(f.id);
+  openingDone(`lib/${f.id}`);
   if (seq !== S.playSeq) return;
   if (!r.ok) { status(""); showError(r); loadLibrary(); return; }
   S.playing = `lib|${f.id}`;
@@ -2230,6 +2234,7 @@ $("export").onclick = async () => {
 
 // Called by app/main.py through evaluate_js. Events for an older job are ignored.
 window.onBackendEvent = (event, p) => {
+  if (event === "open-progress") { openingReport(p); return; }      // a recording opening in the player
   if (event === "share-preparing") { sharePreparing(p); return; }   // a drag out or Copy file
   if (event === "update-progress") {        // not tied to an export job
     $("update-status").textContent = `Downloading… ${p.percent}%`;
@@ -3228,11 +3233,68 @@ function clearSelection() {                                 // the selection onl
 
 function tick() { $("time").textContent = `${fmtTime(S.ws.getCurrentTime())} / ${fmtTime(S.ws.getDuration())}`; }
 
+// ---- Opening a recording: the ghost over the player, with the backend's "open-progress" ----
+// Shown after OPENING_DELAY ms (a quick open never flashes it), or at the first report (Open audio
+// file: not while its file dialog is up). The bar is the current stage's share; time left is
+// said once a stage has run a few seconds, from its own rate.
+const OPENING_DELAY = 500;
+const OPENING_STAGES = { download: "Reading from the recorder", convert: "Converting", finish: "Almost ready" };
+
+function openingStart(job, label, onReport = false) {
+  openingEnd();
+  S.opening = { job, label, stage: null, since: 0, timer: onReport ? 0 : setTimeout(openingShow, OPENING_DELAY) };
+}
+
+function openingShow() {
+  const o = S.opening;
+  if (!o || !$("player-opening").hidden) return;
+  $("opening-title").textContent = `Opening ${o.label}…`;
+  if (!o.stage) { $("opening-fill").className = "unknown"; $("opening-detail").textContent = ""; }
+  $("player-opening").hidden = false;
+}
+
+function openingReport(p) {
+  const o = S.opening;
+  if (!o || p.job !== o.job) return;                         // an older open, still winding down
+  if (p.job === "file" && !o.label) o.label = "the file";
+  const now = performance.now();
+  if (p.stage !== o.stage) { o.stage = p.stage; o.since = now; o.from = p.fraction; }
+  openingShow();
+  const fill = $("opening-fill");
+  fill.className = "";
+  fill.style.width = `${Math.round(100 * p.fraction)}%`;
+  const name = OPENING_STAGES[p.stage] || "Opening";
+  if (p.stage === "finish") { $("opening-detail").textContent = `${name}…`; return; }
+  let text = `${name}… ${Math.floor(100 * p.fraction)}%`;
+  const ran = (now - o.since) / 1000, done = p.fraction - o.from;
+  if (ran > 3 && done > 0.02) text += `, ${openingTimeLeft(ran / done * (1 - p.fraction))}`;
+  $("opening-detail").textContent = text;
+}
+
+function openingTimeLeft(s) {
+  if (s >= 90) return `about ${Math.round(s / 60)} min left`;
+  if (s >= 10) return `about ${Math.max(10, Math.round(s / 5) * 5)} s left`;
+  return "a few seconds left";
+}
+
+function openingDone(job) {                             // this open came back: its loader goes (not a newer one's)
+  if (S.opening && S.opening.job === job) openingEnd();
+}
+
+function openingEnd() {
+  if (S.opening) clearTimeout(S.opening.timer);
+  S.opening = null;
+  $("player-opening").hidden = true;
+}
+
 async function play(device, folder, number, label) {
   if (!S.playable) return;
   const seq = ++S.playSeq;
   banner(""); $("play").disabled = true; status(`Loading ${label}…`);
+  const job = `${device}/${folder}/${number}`;
+  openingStart(job, label);
   const r = await api().audio(device, folder, number);
+  openingDone(job);
   if (seq !== S.playSeq || S.device !== device) return;    // the user picked something else
   if (!r.ok) { status(""); showError(r); return; }
   S.playing = key(device, folder, number); renderMain();

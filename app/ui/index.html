@@ -144,6 +144,28 @@
   </section>
 </main>
 <footer id="player">
+  <!-- Shown while a recording opens (app.js openingStart): the logo's ghost, its bars moving like a level meter. -->
+  <div id="player-opening" role="status" aria-live="polite" hidden>
+    <svg class="ghost" viewBox="0 0 64 64" aria-hidden="true">
+      <rect class="ghost-bg" width="64" height="64" rx="14"/>
+      <g class="ghost-bars">
+        <rect x="10" y="27" width="5.4" height="25" rx="2.7"/>
+        <rect x="16.6" y="17" width="5.4" height="31" rx="2.7"/>
+        <rect x="23.2" y="12" width="5.4" height="40" rx="2.7"/>
+        <rect x="29.8" y="10" width="5.4" height="38" rx="2.7"/>
+        <rect x="36.4" y="12" width="5.4" height="40" rx="2.7"/>
+        <rect x="43" y="17" width="5.4" height="31" rx="2.7"/>
+        <rect x="49.6" y="27" width="5.4" height="25" rx="2.7"/>
+      </g>
+      <g class="ghost-eye"><ellipse class="ghost-socket" cx="25.9" cy="27" rx="4.6" ry="5.4"/><circle class="ghost-pupil" cx="27.2" cy="25.6" r="1.4"/></g>
+      <g class="ghost-eye"><ellipse class="ghost-socket" cx="39.1" cy="27" rx="4.6" ry="5.4"/><circle class="ghost-pupil" cx="40.4" cy="25.6" r="1.4"/></g>
+    </svg>
+    <div class="opening-text">
+      <p id="opening-title"></p>
+      <div class="opening-track"><div id="opening-fill"></div></div>
+      <p id="opening-detail"></p>
+    </div>
+  </div>
   <div id="player-empty">
     <p id="player-hint">Open an audio file to analyze it here.</p>
     <span class="player-start"><button id="open-wav" title="Open a WAV or MP3 file">Open audio file…</button>
