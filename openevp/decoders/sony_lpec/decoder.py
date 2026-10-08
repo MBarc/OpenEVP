@@ -227,7 +227,7 @@ WAV_HEADER_BYTES = _WAV_HEADER.size   # 44
 
 
 def _frame_chunks(payload: bytes, should_stop: Optional[Callable[[], bool]] = None,
-                  cfg: Config = LP) -> Iterator[bytes]:
+                  cfg: Config = LP, on_pos: Optional[Callable[[int, int], None]] = None) -> Iterator[bytes]:
     """DVE's framing loop (docs/lpec.md, "API behaviour and framing"): each
     frame gets the bytes that are left, up to one frame's worth (the length
     comes from the mode bits of its first byte), and the stream advances by
@@ -236,15 +236,19 @@ def _frame_chunks(payload: bytes, should_stop: Optional[Callable[[], bool]] = No
     position until nothing is left.
 
     Polls ``should_stop`` every _STOP_CHECK_FRAMES frames and raises
-    Cancelled when it returns true.
+    Cancelled when it returns true; ``on_pos(bytes read, total)`` is called
+    there too.
     """
     pos = 0
     total = len(payload)
     n = 0
     mode_bytes = cfg.mode_bytes
     while pos < total:
-        if should_stop is not None and n % _STOP_CHECK_FRAMES == 0 and should_stop():
-            raise Cancelled("decoding was stopped")
+        if n % _STOP_CHECK_FRAMES == 0:
+            if should_stop is not None and should_stop():
+                raise Cancelled("decoding was stopped")
+            if on_pos is not None:
+                on_pos(pos, total)
         length = mode_bytes[bitstream.frame_mode(payload[pos])]
         chunk = payload[pos:pos + length]
         yield chunk
@@ -289,16 +293,27 @@ def _tables_for(tables, config: Optional[Config]):
     return tables
 
 
+# The C core path's share of the work spent parsing in Python (measured on
+# an LPEC SP recording: 31%); the rest is the core's decode.
+# ponytail: one fixed split for LP and SP; measure per config if the bar visibly stalls.
+_PARSE_SHARE = 0.3
+
+
 def _decode(payload: bytes, t, use_core: Optional[bool],
-            should_stop: Optional[Callable[[], bool]], prefix: int) -> bytearray:
+            should_stop: Optional[Callable[[], bool]], prefix: int,
+            progress: Optional[Callable[[float], None]] = None) -> bytearray:
     """decode_payload, returning ``prefix`` zero bytes followed by the PCM
-    in one bytearray (so dvf_to_wav can fill in a header in place)."""
+    in one bytearray (so dvf_to_wav can fill in a header in place).
+    ``progress(fraction)``, if given, is called every few dozen frames with
+    the share of the work done (0 to 1)."""
     if use_core is None:
         use_core = _core.available()
     if use_core and not _core.available():
         raise RuntimeError("the LPEC C core (lpec_core.dll) is not available")
     cfg = t.config
-    chunks = _frame_chunks(payload, should_stop, cfg)
+    share = _PARSE_SHARE if use_core else 1.0
+    on_pos = (lambda pos, total: progress(share * pos / total)) if progress is not None else None
+    chunks = _frame_chunks(payload, should_stop, cfg, on_pos)
 
     if use_core:
         # Parse here (with the same carried slot-1 LSP index as
@@ -313,7 +328,19 @@ def _decode(payload: bytes, t, use_core: Optional[bool],
             lsp1_i1 = frame.lsp1_i1_next
             _core.pack_frame(frame, packed)
             nframes += 1
-        return _core.decode_packed(t, packed, nframes, prefix)
+
+        def report(done):                # True stops the core
+            if progress is not None:
+                progress(share + (1 - share) * done / max(nframes, 1))
+            return should_stop is not None and should_stop()
+        try:
+            out = _core.decode_packed(t, packed, nframes, prefix,
+                                      report if progress is not None or should_stop is not None else None)
+        except _core.Stopped:
+            raise Cancelled("decoding was stopped") from None
+        if progress is not None:
+            progress(1.0)
+        return out
 
     dec = Decoder(t)
     out = bytearray(prefix)
@@ -321,6 +348,8 @@ def _decode(payload: bytes, t, use_core: Optional[bool],
     for chunk in chunks:
         samples, _used = dec.decode_frame(chunk)
         out += pack(*samples)
+    if progress is not None:
+        progress(1.0)
     return out
 
 
@@ -335,7 +364,8 @@ def config_for(dvf_bytes: bytes) -> Optional[Config]:
 
 
 def dvf_to_wav(dvf_bytes: bytes, tables=None,
-               should_stop: Optional[Callable[[], bool]] = None) -> bytearray:
+               should_stop: Optional[Callable[[], bool]] = None,
+               progress: Optional[Callable[[float], None]] = None) -> bytearray:
     """Decode a Sony ICD-ST25 "LP" or ICD-ST10 "LP"/"SP" .dvf recording to a
     WAV file.
 
@@ -349,7 +379,7 @@ def dvf_to_wav(dvf_bytes: bytes, tables=None,
     writes for LP. It is one bytearray: the PCM is decoded straight into it
     after room for the header, so a long recording's audio is never copied.
     ``tables``: the configuration's tables (loaded when None).
-    ``should_stop``: see decode_payload.
+    ``should_stop``: see decode_payload; ``progress(fraction)``: see _decode.
     """
     reason = dvf_module.validate(dvf_bytes)
     if reason is not None:
@@ -360,7 +390,7 @@ def dvf_to_wav(dvf_bytes: bytes, tables=None,
         raise dvf_module.FormatError(f"this is not an LPEC LP or SP recording (codec 0x{codec:02x}); "
                                      "the LPEC decoder cannot convert it")
     t = _tables_for(tables, cfg)
-    wav = _decode(dvf_module.payload(dvf_bytes), t, None, should_stop, WAV_HEADER_BYTES)
+    wav = _decode(dvf_module.payload(dvf_bytes), t, None, should_stop, WAV_HEADER_BYTES, progress)
     n = len(wav) - WAV_HEADER_BYTES
     _WAV_HEADER.pack_into(wav, 0, b"RIFF", 36 + n, b"WAVE", b"fmt ", 16,
                           1, 1, cfg.rate, cfg.rate * 2, 2, 16, b"data", n)

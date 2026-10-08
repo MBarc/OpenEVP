@@ -253,8 +253,11 @@ class _SonyLpec:
             return 44 + payload * 16
         return 44 + payload * 64 // 3
 
-    def write_wav(self, data, f, should_stop=None):
-        return self._run(data, lambda: _dvf_audio.dvf_write_wav(data, f, should_stop=should_stop))
+    reports_progress = True           # write_wav takes progress(fraction)
+
+    def write_wav(self, data, f, should_stop=None, progress=None):
+        return self._run(data, lambda: _dvf_audio.dvf_write_wav(data, f, should_stop=should_stop,
+                                                                  progress=progress))
 
     def pcm(self, data, should_stop=None):
         stream = self._run(data, lambda: _dvf_audio.dvf_pcm(data, should_stop=should_stop))
@@ -421,14 +424,18 @@ def _decoder_of(fmt):
     return fmt.decoder
 
 
-def write_wav(fmt, data, f, should_stop=None):
+def write_wav(fmt, data, f, should_stop=None, progress=None):
     """Decode ``data`` (a file of ``fmt``) into ``f``, a seekable binary file
     open for writing. Streams when the decoder can (write_wav), so a long
     recording is never held in memory as a WAV; otherwise writes to_wav's
-    result. Returns the WAV's size. Exceptions as Format.decoder.to_wav."""
+    result. Returns the WAV's size. Exceptions as Format.decoder.to_wav.
+    ``progress(fraction)`` is told how far the decode is, by decoders that
+    say so (``reports_progress``); the others ignore it."""
     dec = _decoder_of(fmt)
     write = getattr(dec, "write_wav", None)
     if write is not None:
+        if progress is not None and getattr(dec, "reports_progress", False):
+            return write(data, f, should_stop=should_stop, progress=progress)
         return write(data, f, should_stop=should_stop)
     wav = dec.to_wav(data, should_stop=should_stop)
     f.write(wav)

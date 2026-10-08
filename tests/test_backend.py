@@ -226,7 +226,7 @@ class BackendTests(unittest.TestCase):
 
     def test_export_wav_and_audio_with_decoder(self):
         fake = types.ModuleType("openevp.decoders.sony_lpec")
-        fake.dvf_to_wav = lambda data, should_stop=None: b"RIFF" + data[:8]
+        fake.dvf_to_wav = lambda data, should_stop=None, progress=None: b"RIFF" + data[:8]
         with mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}), tempfile.TemporaryDirectory() as d:
             self.api.export(ID, [{"folder": "A", "number": 1}], "wav", d, 1)
             self.assertEqual(self.wait()[0], "export-done")
@@ -248,7 +248,7 @@ class BackendTests(unittest.TestCase):
                           (ArithmeticError("band overflow"), "ArithmeticError: band overflow")):
             fake = types.ModuleType("openevp.decoders.sony_lpec")
 
-            def dvf_to_wav(data, should_stop=None, exc=exc):
+            def dvf_to_wav(data, should_stop=None, progress=None, exc=exc):
                 raise exc
             fake.dvf_to_wav = dvf_to_wav
             with self.subTest(exc=text), mock.patch.dict(sys.modules, {"openevp.decoders.sony_lpec": fake}):
@@ -262,7 +262,7 @@ class BackendTests(unittest.TestCase):
 
         seen = []
 
-        def dvf_to_wav(data, should_stop=None):
+        def dvf_to_wav(data, should_stop=None, progress=None):
             seen.append(should_stop())
             self.api.request_stop()            # the user closes the window mid-decode
             if should_stop():

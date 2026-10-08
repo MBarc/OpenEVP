@@ -61,7 +61,7 @@ def fake_decoders(sp_tables=True):
     for name, channels in (("openevp.decoders.sony_lpec", 1), ("openevp.decoders.sony_lpec_st", 2)):
         m = types.ModuleType(name)
 
-        def to_wav(data, should_stop=None, name=name, channels=channels):
+        def to_wav(data, should_stop=None, progress=None, name=name, channels=channels):
             calls.append((name.rsplit(".", 1)[1], dvf.codec(data)))
             return tiny_wav({dvf.CODEC_SP: 16000, dvf.CODEC_ST: 44100}.get(dvf.codec(data), 8000), channels)
         m.dvf_to_wav = to_wav

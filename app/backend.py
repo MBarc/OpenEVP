@@ -497,6 +497,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
                  store=None, store_problems=(), recycle=None, drag_files=None, copy_files=None):
         self._manager = manager            # private attributes are not exposed to JS
         self._emit = emit
+        self._opening = None                  # the recording audio() is opening (a newer one stops its decode)
         self._pick = pick_folder             # (start_dir) -> path or None (a folder dialog)
         self._dest = default_dest             # the current save folder (changed with choose_destination)
         self._dest_chosen = False             # the user picked a Save-to folder in this session
@@ -719,15 +720,22 @@ class Api(ShareOps, LibraryOps, LiveOps):
             return _fail(f"Playback: {row['play_problem']}.")
         number = row["number"]
         key = (device_id, folder_id, number)
+        self._opening = key              # a newer play of another recording stops this one's decode
+        report = self._open_progress(key)
+
+        def stopped():
+            return self._stop.is_set() or self._opening != key
 
         made = []
 
         def write(f):                    # runs only when the audio server has no decode cached
             if not made:                 # (a retry after a full disk reuses the download)
-                made.append(_download(self._manager, key))
+                made.append(self._download_reporting(model, key, report))
             dl = made[-1]
             self._reserve(fmt, dl.data)
-            formats.write_wav(fmt, dl.data, f, should_stop=self._stop.is_set)
+            formats.write_wav(fmt, dl.data, f, should_stop=stopped,
+                              progress=lambda fraction: report("convert", fraction))
+            report("finish", 1.0)
         try:
             info = self._server.prepare(key, write=write)
         except Exception as e:
@@ -751,6 +759,38 @@ class Api(ShareOps, LibraryOps, LiveOps):
                   "folder": folder_id, "safe_name": folder["safe_name"], "number": number, "label": label,
                   "native": dl.data if dl else None, "native_name": dl.filename if dl else None}
         return self._loaded(info, dl.filename if dl else label, label, source)
+
+    def _open_progress(self, key):
+        """report(stage, fraction) for opening recording ``key``: "open-progress"
+        events {"job", "stage", "fraction"} (stage "download", "convert" or
+        "finish"), at most one per whole percent of a stage."""
+        job = "/".join(str(k) for k in key)
+        last = [None]
+
+        def report(stage, fraction):
+            pct = (stage, int(fraction * 100))
+            if pct != last[0]:
+                last[0] = pct
+                self._emit("open-progress", {"job": job, "stage": stage, "fraction": round(min(fraction, 1.0), 3)})
+        return report
+
+    def _download_reporting(self, model, key, report):
+        """_download, with the transfer's progress reported every quarter second
+        from a thread of its own (the recorder's thread only counts bytes)."""
+        done = threading.Event()
+
+        def watch():
+            while not done.wait(0.25):
+                fraction = model.transfer_progress()
+                if fraction is not None:
+                    # ponytail: the counter is the recorder's running transfer, which may be an
+                    # export's queued ahead of this one; a per-request counter if that confuses anyone.
+                    report("download", fraction)
+        threading.Thread(target=watch, name="open-progress", daemon=True).start()
+        try:
+            return _download(self._manager, key)
+        finally:
+            done.set()
 
     # ---- recording handles and marks ------------------------------------------
     def _loaded(self, info, name, label, source, extra=None):

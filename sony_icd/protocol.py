@@ -52,6 +52,12 @@ BULK_STALL_MS = 5000
 FOLDER_TABLE_SIZE = 137 * 528
 
 
+# [bytes received, bytes expected] of the bulk transfer running or last run.
+# The transfer loop only stores into it (the recorder drops a transaction if
+# the next read is late), and another thread may read it for a progress bar;
+# all recorder I/O runs on one thread, so there is one transfer at a time.
+TRANSFER = [0, 0]
+
 class RecorderError(Exception):
     pass
 
@@ -143,6 +149,7 @@ class Recorder:
         if expected_size != allowed or not 0 < expected_size <= MAX_BLOCKS * BLOCK_RAW:
             raise RecorderError(f"refusing implausible transfer size {expected_size}")
         data = bytearray(expected_size)
+        TRANSFER[:] = [0, expected_size]
         self._send(words)
         ack = self._reply(0x0F, words[0], size_index + 4)
         size = struct.unpack(">I", ack[size_index:size_index + 4])[0]
@@ -156,6 +163,7 @@ class Recorder:
                 raise RecorderStuck(f"data stopped after {got} of {size} bytes")
             n, rc = self.dev.bulk_in_into(EP_BULK_IN, data, got, size - got, left_ms)
             got += n
+            TRANSFER[0] = got
             if n:
                 last_progress = time.monotonic()
             elif rc == LIBUSB_ERROR_TIMEOUT:

@@ -147,13 +147,21 @@ def _to_int16(v: float) -> int:
 _STOP_CHECK_FRAMES = 16          # about 0.7 s of audio (a few ms with the C core)
 
 
-def _frames(frames_bytes, should_stop: Optional[Callable[[], bool]]) -> Iterator[int]:
+def _frames(frames_bytes, should_stop: Optional[Callable[[], bool]],
+            progress: Optional[Callable[[float], None]] = None) -> Iterator[int]:
     """The offset of every whole 283-byte frame, polling ``should_stop``
-    every _STOP_CHECK_FRAMES frames (Cancelled when it returns true)."""
+    every _STOP_CHECK_FRAMES frames (Cancelled when it returns true) and
+    telling ``progress(fraction)`` there how far it is (1.0 at the end)."""
+    total = len(frames_bytes) // FRAME_BYTES
     for n, pos in enumerate(range(0, len(frames_bytes) - FRAME_BYTES + 1, FRAME_BYTES)):
-        if should_stop is not None and n % _STOP_CHECK_FRAMES == 0 and should_stop():
-            raise Cancelled("decoding was stopped")
+        if n % _STOP_CHECK_FRAMES == 0:
+            if should_stop is not None and should_stop():
+                raise Cancelled("decoding was stopped")
+            if progress is not None:
+                progress(n / total)
         yield pos
+    if progress is not None:
+        progress(1.0)
 
 
 def _use_core(use_core: Optional[bool]) -> bool:
@@ -165,7 +173,8 @@ def _use_core(use_core: Optional[bool]) -> bool:
 
 
 def pcm_chunks(frames_bytes: bytes, tables=None, should_stop: Optional[Callable[[], bool]] = None,
-               use_core: Optional[bool] = None) -> Iterator[bytes]:
+               use_core: Optional[bool] = None,
+               progress: Optional[Callable[[float], None]] = None) -> Iterator[bytes]:
     """Decode an LPEC ST payload frame by frame: yields each output frame's
     interleaved little-endian int16 PCM (8192 bytes; swallowed and rejected
     frames yield nothing). Counter-0 frames are skipped and reset the
@@ -175,11 +184,12 @@ def pcm_chunks(frames_bytes: bytes, tables=None, should_stop: Optional[Callable[
     Python otherwise; False forces pure Python; True requires the core.
     Both give identical PCM. Nothing but the current frame is held, so a
     caller can stream a long recording to a file or a hash.
+    ``progress(fraction)``: see _frames.
     """
     t = tables if tables is not None else tables_module.load()
     if not _use_core(use_core):
         dec = Decoder(t)
-        for pos in _frames(frames_bytes, should_stop):
+        for pos in _frames(frames_bytes, should_stop, progress):
             if frames_bytes[pos] == 0 and frames_bytes[pos + 1] == 0:
                 dec.reset()
                 continue
@@ -189,7 +199,7 @@ def pcm_chunks(frames_bytes: bytes, tables=None, should_stop: Optional[Callable[
         return
     core = _core.CoreDecoder(t)
     skip = 1
-    for pos in _frames(frames_bytes, should_stop):
+    for pos in _frames(frames_bytes, should_stop, progress):
         if frames_bytes[pos] == 0 and frames_bytes[pos + 1] == 0:
             core.reset()
             skip = 1
@@ -277,7 +287,7 @@ def max_wav_bytes(payload_bytes: int) -> int:
 
 
 def dvf_to_wav(dvf_bytes, tables=None, should_stop: Optional[Callable[[], bool]] = None,
-               use_core: Optional[bool] = None) -> bytearray:
+               use_core: Optional[bool] = None, progress: Optional[Callable[[float], None]] = None) -> bytearray:
     """Decode an ICD-ST10 (LPEC ST) .dvf recording to a WAV file: the
     canonical 44-byte header (PCM, 2 channels, 44100 Hz, 16-bit) and the
     PCM, in one bytearray the PCM is decoded straight into (a 90-minute
@@ -290,7 +300,7 @@ def dvf_to_wav(dvf_bytes, tables=None, should_stop: Optional[Callable[[], bool]]
     # copies of a long recording.
     wav = bytearray(WAV_HEADER_BYTES + len(payload) // FRAME_BYTES * FRAME_SAMPLES * CHANNELS * 2)
     pos = WAV_HEADER_BYTES
-    for chunk in pcm_chunks(payload, tables, should_stop, use_core):
+    for chunk in pcm_chunks(payload, tables, should_stop, use_core, progress):
         wav[pos:pos + len(chunk)] = chunk
         pos += len(chunk)
     del wav[pos:]
@@ -299,7 +309,7 @@ def dvf_to_wav(dvf_bytes, tables=None, should_stop: Optional[Callable[[], bool]]
 
 
 def dvf_write_wav(dvf_bytes, f, tables=None, should_stop: Optional[Callable[[], bool]] = None,
-                  use_core: Optional[bool] = None) -> int:
+                  use_core: Optional[bool] = None, progress: Optional[Callable[[float], None]] = None) -> int:
     """dvf_to_wav, written to ``f`` (a seekable binary file) frame by frame
     instead of held in memory; the header is filled in last. Returns the
     WAV's size in bytes."""
@@ -307,7 +317,7 @@ def dvf_write_wav(dvf_bytes, f, tables=None, should_stop: Optional[Callable[[], 
     start = f.tell()
     f.write(bytes(WAV_HEADER_BYTES))
     n = 0
-    for chunk in pcm_chunks(payload, tables, should_stop, use_core):
+    for chunk in pcm_chunks(payload, tables, should_stop, use_core, progress):
         f.write(chunk)
         n += len(chunk)
     end = f.tell()
