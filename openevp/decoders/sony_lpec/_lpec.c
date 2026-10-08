@@ -29,7 +29,7 @@
 #include <string.h>
 
 #define EXPORT __declspec(dllexport)
-#define ABI_VERSION 3
+#define ABI_VERSION 4
 
 typedef int64_t i64;
 typedef unsigned __int128 u128;
@@ -1316,14 +1316,18 @@ EXPORT int lpec_abi_version(void)
  * Decode `nframes` packed frame records (`nints` int32s in all) from a
  * freshly initialised decoder of configuration `config` (`nconfig` int32s,
  * the layout of the CFG_* enum) into out[nframes * frame].
- * Returns the number of frames decoded, or -1 on a malformed record, an
- * unusable configuration or a table count mismatch.
+ * `report` (may be NULL) is called with the frames done every
+ * REPORT_FRAMES frames; a non-zero return stops the decode.
+ * Returns the number of frames decoded, -1 on a malformed record, an
+ * unusable configuration or a table count mismatch, or -2 when stopped.
  */
+#define REPORT_FRAMES 64
+
 EXPORT int lpec_decode(const int32_t *config, int nconfig,
                        const double *const *dtables, int n_dtables,
                        const int32_t *const *itables, int n_itables,
                        const int32_t *frames, int nints, int nframes,
-                       int16_t *out)
+                       int16_t *out, int (*report)(int))
 {
     Config cfg;
     if (config_from(config, nconfig, &cfg) < 0)
@@ -1340,6 +1344,10 @@ EXPORT int lpec_decode(const int32_t *config, int nconfig,
     double s3 = sqrt(3.0) * 0.5;
     int pos = 0, fi;
     for (fi = 0; fi < nframes; fi++) {
+        if (report && fi % REPORT_FRAMES == 0 && report(fi)) {
+            fi = -2;
+            break;
+        }
         int used = decode_frame(st, &T, &cfg, frames + pos, nints - pos,
                                 out + (ptrdiff_t)fi * cfg.frame, s3);
         if (used < 0) {

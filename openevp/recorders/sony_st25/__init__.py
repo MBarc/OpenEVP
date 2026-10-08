@@ -47,6 +47,7 @@ from openevp.recorders import base
 from sony_icd import dvf as _dvf
 from sony_icd.folder import TableError
 from sony_icd.protocol import PID, VID, RecorderError as _IcdRecorderError
+from sony_icd import protocol as _protocol
 from sony_icd.session import LETTERS, RecorderSession
 from sony_icd.usb import DriverMissing as _IcdDriverMissing
 from sony_icd.usb import UsbError, list_devices
@@ -159,6 +160,15 @@ class SonyST25(base.Model):
 
     def open(self, device):
         return open_session(self, device)
+
+    def transfer_progress(self):
+        return transfer_progress()
+
+
+def transfer_progress():
+    """Model.transfer_progress for the recorders this module reads."""
+    got, size = _protocol.TRANSFER
+    return got / size if size else None
 
 
 def open_session(model, device):

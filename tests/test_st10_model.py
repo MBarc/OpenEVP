@@ -156,9 +156,10 @@ class ManagerTests(unittest.TestCase):
                                open_device)
         self.addCleanup(self.m.close)
 
-    def test_shown_as_an_st10_once_opened(self):
-        [row] = self.m.refresh()
-        self.assertEqual((row["model_id"], row["model"]), ("sony-icd-st25", "Sony ICD-ST25"))   # not opened yet
+    def test_shown_as_an_st10_from_the_start(self):
+        [row] = self.m.refresh()                                  # opened by the poll that finds it
+        self.assertEqual((row["model_id"], row["model"]), ("sony-icd-st10", "Sony ICD-ST10"))
+        self.assertEqual(self.opened, ["sony-icd-st25"])          # by the discovering model
         self.m.with_session(PORT_ID, lambda s: s.folders())
         [row] = self.m.refresh()
         self.assertEqual((row["model_id"], row["model"], row["state"]), ("sony-icd-st10", "Sony ICD-ST10", READY))

@@ -40,7 +40,7 @@ def wav_bytes(seed, seconds=1.0, rate=8000):
 
 def fake_decoder(decode=None):
     mod = types.ModuleType("openevp.decoders.sony_lpec")
-    mod.dvf_to_wav = decode or (lambda data, should_stop=None: wav_bytes(data))
+    mod.dvf_to_wav = decode or (lambda data, should_stop=None, progress=None: wav_bytes(data))
     return mod
 
 
@@ -493,7 +493,7 @@ class MarksApiTests(unittest.TestCase):
         class Stopped(Exception):
             pass
 
-        def stopped(data, should_stop=None):
+        def stopped(data, should_stop=None, progress=None):
             raise Stopped("closing")
         mod = fake_decoder(stopped)
         mod.Cancelled = Stopped

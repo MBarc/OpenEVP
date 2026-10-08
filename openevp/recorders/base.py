@@ -243,5 +243,10 @@ class Model:
             return f"{self.name} is not supported yet"
         return formats.decoder_problem(self.native)
 
+    def transfer_progress(self):
+        """How far the download running on this model's recorder is (0 to 1),
+        or None if it cannot tell. Read from another thread while it runs."""
+        return None
+
     def __repr__(self):
         return f"<{type(self).__name__} {self.model_id}>"

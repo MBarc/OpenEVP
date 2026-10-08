@@ -19,7 +19,7 @@ the LPEC ST or SP table data).
 """
 from openevp import formats
 from openevp.recorders import base
-from openevp.recorders.sony_st25 import open_session
+from openevp.recorders.sony_st25 import open_session, transfer_progress
 
 
 class SonyST10(base.Model):
@@ -29,3 +29,6 @@ class SonyST10(base.Model):
 
     def open(self, device):
         return open_session(self, device)
+
+    def transfer_progress(self):
+        return transfer_progress()

@@ -69,15 +69,16 @@ class DeviceManagerTests(unittest.TestCase):
         self.m.refresh()
         self.assertEqual(self.m.with_session("1-4@7", lambda s: 1), 1)
 
-    def test_lists_and_opens_lazily_on_one_thread(self):
+    def test_opened_when_found_and_used_on_one_thread(self):
         self.assertEqual(self.m.refresh(), [{"id": "1-4@7", "model_id": MODEL, "model": "Sony ICD-ST25",
-                                             "port": "port 1-4", "state": READY, "message": "", "owner": ""}])
-        self.assertEqual(self.opened, [])
+                                             "port": "port 1-4", "state": READY, "message": "", "owner": "Casey"}])
+        self.assertEqual(len(self.opened), 1)
         names = {self.m.with_session("1-4@7", lambda s: threading.current_thread().name) for _ in range(3)}
         self.assertEqual(len(self.opened), 1)
         self.assertEqual(len(names), 1)
         self.assertNotEqual(names.pop(), threading.current_thread().name)
-        self.assertEqual(self.m.refresh()[0]["owner"], "Casey")
+        self.m.refresh()
+        self.assertEqual(len(self.opened), 1)                     # a known recorder is not reopened by a poll
 
     def test_stuck_advises_replug_and_a_retry_reopens(self):
         self.m.refresh()
@@ -102,8 +103,8 @@ class DeviceManagerTests(unittest.TestCase):
         self.assertEqual(self.m.with_session("1-4@8", lambda s: s.device_id), "1-4@8")
 
     def test_missing_driver_is_retryable(self):
-        self.m.refresh()
         self.open_error = DriverMissing("no WinUSB")
+        self.assertEqual(self.m.refresh()[0]["state"], NEEDS_DRIVER)   # the open when it is found
         with self.assertRaises(DriverMissing):
             self.m.with_session("1-4@7", lambda s: 1)
         self.assertEqual(self.m.refresh()[0]["state"], NEEDS_DRIVER)

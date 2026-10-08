@@ -14,7 +14,9 @@ base.state_for()'s table: the manager applies it and re-raises.
 
 A recorder is shown as the model its open session says it is
 (Session.model_id: an ICD-ST10 is discovered and opened by the ICD-ST25
-model, which shares its USB id), and as the discovering model until then. The
+model, which shares its USB id), and as the discovering model until then; a
+new recorder is opened by the refresh that finds it, so it is listed as its
+own model from the start (the discovering model only if that open fails). The
 discovering model still opens it again and decides, when its discovery fails,
 that it is kept.
 
@@ -147,6 +149,11 @@ class DeviceManager:
             e = self._devices.get(device_id)
             if e is None:
                 self._devices[device_id] = _Entry(d, model, d.state, d.message)
+                if d.state == READY:             # open it now, so it is listed as its own model at once
+                    try:
+                        self._with_session(device_id, lambda s: None)
+                    except Exception:            # its state says why; the next request tries again
+                        pass
                 continue
             e.device = d
             if d.state != READY:                 # discovery knows it cannot be used (e.g. no driver)

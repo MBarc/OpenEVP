@@ -63,7 +63,7 @@ class FakeDecoder:
         self.module.dvf_to_wav = self.decode
         self.module.Cancelled = FakeDecoder.Cancelled
 
-    def decode(self, data, should_stop=None):
+    def decode(self, data, should_stop=None, progress=None):
         self.calls += 1
         if self.calls <= self.block:
             self.started.set()

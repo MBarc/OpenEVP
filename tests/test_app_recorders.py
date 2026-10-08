@@ -113,6 +113,10 @@ class AppTestBase(unittest.TestCase):
         self.assertTrue(r["ok"], r)
         return {d["id"]: d for d in r["devices"]}
 
+    def sessions(self, connection_id):
+        """The open fake-alpha sessions of one recorder (each is opened when first listed)."""
+        return {s for s in self.alpha.open_sessions if s._id == connection_id}
+
     def export(self, device_id, items, fmt):
         r = self.api.export(device_id, items, fmt, self.dest, 1)
         self.assertTrue(r["ok"], r)
@@ -139,7 +143,7 @@ class FakeAlphaTests(AppTestBase):
     def test_listed_with_its_model_name_and_owner(self):
         row = self.rows()[self.dev_id]
         self.assertEqual((row["model_id"], row["model"], row["port"], row["state"], row["owner"]),
-                         ("fake-alpha", "Fake Alpha", "USB port 9", READY, ""))
+                         ("fake-alpha", "Fake Alpha", "USB port 9", READY, "Test Owner"))   # opened when found
         r = self.api.recordings(self.dev_id)
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.rows()[self.dev_id]["owner"], "Test Owner")
@@ -246,10 +250,11 @@ class FakeAlphaTests(AppTestBase):
         self.alpha.devices[other].message = "no driver for this one"
         row = self.rows()[other]
         self.assertEqual((row["state"], row["message"]), (NEEDS_DRIVER, "no driver for this one"))
+        opened = len(self.alpha.open_sessions)                             # the ready one, opened when listed
         r = self.api.recordings(other)
         self.assertEqual((r["ok"], r["error"], r["advice"], r["state"]),
                          (False, "no driver for this one", backend.DRIVER, NEEDS_DRIVER))
-        self.assertEqual(len(self.alpha.open_sessions), 0)
+        self.assertEqual(len(self.alpha.open_sessions), opened)
         self.assertTrue(self.api.recordings(self.dev_id)["ok"])             # the other one is fine
 
 
@@ -369,7 +374,7 @@ class TogetherTests(AppTestBase):
         self.assertNotIn(old, self.api._listings)
         self.assertFalse(any(k[0] == old for k in self.api._natives))
         self.assertEqual(self.server.forgotten, [old])
-        self.assertEqual(self.alpha.open_sessions, set())                # the old session was closed
+        self.assertEqual(self.sessions(old), set())                     # the old session was closed
         r = self.api.audio(old, "1", 1)
         self.assertEqual((r["ok"], r["error"]), (False, "the recorder (USB port 9) was unplugged"))
         self.assertTrue(self.api.audio(new, "1", 1)["ok"])
@@ -452,7 +457,7 @@ class TogetherTests(AppTestBase):
         self.rows()
         loaded = self.api.audio(alpha, "1", 1)
         self.assertTrue(loaded["ok"])
-        self.assertEqual(len(self.alpha.open_sessions), 1)
+        self.assertEqual(len(self.sessions(alpha)), 1)
         clash = base.DiscoveredDevice(alpha, self.beta.model_id, "Fake Beta volume", locator=alpha)
         with mock.patch.object(self.beta, "discover", return_value=[clash]):
             r = self.api.devices()
@@ -461,14 +466,14 @@ class TogetherTests(AppTestBase):
                 {"error": f"{name} recorders could not be looked for (RejectedConnection: more than one "
                           f"recorder reports the connection id {alpha!r}).", "advice": ""}
                 for name in ("Fake Alpha", "Fake Beta")])
-            self.assertEqual(self.alpha.open_sessions, set())             # closed
+            self.assertEqual(self.sessions(alpha), set())                 # closed
             self.assertEqual(self.server.forgotten, [alpha])             # its decodes dropped
             self.assertNotIn(alpha, self.api._listings)
             self.assertFalse(any(k[0] == alpha for k in self.api._natives))
             r = self.api.recordings(alpha)
             self.assertEqual((r["ok"], r["error"]), (False, "the recorder (USB port 9) cannot be used: "
                                                             "more than one recorder reports its connection"))
-            self.assertEqual(self.alpha.open_sessions, set())             # never reopened
+            self.assertEqual(self.sessions(alpha), set())                 # never reopened
             self.assertTrue(self.api.recordings(other)["ok"])            # the other recorder is untouched
         # Even when its own model's discovery fails at the same time, a rejected connection is dropped.
         self.alpha.unplug(alpha)

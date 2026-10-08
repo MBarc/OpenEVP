@@ -20,7 +20,7 @@ from . import bitstream
 from .config import LP, Config
 
 DLL_PATH = Path(__file__).resolve().parent / "lpec_core.dll"
-_ABI_VERSION = 3
+_ABI_VERSION = 4
 FRAME_SAMPLES = LP.frame      # LP's; a decode uses its tables' config.frame
 
 # Table order: the T_* enums in _lpec.c. "C" and "D" are the per-stage
@@ -32,6 +32,15 @@ _DOUBLE_TABLES = (
     "FFT_SIN_1536", "POST", "LSP_INIT", "DEFAULT_SHAPE",
 )
 _INT_TABLES = ("D", "PQ", "S2048", "S1536")
+
+
+# int report(int frames_done): non-zero stops the decode (lpec_decode returns STOPPED).
+_REPORT = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int)
+STOPPED = -2
+
+
+class Stopped(Exception):
+    """decode_packed's ``report`` asked to stop."""
 
 
 def _load() -> Optional[ctypes.CDLL]:
@@ -49,7 +58,7 @@ def _load() -> Optional[ctypes.CDLL]:
             ctypes.POINTER(ctypes.POINTER(ctypes.c_double)), ctypes.c_int,
             ctypes.POINTER(ctypes.POINTER(ctypes.c_int32)), ctypes.c_int,
             ctypes.POINTER(ctypes.c_int32), ctypes.c_int, ctypes.c_int,
-            ctypes.POINTER(ctypes.c_int16),
+            ctypes.POINTER(ctypes.c_int16), _REPORT,
         ]
         return lib
     except (OSError, AttributeError):
@@ -182,7 +191,7 @@ def _table_pointers(tables):
     return (dbufs, ibufs), dptrs, iptrs
 
 
-def decode_packed(tables, packed: array, nframes: int, prefix: int = 0) -> bytearray:
+def decode_packed(tables, packed: array, nframes: int, prefix: int = 0, report=None) -> bytearray:
     """Decode ``nframes`` packed frame records (``packed``, built with
     pack_frame) with a fresh decoder state.
 
@@ -190,7 +199,8 @@ def decode_packed(tables, packed: array, nframes: int, prefix: int = 0) -> bytea
     little-endian int16 PCM (the configuration's frame length per frame). The C core writes the
     PCM straight into that bytearray, so the output exists once; ``prefix``
     leaves room for a header (dvf_to_wav's 44-byte WAV header) without a
-    second copy.
+    second copy. ``report(frames_done)``, if given, is called every 64
+    frames; when it returns true the decode raises Stopped.
     """
     if _lib is None:
         raise RuntimeError(f"{DLL_PATH.name} is not available")
@@ -203,13 +213,16 @@ def decode_packed(tables, packed: array, nframes: int, prefix: int = 0) -> bytea
     if not len(packed):
         packed = array("i", [0])
     frame_buf = (ctypes.c_int32 * len(packed)).from_buffer(packed)
+    callback = _REPORT(lambda done: 1 if report(done) else 0) if report is not None else _REPORT()
     try:
         done = _lib.lpec_decode(cfg_array, len(cfg_array), dptrs, len(keep[0]), iptrs, len(keep[1]),
-                                frame_buf, len(packed), nframes, pcm)
+                                frame_buf, len(packed), nframes, pcm, callback)
     finally:
         # Release the buffer exports so ``out`` and ``packed`` can be
         # resized or freed by the caller.
         del pcm, frame_buf
+    if done == STOPPED:
+        raise Stopped("the decode was stopped")
     if done != nframes:
         raise RuntimeError(f"lpec_core: decoded {done} of {nframes} frames")
     return out

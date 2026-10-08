@@ -23,11 +23,13 @@ def make_table(messages):
         base = page * PAGE + offset
         t[base:base + len(data)] = data
 
+    rank = {slot: r for r, slot in enumerate(sorted(m[0] for m in messages))}
     for i, (slot, counter, start, length, date, owner, *mode) in enumerate(messages):
         mode = mode[0] if mode else 0x00
         put(0, i * 4, struct.pack(">HH", slot, 0x6000 | mode))
         put(2 + slot // 128, (slot % 128) * 4, struct.pack(">I", counter))
-        put(5 + slot // 64, (slot % 64) * 8, struct.pack(">II", start, (start + length - 1) | 0x80000000))
+        r = rank[slot]                       # one extent per message, in slot order
+        put(5 + r // 64, (r % 64) * 8, struct.pack(">II", start, (start + length - 1) | 0x80000000))
         entry = bytearray(b"\xff" * 512)
         entry[274:276] = b"\x03\x00" if mode == 0x00 else b"\x90\x00"
         name = owner.encode("latin-1")

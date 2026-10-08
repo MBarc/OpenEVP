@@ -92,37 +92,43 @@ def _module_for(dvf_bytes):
     return mod
 
 
+def _progress(progress):
+    """The progress keyword, only when there is one to give."""
+    return {"progress": progress} if progress is not None else {}
+
+
 def _cancelled(mod, e):
     stopped = getattr(mod, "Cancelled", None)
     return stopped is not None and isinstance(e, stopped)
 
 
-def dvf_to_wav(dvf_bytes, should_stop=None):
+def dvf_to_wav(dvf_bytes, should_stop=None, progress=None):
     """The WAV for a .dvf recording. ``should_stop``: a callable polled
-    during the decode; when it returns true, Cancelled is raised."""
+    during the decode; when it returns true, Cancelled is raised.
+    ``progress(fraction)``: told how far the decode is, 0 to 1."""
     mod = _module_for(dvf_bytes)
-    if should_stop is None:
+    if should_stop is None and progress is None:
         return mod.dvf_to_wav(dvf_bytes)
     try:
-        return mod.dvf_to_wav(dvf_bytes, should_stop=should_stop)
+        return mod.dvf_to_wav(dvf_bytes, should_stop=should_stop, **_progress(progress))
     except Exception as e:
         if _cancelled(mod, e):
             raise Cancelled(str(e)) from e
         raise
 
 
-def dvf_write_wav(dvf_bytes, f, should_stop=None):
+def dvf_write_wav(dvf_bytes, f, should_stop=None, progress=None):
     """dvf_to_wav written into ``f`` (a seekable binary file); returns its size.
     A decoder that can stream (LPEC ST) writes as it decodes, so a long
     recording is never held in memory; otherwise the WAV is made, then written."""
     mod = _module_for(dvf_bytes)
     write = getattr(mod, "dvf_write_wav", None)
     if write is None:
-        wav = dvf_to_wav(dvf_bytes, should_stop=should_stop)
+        wav = dvf_to_wav(dvf_bytes, should_stop=should_stop, progress=progress)
         f.write(wav)
         return len(wav)
     try:
-        return write(dvf_bytes, f, should_stop=should_stop)
+        return write(dvf_bytes, f, should_stop=should_stop, **_progress(progress))
     except Exception as e:
         if _cancelled(mod, e):
             raise Cancelled(str(e)) from e

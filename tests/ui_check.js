@@ -3536,6 +3536,42 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext("showLibrary()", context);
   await settle();
   assert.strictEqual(vm.runInContext("S.view", context), "library");
+
+  // ---- Opening a recording: the ghost after a short delay, its stage and time left, its own reports only ----
+  fakeTimers();
+  const realPerf = context.performance;
+  context.performance = { now: () => clock.now };
+  vm.runInContext('openingStart("dev/A/1", "C-001")', context);
+  assert.ok($("player-opening").hidden, "not at once: a quick open never flashes it");
+  await advance(500);
+  assert.ok(!$("player-opening").hidden);
+  assert.strictEqual($("opening-title").textContent, "Opening C-001…");
+  assert.strictEqual($("opening-fill").className, "unknown");
+  window.onBackendEvent("open-progress", { job: "dev/A/1", stage: "download", fraction: 0.35 });
+  assert.deepStrictEqual([$("opening-detail").textContent, $("opening-fill").style.width, $("opening-fill").className],
+                         ["Reading from the recorder… 35%", "35%", ""]);
+  window.onBackendEvent("open-progress", { job: "dev/A/1", stage: "convert", fraction: 0 });
+  clock.now += 60000;
+  window.onBackendEvent("open-progress", { job: "dev/A/1", stage: "convert", fraction: 0.25 });
+  assert.strictEqual($("opening-detail").textContent, "Converting… 25%, about 3 min left");
+  window.onBackendEvent("open-progress", { job: "dev/B/2", stage: "convert", fraction: 0.9 });   // an older open's: ignored
+  assert.strictEqual($("opening-detail").textContent, "Converting… 25%, about 3 min left");
+  window.onBackendEvent("open-progress", { job: "dev/A/1", stage: "finish", fraction: 1 });
+  assert.strictEqual($("opening-detail").textContent, "Almost ready…");
+  vm.runInContext('openingDone("dev/B/2")', context);                                       // not this one's
+  assert.ok(!$("player-opening").hidden);
+  vm.runInContext('openingDone("dev/A/1")', context);
+  assert.ok($("player-opening").hidden);
+  // Open audio file: nothing while its file dialog is up; the ghost comes with the first report.
+  vm.runInContext('openingStart("file", "", true)', context);
+  await advance(2000);
+  assert.ok($("player-opening").hidden);
+  window.onBackendEvent("open-progress", { job: "file", stage: "convert", fraction: 0.1 });
+  assert.ok(!$("player-opening").hidden);
+  assert.strictEqual($("opening-title").textContent, "Opening the file…");
+  vm.runInContext("openingEnd()", context);
+  context.performance = realPerf;
+  realTimers();
   finished = true;
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });
