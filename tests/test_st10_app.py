@@ -71,7 +71,7 @@ class St10AppTests(St10Base):
     """With the LPEC ST decoder: playable, exported as WAV, marked and backed up."""
 
     def test_listed_as_an_st10_and_playable(self):
-        self.assertEqual(self.first_rows[ID]["model"], "Sony ICD-ST25")      # before it was opened
+        self.assertEqual(self.first_rows[ID]["model"], "Sony ICD-ST10")      # named when it is plugged in
         r = self.api.recordings(ID)
         self.assertTrue(r["ok"], r)
         self.assertEqual((r["model"], r["model_id"]), ("Sony ICD-ST10", "sony-icd-st10"))
