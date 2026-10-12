@@ -7,8 +7,11 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from fixtures import DATE, FakeRecorderDevice  # noqa: E402
 from sony_icd import policy  # noqa: E402
-from sony_icd.protocol import Recorder, RecorderStuck, folder_counts  # noqa: E402
+from sony_icd.protocol import Recorder, RecorderError, RecorderStuck, folder_counts  # noqa: E402
 
+UNCLEAR = ("A-002 may have been deleted; the recorder stopped answering. Unplug it, plug it back in, "
+           "and check the folder before deleting again.")
+BUSY = "Something else is using the recorder; try again when it finishes."
 THREE = {1: [(0, 1, 0x1000, 3000, DATE, "X"), (1, 2, 0x2000, 4000, DATE, "X"), (2, 3, 0x3000, 5000, DATE, "X")]}
 
 
@@ -30,7 +33,7 @@ class PolicyTests(unittest.TestCase):
     def test_everything_else_is_blocked(self):
         good = bytearray(policy.delete_frame(1, 2))
         bad = []
-        for mode in (0x00, 0x02, 0x03, 0x04):          # folder / whole-recorder erase and the rest
+        for mode in (0x00, 0x02, 0x03, 0x04):          # every other mode
             f = bytearray(good); f[14] = mode; bad.append(f)
         f = bytearray(good); f[18:] = bytes(99); bad.append(f)                       # no flag
         f = bytearray(good); f[18] = 1; bad.append(f)                                # two flags
@@ -171,6 +174,58 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(str(cm.exception), "After deleting A-002 the recorder lists 1 recording in folder A, "
                                             "not 2. Check the folder before deleting more.")
 
+    def test_a_delete_that_goes_unanswered_says_it_may_have_happened(self):
+        import sony_icd.protocol as p
+        s = session()
+        s.rec.dev.stuck_on_delete = True
+        picked = ident(s, "A", 2)
+        old = p.DELETE_TIMEOUT_S
+        p.DELETE_TIMEOUT_S = 0.05
+        try:
+            with self.assertRaises(RecorderError) as cm:
+                s.delete("A", 2, **picked)
+        finally:
+            p.DELETE_TIMEOUT_S = old
+        self.assertIs(type(cm.exception), RecorderError)
+        self.assertEqual(str(cm.exception), UNCLEAR)
+        self.assertEqual(s.rec.dev.delete_calls, [(1, 2)])                   # sent once, never retried
+
+    def test_a_recorder_lost_during_the_after_check_says_it_may_have_happened(self):
+        import sony_icd.session as ss
+        s = session()
+        picked = ident(s, "A", 2)
+        real = ss.folder_counts
+        calls = []
+
+        def counts(reply):
+            calls.append(1)
+            if len(calls) > 1:
+                raise RecorderError("gone")
+            return real(reply)
+        ss.folder_counts = counts
+        try:
+            with self.assertRaises(RecorderError) as cm:
+                s.delete("A", 2, **picked)
+        finally:
+            ss.folder_counts = real
+        self.assertEqual(str(cm.exception), UNCLEAR)
+
+    def test_the_recorder_dropping_a_different_one_is_reported(self):
+        s = session()
+        picked = ident(s, "A", 3)
+        dev = s.rec.dev
+        real = dev.control_out
+
+        def drops_the_second(rt, rq, v, i, data, *rest):
+            if policy.delete_frame_ok(data):
+                data = policy.delete_frame(1, 2)           # the fake removes A-002, not A-003
+            real(rt, rq, v, i, data, *rest)
+        dev.control_out = drops_the_second
+        with self.assertRaises(ValueError) as cm:
+            s.delete("A", 3, **picked)
+        self.assertEqual(str(cm.exception), "After deleting A-003 the recorder lists 2 recordings in folder A, "
+                                            "not 2. Check the folder before deleting more.")
+
 
 from openevp.recorders import base, get as model  # noqa: E402
 from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
@@ -244,6 +299,66 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(self.dev.folders[1]), n - 2)
         self.assertIn(test_backend.ID, self.server.forgotten)
         self.assertEqual(self.busy_at_end, [False])          # the page hears it is over only once the lock is free
+
+    def test_an_unclear_delete_reports_it_and_the_recorder_needs_a_replug(self):
+        import sony_icd.protocol as p
+        self.dev.stuck_on_delete = True
+        old = p.DELETE_TIMEOUT_S
+        p.DELETE_TIMEOUT_S = 0.05
+        try:
+            events = self.run_job(self.items(2))
+        finally:
+            p.DELETE_TIMEOUT_S = old
+        name, ev = events[-1]
+        self.assertEqual(name, "recorder-delete-failed")
+        self.assertEqual(ev["error"], UNCLEAR)
+        self.assertEqual(self.dev.delete_calls, [(1, 2)])
+        rows = {d["id"]: d for d in self.api.devices()["devices"]}
+        self.assertEqual(rows[test_backend.ID]["state"], "needs_replug")
+
+    def test_stopped_by_the_app_closing_mid_job(self):
+        real = self.api._manager.with_session
+
+        def then_stop(device_id, fn):
+            out = real(device_id, fn)
+            self.api._stop.set()                             # the app closes after the first delete
+            return out
+        items = self.items(1, 2)
+        self.api._manager.with_session = then_stop
+        events = self.run_job(items)
+        self.assertEqual(self.dev.delete_calls, [(1, 2)])
+        name, ev = events[-1]
+        self.assertEqual((name, ev["error"], ev["deleted"]), ("recorder-delete-failed",
+                                                              "Stopped because the app is closing.", ["A-002"]))
+
+    def test_the_caches_of_that_device_are_gone_after_a_job(self):
+        self.items(1)
+        self.api._natives[(test_backend.ID, "A", 1)] = object()
+        self.assertIn(test_backend.ID, self.api._listings)
+        self.run_job(self.items(1))
+        self.assertNotIn(test_backend.ID, self.api._listings)
+        self.assertFalse([k for k in self.api._natives if k[0] == test_backend.ID])
+
+    def test_a_job_over_two_folders_goes_highest_first_in_each(self):
+        self.api._listings.pop(test_backend.ID)
+        self.api._manager._devices[test_backend.ID].session._session._tables.clear()      # B was read empty at setUp
+        self.dev.folders[2] = [(0, 200, 0x5000, 3000, DATE, "Casey"), (1, 300, 0x6000, 3000, DATE, "Casey")]
+        rows = {}
+        for f in self.api.recordings(test_backend.ID)["folders"]:
+            for r in f["recordings"]:
+                rows[(f["id"], r["number"])] = r["key"]
+        items = [{"folder": f, "number": n, "key": rows[(f, n)]} for f, n in (("A", 1), ("B", 1), ("A", 2), ("B", 2))]
+        events = self.run_job(items)
+        self.assertEqual(self.dev.delete_calls, [(1, 2), (1, 1), (2, 2), (2, 1)])
+        self.assertEqual(events[-1][0], "recorder-delete-done")
+
+    def test_a_backup_running_refuses_deleting(self):
+        self.api.backing_up = lambda: True
+        self.assertEqual(self.api.delete_info_recorder(test_backend.ID, self.items(1))["error"], BUSY)
+        r = self.api.delete_from_recorder(test_backend.ID, self.items(1), 7)
+        self.assertEqual((r["ok"], r["error"]), (False, BUSY))
+        self.assertEqual(self.dev.delete_calls, [])
+        self.assertFalse(self.api._busy.locked())
 
     def test_a_stale_key_is_refused_before_anything(self):
         items = self.items(1)

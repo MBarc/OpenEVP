@@ -26,7 +26,7 @@ class SonyST10(base.Model):
     model_id = "sony-icd-st10"
     name = "Sony ICD-ST10"
     native = formats.DVF
-    can_delete = True               # tested 2026-10-12 (dve-re/st10/ERASE.md section 7)
+    can_delete = True               # tested on an ICD-ST10, 2026-10-12
 
     def open(self, device):
         return open_session(self, device)

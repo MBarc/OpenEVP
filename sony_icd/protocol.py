@@ -14,13 +14,12 @@ Replies echo the command's opcode: the acknowledgement of a bulk command echoes
 it unchanged; the final reply replaces its 0xFF byte with 0x00
 (091001ff -> 09100100, 11ff0002 -> 11000002).
 
-Safety: the only thing ever sent to the recorder is a command frame, and the
-USB layer itself (usb.Device, enforcing sony_icd/policy.py) refuses any control OUT that
-is not one of the exact frames Digital Voice Editor sends to list and download
-recordings - prefix, opcode, frame length and arguments are all checked there,
-so even direct calls to Recorder.dev cannot send anything else. _send() checks
-the same rules earlier to give a clearer error. The recorder's command set also
-contains erase/delete/firmware operations; nothing here can send them.
+Safety: control OUT is a whitelisted 24- or 32-byte command frame or the one 117-byte
+single-recording delete frame (policy.delete_frame_ok); replies are 16..MAX_REPLY bytes or the
+delete's 14 bytes. The USB layer itself (usb.Device, enforcing sony_icd/policy.py) refuses any
+other control OUT - prefix, opcode, frame length and arguments are all checked there, so even
+direct calls to Recorder.dev cannot send anything else. _send() checks the same rules earlier to
+give a clearer error. delete_message is the only write and is never retried.
 
 Timing: the recorder abandons a transaction if the host is slow to take the
 next step (tens of ms), after which it answers 0f 01 until its USB cable is

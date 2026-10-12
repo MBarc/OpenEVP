@@ -2245,11 +2245,13 @@ function updateExport() {
 // ---- Delete from recorder: the ticked recordings, after a confirmation that flags unsaved ones ----
 async function deleteFromRecorderDialog(items) {
   if (!items.length || !S.canDelete || S.exporting || S.clips.running || S.deleteAsking) return;
+  const device = S.device;
   S.deleteAsking = true;                       // one question at a time
   status("Checking which are saved on this PC…");
   let info;
-  try { info = await api().delete_info_recorder(S.device, items); } finally { S.deleteAsking = false; }
+  try { info = await api().delete_info_recorder(device, items); } finally { S.deleteAsking = false; }
   status("");
+  if (S.device !== device || S.view !== "device") return;   // moved on while it checked
   if (!info.ok) { showError(info); return; }
   const list = document.createElement("ul");
   for (const it of info.items.slice(0, DELETE_NAMES_SHOWN)) {
@@ -2275,10 +2277,10 @@ async function deleteFromRecorderDialog(items) {
     body, ok: "Delete from recorder",
     run: async () => {
       const job = ++S.job;
-      S.deleteDevice = S.device;               // the outcome only re-lists this recorder if it is still shown
-      if (S.playing && S.playing.startsWith(JSON.stringify([S.device]).slice(0, -1) + ",")) unloadPlayer();   // key()'s own prefix
+      S.deleteDevice = device;               // the outcome only re-lists this recorder if it is still shown
+      if (S.playing && S.playing.startsWith(JSON.stringify([device]).slice(0, -1) + ",")) unloadPlayer();   // key()'s own prefix
       S.exporting = true; updateExport(); banner("");
-      const r = await api().delete_from_recorder(S.device, info.items.map((it) => ({ folder: it.folder, number: it.number, key: it.key })), job);
+      const r = await api().delete_from_recorder(device, info.items.map((it) => ({ folder: it.folder, number: it.number, key: it.key })), job);
       if (!r.ok) { S.exporting = false; S.deleteDevice = null; updateExport(); return errorText(r); }
       progress(0, info.items.length);
       return null;
@@ -2333,7 +2335,8 @@ window.onBackendEvent = (event, p) => {
     const id = S.deleteDevice, folder = S.folder;
     S.deleteDevice = null;
     const shown = S.view === "device" && S.device === id;
-    if (shown) { leaveDevice(); var relisted = openDevice(id); }     // list it again (this also clears the ticks)
+    let relisted = null;
+    if (shown) { leaveDevice(); relisted = openDevice(id); }     // list it again (this also clears the ticks)
     else { for (const [k, i] of [...S.selected]) if (i.device === id) S.selected.delete(k); updateExport(); }   // moved on: leave them there
     // (openDevice clears the banner as it starts, so the message comes after)
     if (event === "recorder-delete-done") banner(gone, "ok");

@@ -3629,6 +3629,20 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     assert.strictEqual(vm.runInContext("S.view", context), "library");
     assert.strictEqual(listed, 0);
     api.recordings = rec;
+    // The recorder shown changed while the question was pending: no dialog for the old one.
+    {
+      let release;
+      api.delete_info_recorder = () => new Promise((res) => { release = () => res({ ok: true, items: [
+        { folder: "A", number: 1, key: "0:1:2", label: "A-001", seconds: 20, saved: true }] }); });
+      vm.runInContext(`S.view = "device";`, context);
+      const pending = context.deleteFromRecorderDialog([{ folder: "A", number: 1, key: "0:1:2" }]);
+      vm.runInContext(`S.device = "other";`, context);
+      release();
+      await pending;
+      assert.ok($("folder-dialog").hidden, "no dialog for a recorder that is no longer shown");
+      assert.strictEqual($("status").textContent, "");
+      vm.runInContext(`S.device = "t1";`, context);
+    }
     api.delete_info_recorder = askInfo;
     vm.runInContext(`S.view = "device";`, context);
     vm.runInContext(`S.canDelete = false; updateExport();`, context);

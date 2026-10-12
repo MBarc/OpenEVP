@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from . import dvf
 from .folder import parse
 from .protocol import Recorder, RecorderError, folder_counts
+from .usb import UsbError
 
 LETTERS = "ABCDE"
 
@@ -109,8 +110,8 @@ class RecorderSession:
         """Delete recording ``number`` of folder ``letter`` from the recorder, if it is still the
         one the user picked (slot, start counter, length). Re-reads the counts and the table
         before (nothing is sent if they differ) and after (the count must be one lower and the
-        next recording must have moved up). Returns its label. Raises ValueError with a sentence
-        for the user when it refuses; RecorderStuck when the recorder stops answering."""
+        others unchanged). Returns its label. Raises ValueError with a sentence
+        for the user when it refuses; RecorderError when the outcome is unclear."""
         if letter not in LETTERS:
             raise ValueError(f"no folder {letter!r}")
         fi = LETTERS.index(letter) + 1
@@ -121,19 +122,27 @@ class RecorderSession:
         m = msgs[number - 1] if 1 <= number <= len(msgs) else None
         if count != len(msgs) or m is None or (m.slot, m.start_counter, m.length) != (slot, counter, length):
             raise ValueError(f"{label} changed on the recorder; refresh and try again.")
-        after = msgs[number] if number < len(msgs) else None
+        unclear = (f"{label} may have been deleted; the recorder stopped answering. Unplug it, "
+                   "plug it back in, and check the folder before deleting again.")
         try:
             status = self.rec.delete_message(fi, number)
+        except (RecorderError, UsbError) as e:      # the frame may have gone out: outcome unknown
+            raise RecorderError(unclear) from e
         finally:
             self._forget(letter)
         if status == 1:
             raise ValueError("Replace the recorder's batteries, then try again.")
         if status:
             raise ValueError(f"The recorder refused (status {status}). Nothing else was deleted.")
-        now = self.messages(letter)
-        moved = after is None or (len(now) >= number and (now[number - 1].start_counter, now[number - 1].length)
-                                  == (after.start_counter, after.length))
-        if folder_counts(self.rec.target_status())[fi] != count - 1 or len(now) != count - 1 or not moved:
+        try:
+            now = self.messages(letter)
+            now_count = folder_counts(self.rec.target_status())[fi]
+        except (RecorderError, UsbError) as e:
+            raise RecorderError(unclear) from e
+
+        def ident(ms):
+            return [(x.start_counter, x.length) for x in ms]
+        if now_count != count - 1 or len(now) != count - 1 or ident(now) != ident(msgs[:number - 1] + msgs[number:]):
             raise ValueError(f"After deleting {label} the recorder lists {len(now)} recording"
                              f"{'' if len(now) == 1 else 's'} in folder {letter}, not {count - 1}. "
                              "Check the folder before deleting more.")

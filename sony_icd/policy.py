@@ -4,8 +4,7 @@ It lives in its own module (not supplied by callers) so that no code path -
 including direct use of usb.Device - can send the recorder anything except the
 exact command frames Digital Voice Editor sends to list and download
 recordings, and one write: DeleteMessage for exactly one recording (mode 01,
-one flag; see delete_frame_ok). Erasing a folder or the whole recorder,
-firmware upgrade and every other write never pass these checks.
+one flag; see delete_frame_ok). Every other write never passes these checks.
 
 Scope: this covers every transfer the program itself makes. Standard USB
 lifecycle requests made by libusb/the OS (claim/release of interface 0, e.g. a
@@ -49,10 +48,9 @@ BLOCK_RAW = 1056
 MAX_BLOCKS = 32 * 1024 * 1024 // 1024   # the ST25 has 32 MB of flash
 MAX_REPLY = 4096
 
-# DeleteMessage (icdcomm2 0x10002e10; dve-re/st10/ERASE.md): the prefix, 12 FF <mode> 00, the folder
-# (u16 BE, 1..5), 99 flag bytes; flags[n-1] = 1 deletes message number n. Only mode 01 with exactly
-# one flag is ever allowed: mode 02 erases the folder and 04 the whole recorder. Its reply is 14 bytes:
-# the reply prefix, 12, then the status (0 OK, 1 batteries).
+# DeleteMessage: the prefix, 12 FF 01 00, the folder (u16 BE, 1..5), 99 flag bytes; flags[n-1] = 1
+# deletes message number n. Only mode 01 with exactly one flag is ever allowed; every other mode
+# and shape is refused. Its reply is 14 bytes: the reply prefix, 12, then the status (0 OK, 1 batteries).
 DELETE_OPCODE = bytes.fromhex("12ff0100")
 DELETE_FLAGS = 99
 DELETE_FRAME_LEN = 12 + 4 + 2 + DELETE_FLAGS     # 117

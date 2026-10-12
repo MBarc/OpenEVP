@@ -2702,7 +2702,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
     def delete_info_recorder(self, device_id, items):
         """What the confirmation says: each recording's label, length and whether a .dvf with the
         same audio is already somewhere in the Save folder ("saved")."""
-        if self._busy.locked():
+        if self._busy.locked() or self.backing_up():
             return _fail(BUSY_RECORDER)
         try:
             work = self._delete_work(device_id, items)
@@ -2737,7 +2737,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         if isinstance(work, dict):
             return work
         work.sort(key=lambda fr: (fr[0]["id"], -fr[1]["number"]))     # highest first: the others keep their numbers
-        if not self._busy.acquire(blocking=False):
+        if self.backing_up() or not self._busy.acquire(blocking=False):
             return _fail(BUSY_RECORDER)
         thread = threading.Thread(target=self._delete_job, args=(device_id, work, job), name="recorder-delete")
         with self._workers_lock:
