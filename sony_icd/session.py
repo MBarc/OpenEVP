@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 from . import dvf
 from .folder import parse
-from .protocol import Recorder, RecorderError
+from .protocol import Recorder, RecorderError, folder_counts
 
 LETTERS = "ABCDE"
 
@@ -104,6 +104,45 @@ class RecorderSession:
                 dl = Download(label, name, error=str(e))
         self._downloads[key] = dl
         return dl
+
+    def delete(self, letter, number, slot, counter, length):
+        """Delete recording ``number`` of folder ``letter`` from the recorder, if it is still the
+        one the user picked (slot, start counter, length). Re-reads the counts and the table
+        before (nothing is sent if they differ) and after (the count must be one lower and the
+        next recording must have moved up). Returns its label. Raises ValueError with a sentence
+        for the user when it refuses; RecorderStuck when the recorder stops answering."""
+        if letter not in LETTERS:
+            raise ValueError(f"no folder {letter!r}")
+        fi = LETTERS.index(letter) + 1
+        label = f"{letter}-{number:03d}"
+        self._forget(letter)
+        count = folder_counts(self.rec.target_status())[fi]
+        msgs = self.messages(letter)
+        m = msgs[number - 1] if 1 <= number <= len(msgs) else None
+        if count != len(msgs) or m is None or (m.slot, m.start_counter, m.length) != (slot, counter, length):
+            raise ValueError(f"{label} changed on the recorder; refresh the list and try again.")
+        after = msgs[number] if number < len(msgs) else None
+        try:
+            status = self.rec.delete_message(fi, number)
+        finally:
+            self._forget(letter)
+        if status == 1:
+            raise ValueError("The recorder says its batteries are low. Replace them, then try again.")
+        if status:
+            raise ValueError(f"The recorder refused (status {status}). Nothing else was deleted.")
+        now = self.messages(letter)
+        moved = after is None or (len(now) >= number and (now[number - 1].start_counter, now[number - 1].length)
+                                  == (after.start_counter, after.length))
+        if folder_counts(self.rec.target_status())[fi] != count - 1 or len(now) != count - 1 or not moved:
+            raise ValueError(f"After deleting {label} the recorder now lists {len(now)} recording"
+                             f"{'' if len(now) == 1 else 's'} in folder {letter}; nothing more was deleted.")
+        return label
+
+    def _forget(self, letter):
+        """Drop a folder's cached table and downloads: numbers shift after a delete."""
+        self._tables.pop(letter, None)
+        for key in [k for k in self._downloads if k[0] == letter]:
+            del self._downloads[key]
 
     def close(self):
         self.rec.close()

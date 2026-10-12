@@ -84,5 +84,66 @@ class ProtocolTests(unittest.TestCase):
             p.DELETE_TIMEOUT_S = old
 
 
+from sony_icd.session import RecorderSession  # noqa: E402
+
+
+def session(folders=THREE):
+    s = RecorderSession(recorder(folders))
+    s.connect()
+    return s
+
+
+def ident(s, letter, number):
+    m = s.messages(letter)[number - 1]
+    return dict(slot=m.slot, counter=m.start_counter, length=m.length)
+
+
+class SessionTests(unittest.TestCase):
+    def test_deletes_the_one_picked_and_forgets_the_old_listing(self):
+        s = session()
+        picked = ident(s, "A", 2)
+        s.download("A", 3)                                  # cached under its old number
+        self.assertEqual(s.delete("A", 2, **picked), "A-002")
+        self.assertEqual([m.start_counter for m in s.messages("A")], [1, 3])
+        self.assertEqual(s.rec.dev.voice_calls[-1:], [(1, 3)])
+        s.download("A", 2)                                  # read again, not the cached old A-002
+        self.assertEqual(s.rec.dev.voice_calls[-1], (1, 2))
+
+    def test_a_changed_recording_is_refused_with_nothing_sent(self):
+        s = session()
+        picked = ident(s, "A", 2)
+        picked["length"] += 1
+        with self.assertRaisesRegex(ValueError, "A-002 changed on the recorder"):
+            s.delete("A", 2, **picked)
+        self.assertEqual(s.rec.dev.delete_calls, [])
+
+    def test_a_number_past_the_end_is_refused(self):
+        s = session()
+        with self.assertRaisesRegex(ValueError, "changed on the recorder"):
+            s.delete("A", 4, slot=3, counter=4, length=6000)
+        self.assertEqual(s.rec.dev.delete_calls, [])
+
+    def test_batteries_and_other_refusals(self):
+        for status, words in ((1, "batteries"), (3, "refused \\(status 3\\)")):
+            s = session()
+            s.rec.dev.delete_status = status
+            with self.assertRaisesRegex(ValueError, words):
+                s.delete("A", 2, **ident(s, "A", 2))
+
+    def test_a_result_that_is_not_one_fewer_is_reported(self):
+        s = session()
+        picked = ident(s, "A", 2)
+        dev = s.rec.dev
+        real = dev.control_out
+
+        def deletes_two(rt, rq, v, i, data, *rest):
+            real(rt, rq, v, i, data, *rest)
+            if policy.delete_frame_ok(data):
+                del dev.folders[1][-1]                      # the recorder lost one more
+        dev.control_out = deletes_two
+        with self.assertRaisesRegex(ValueError, "now lists 1 recording"):
+            s.delete("A", 2, **picked)
+
+
 if __name__ == "__main__":
     unittest.main()
