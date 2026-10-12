@@ -386,6 +386,7 @@ async function openDevice(id) {
   S.folders = r.folders;
   S.folder = (r.folders.find((f) => f.recordings.length) || r.folders[0] || {}).id ?? null;
   S.model = r.model; S.playable = !!r.playable; S.playReason = r.play_reason || ""; S.formats = r.formats || [];
+  S.canDelete = !!r.can_delete;
   // Opening a recorder can tell what it is (an ICD-ST10 is found as an ICD-ST25): relabel it now,
   // not at the next poll.
   const listed = S.devices.find((d) => d.id === id);
@@ -885,6 +886,12 @@ function loadLibraryView() {
 // every ticked one, if it is ticked) after the dialog (not while typing or in a dialog).
 function libraryKeys(e) {
   const L = S.lib;
+  if (e.key === "Delete" && S.view === "device" && !e.ctrlKey && !e.altKey && !e.metaKey && !typingIn(e.target)
+      && !document.querySelector(".modal:not([hidden])")) {
+    e.preventDefault();
+    deleteFromRecorderDialog(selectedItems());
+    return;
+  }
   if (S.view !== "library" || e.altKey || e.metaKey) return;
   if (typingIn(e.target) || document.querySelector(".modal:not([hidden])")) return;
   if (e.ctrlKey) {                             // Ctrl+C on a recording row: Copy file
@@ -2084,14 +2091,27 @@ async function exploreLibraryFolder(id) {
   if (!r.ok) showError(r);
 }
 
+// The recorder rows' menu: Delete from recorder, for the ticked ones when this row is ticked.
+function deviceMenuItems(target) {
+  const tr = target.closest && target.closest("#rows tr");
+  if (!tr || !tr.item) return [];
+  const ticked = S.selected.has(key(S.device, tr.item.folder, tr.item.number));
+  const items = ticked ? selectedItems() : [{ folder: tr.item.folder, number: tr.item.number, key: tr.item.key }];
+  return [{ label: "Delete from recorder…", disabled: !S.canDelete || S.exporting,
+            title: S.canDelete ? "" : "Not tested on this recorder model yet.",
+            run: () => deleteFromRecorderDialog(items) }];
+}
+
 function libraryMenuOpen() { return !$("context-menu").hidden; }
 
 function openLibraryMenu(e) {
-  if (S.view !== "library") return;
+  if (S.view !== "library" && S.view !== "device") return;
+  const device = S.view === "device" ? deviceMenuItems(e.target) : null;
+  if (device && !device.length) return;        // beside the recorder's rows: the browser's own menu
   e.preventDefault();                          // no browser menu over the library (text fields elsewhere keep theirs)
   closeLibraryMenu(false);
   const back = document.activeElement;
-  const items = libraryMenuItems(e.target);
+  const items = device || libraryMenuItems(e.target);
   if (!items.length) return;
   const menu = $("context-menu");
   for (const it of items) {
@@ -2178,7 +2198,8 @@ function renderRows() {
     if (S.playing === k) tr.className = "playing";
     const box = document.createElement("input");
     box.type = "checkbox"; box.checked = S.selected.has(k); box.disabled = !!r.problem;
-    const item = { device: S.device, folder: folder.id, number: r.number };
+    const item = { device: S.device, folder: folder.id, number: r.number, key: r.key };
+    tr.item = item;
     box.onclick = (e) => { e.stopPropagation(); box.checked ? S.selected.set(k, item) : S.selected.delete(k); updateExport(); };
     const no = typeof r.number === "number" ? String(r.number).padStart(3, "0") : String(r.number);
     // A recording whose own codec can't be played (e.g. a build without that codec's tables) is still saved; it says why.
@@ -2200,22 +2221,68 @@ $("all").onclick = () => {
   for (const r of folder ? folder.recordings : []) {
     if (r.problem) continue;
     const k = key(S.device, folder.id, r.number);
-    $("all").checked ? S.selected.set(k, { device: S.device, folder: folder.id, number: r.number }) : S.selected.delete(k);
+    $("all").checked ? S.selected.set(k, { device: S.device, folder: folder.id, number: r.number, key: r.key }) : S.selected.delete(k);
   }
   renderMain();
 };
 
 function selectedItems() {
   return [...S.selected.values()].filter((i) => i.device === S.device)
-    .map((i) => ({ folder: i.folder, number: i.number }));
+    .map((i) => ({ folder: i.folder, number: i.number, key: i.key }));
 }
 
 function updateExport() {
   const n = S.device && S.view === "device" ? selectedItems().length : 0;
   $("export").disabled = S.exporting || S.clips.running || n === 0;
+  const del = $("delete-recorder");
+  del.hidden = !(S.device && S.view === "device");
+  del.disabled = S.exporting || S.clips.running || n === 0 || !S.canDelete;
+  del.title = S.canDelete ? "Delete the ticked recordings from the recorder" : "Not tested on this recorder model yet.";
   if (S.exporting) return;                 // the button shows progress while exporting
   $("export").textContent = n ? `Export ${n} selected` : "Export selected";
 }
+
+// ---- Delete from recorder: the ticked recordings, after a confirmation that flags unsaved ones ----
+async function deleteFromRecorderDialog(items) {
+  if (!items.length || !S.canDelete || S.exporting) return;
+  status("Checking which are saved on this PC…");
+  const info = await api().delete_info_recorder(S.device, items);
+  status("");
+  if (!info.ok) { showError(info); return; }
+  const list = document.createElement("ul");
+  for (const it of info.items.slice(0, DELETE_NAMES_SHOWN)) {
+    const li = document.createElement("li");
+    li.textContent = it.seconds == null ? it.label : `${it.label} (${fmtTime(it.seconds)})`;
+    list.appendChild(li);
+  }
+  if (info.items.length > DELETE_NAMES_SHOWN) {
+    const li = document.createElement("li"); li.textContent = `and ${info.items.length - DELETE_NAMES_SHOWN} more`; list.appendChild(li);
+  }
+  const body = [list];
+  const unsaved = info.items.filter((it) => !it.saved).map((it) => it.label);
+  if (unsaved.length) {
+    const p = dialogText(`No .dvf copy found on this PC: ${unsaved.join(", ")}. ` +
+                         `${unsaved.length === 1 ? "It" : "They"} will be gone for good.`);
+    p.className = "dialog-warn";
+    body.push(p);
+  }
+  body.push(dialogText("This can't be undone. Copies already on this PC are not touched."));
+  const one = info.items.length === 1;
+  folderDialog({
+    title: one ? `Delete ${info.items[0].label} from the recorder?` : `Delete ${info.items.length} recordings from the recorder?`,
+    body, ok: "Delete from recorder",
+    run: async () => {
+      const job = ++S.job;
+      if (S.playing && S.playing.startsWith(JSON.stringify([S.device]).slice(0, -1) + ",")) unloadPlayer();   // key()'s own prefix
+      S.exporting = true; updateExport(); banner("");
+      const r = await api().delete_from_recorder(S.device, info.items.map((it) => ({ folder: it.folder, number: it.number, key: it.key })), job);
+      if (!r.ok) { S.exporting = false; updateExport(); return errorText(r); }
+      progress(0, info.items.length);
+      return null;
+    },
+  });
+}
+$("delete-recorder").onclick = () => deleteFromRecorderDialog(selectedItems());
 
 $("dest").onclick = async () => {
   const d = await api().choose_destination();
@@ -2255,6 +2322,17 @@ window.onBackendEvent = (event, p) => {
   if (event.startsWith("library-")) { libraryEvent(event, p); return; }                           // nor these
   if (event.startsWith("clips-")) { clipsEvent(event, p); return; }                               // a clips job's own
   if (event.startsWith("import-")) { liveJobEvent(event, p); return; }                            // live.js
+  if (event.startsWith("recorder-delete-")) {
+    if (p.job !== S.job) return;
+    if (event === "recorder-delete-progress") { progress(p.done, p.total); status(`Deleting ${p.label}… (${p.done + 1} of ${p.total})`); return; }
+    S.exporting = false; progress(0, null); status("");
+    const gone = p.deleted.length ? `Deleted ${p.deleted.length === 1 ? p.deleted[0] : plural(p.deleted.length, "recording")} from the recorder.` : "";
+    const id = S.device;                       // list the recorder again (this also clears the ticks)
+    leaveDevice(); openDevice(id);             // (it clears the banner as it starts, so the message comes after)
+    if (event === "recorder-delete-done") banner(gone, "ok");
+    else banner([gone, `Stopped: ${p.error}`, p.advice].filter(Boolean).join(" "), "warn");
+    return;
+  }
   if (p.job !== S.job) return;
   if (event === "export-progress") {
     $("export").textContent = `Exporting ${p.done} of ${p.total}…`;

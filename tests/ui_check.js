@@ -3572,6 +3572,32 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   vm.runInContext("openingEnd()", context);
   context.performance = realPerf;
   realTimers();
+  // Delete from recorder: the confirmation flags the unsaved one, Cancel has the focus, OK sends both items.
+  {
+    listing.t1 = { ...listing["2-1@3"], can_delete: true };       // a recorder that can delete
+    vm.runInContext("S.exporting = false; S.devices = [{ id: 't1', model: 'Fake', model_id: 'x' }];", context);
+    await context.openDevice("t1");
+    const sent = [];
+    api.delete_info_recorder = async () => ({ ok: true, items: [
+      { folder: "A", number: 2, key: "1:2:3", label: "A-002", seconds: 5, saved: false },
+      { folder: "A", number: 1, key: "0:1:2", label: "A-001", seconds: 20, saved: true }] });
+    api.delete_from_recorder = async (device, items, job) => { sent.push([device, items, job]); return { ok: true, job }; };
+    vm.runInContext(`S.canDelete = true; S.view = "device";`, context);
+    await context.deleteFromRecorderDialog([{ folder: "A", number: 2, key: "1:2:3" }, { folder: "A", number: 1, key: "0:1:2" }]);
+    assert.strictEqual($("folder-dialog-title").textContent, "Delete 2 recordings from the recorder?");
+    assert.ok($("folder-dialog-body").textContent.includes("No .dvf copy found on this PC: A-002. It will be gone for good."));
+    assert.strictEqual(document.activeElement, $("folder-dialog-cancel"));
+    await context.folderDialogOk();
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(sent[0][1])), [{ folder: "A", number: 2, key: "1:2:3" }, { folder: "A", number: 1, key: "0:1:2" }]);
+    const job = vm.runInContext("S.job", context);
+    window.onBackendEvent("recorder-delete-progress", { job, done: 0, total: 2, label: "A-002" });
+    assert.strictEqual($("status").textContent, "Deleting A-002… (1 of 2)");
+    window.onBackendEvent("recorder-delete-done", { job, deleted: ["A-002", "A-001"] });
+    assert.strictEqual($("banner-text").textContent, "Deleted 2 recordings from the recorder.");
+    await new Promise((r) => setImmediate(r));
+    vm.runInContext(`S.canDelete = false; updateExport();`, context);
+    assert.strictEqual($("delete-recorder").title, "Not tested on this recorder model yet.");
+  }
   finished = true;
   console.log("ok");
 })().catch((e) => { console.error(e); process.exit(1); });

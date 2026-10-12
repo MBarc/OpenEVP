@@ -112,6 +112,7 @@ tr.lib-folder.drop-target td { background: var(--accent-soft); box-shadow: inset
 #folder-dialog-name[hidden], #folder-dialog-body[hidden], #folder-dialog-error[hidden] { display: none; }
 #folder-dialog-body { margin-bottom: 10px; overflow-wrap: anywhere; }
 #folder-dialog-body ul { margin: 6px 0; padding-left: 20px; }
+#folder-dialog-body .dialog-warn { color: var(--warn); font-weight: 600; }
 #folder-dialog-error { color: var(--warn); background: var(--warn-bg); margin: 8px 0 0; padding: 4px 8px; border-radius: 4px; }
 .folder-picker { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: 4px; background: var(--bg); }
 .folder-pick { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--text);
