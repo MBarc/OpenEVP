@@ -3,8 +3,9 @@
 It lives in its own module (not supplied by callers) so that no code path -
 including direct use of usb.Device - can send the recorder anything except the
 exact command frames Digital Voice Editor sends to list and download
-recordings. The recorder's command set also contains erase/delete/firmware
-upgrade; none of those frames pass these checks.
+recordings, and one write: DeleteMessage for exactly one recording (mode 01,
+one flag; see delete_frame_ok). Erasing a folder or the whole recorder,
+firmware upgrade and every other write never pass these checks.
 
 Scope: this covers every transfer the program itself makes. Standard USB
 lifecycle requests made by libusb/the OS (claim/release of interface 0, e.g. a
@@ -48,6 +49,34 @@ BLOCK_RAW = 1056
 MAX_BLOCKS = 32 * 1024 * 1024 // 1024   # the ST25 has 32 MB of flash
 MAX_REPLY = 4096
 
+# DeleteMessage (icdcomm2 0x10002e10; dve-re/st10/ERASE.md): the prefix, 12 FF <mode> 00, the folder
+# (u16 BE, 1..5), 99 flag bytes; flags[n-1] = 1 deletes message number n. Only mode 01 with exactly
+# one flag is ever allowed: mode 02 erases the folder and 04 the whole recorder. Its reply is 14 bytes:
+# the reply prefix, 12, then the status (0 OK, 1 batteries).
+DELETE_OPCODE = bytes.fromhex("12ff0100")
+DELETE_FLAGS = 99
+DELETE_FRAME_LEN = 12 + 4 + 2 + DELETE_FLAGS     # 117
+DELETE_REPLY_LEN = 14
+
+
+def delete_frame(folder, number):
+    """The DeleteMessage frame for message ``number`` (1..99) of folder 1..5."""
+    if folder not in GET_VOICE_FOLDERS or not 1 <= number <= DELETE_FLAGS:
+        raise ValueError(f"no message {number} in folder {folder}")
+    flags = bytearray(DELETE_FLAGS)
+    flags[number - 1] = 1
+    return FRAME_PREFIX + DELETE_OPCODE + struct.pack(">H", folder) + bytes(flags)
+
+
+def delete_frame_ok(frame):
+    """True only for a delete_frame(): one recording, never a folder or the recorder."""
+    frame = bytes(frame)
+    if len(frame) != DELETE_FRAME_LEN or frame[:16] != FRAME_PREFIX + DELETE_OPCODE:
+        return False
+    folder = struct.unpack(">H", frame[16:18])[0]
+    flags = frame[18:]
+    return folder in GET_VOICE_FOLDERS and flags.count(1) == 1 and flags.count(0) == DELETE_FLAGS - 1
+
 
 def args_ok(words):
     """Exact argument shapes Digital Voice Editor uses for each command."""
@@ -77,16 +106,17 @@ def frame_ok(frame):
 
 
 def allow_out(request_type, request, value, index, data):
-    """The only OUT transfer ever allowed: a whitelisted command frame."""
+    """The only OUT transfers ever allowed: a whitelisted command frame, or one delete_frame()."""
     return (request_type == REQTYPE_OUT and request == REQ_COMMAND and value == WVALUE
-            and index == 0 and frame_ok(data))
+            and index == 0 and (frame_ok(data) or delete_frame_ok(data)))
 
 
 def allow_in(request_type, request, value, index, length):
-    """Only the status poll and the reply read (both device-to-host)."""
+    """Only the status poll and the reply read (both device-to-host); a delete's reply is 14 bytes."""
     if request_type != REQTYPE_IN or value != WVALUE or index != 0:
         return False
-    return (request == REQ_STATUS and length == 4) or (request == REQ_REPLY and 16 <= length <= MAX_REPLY)
+    return (request == REQ_STATUS and length == 4) or (
+        request == REQ_REPLY and (16 <= length <= MAX_REPLY or length == DELETE_REPLY_LEN))
 
 
 def allow_bulk_in(endpoint):

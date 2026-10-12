@@ -32,7 +32,7 @@ import time
 
 from .usb import Device, LIBUSB_ERROR_TIMEOUT
 
-from .policy import (BLOCK_RAW, CMD_DEVICE_INFO, CMD_FOLDER_INFO, CMD_GET_VOICE_BASE,  # noqa: F401
+from .policy import (BLOCK_RAW, DELETE_REPLY_LEN, delete_frame, CMD_DEVICE_INFO, CMD_FOLDER_INFO, CMD_GET_VOICE_BASE,  # noqa: F401
                      CMD_INFO_03, CMD_READ_BLOCK, CMD_TARGET_STATUS, EP_BULK_IN, FRAME_PREFIX,
                      MAX_BLOCKS, REQ_COMMAND, REQ_REPLY, REQ_STATUS, REQTYPE_IN, REQTYPE_OUT,
                      WVALUE, frame_ok, get_voice_opcode, is_get_voice)
@@ -41,6 +41,7 @@ from .policy import args_ok as _args_ok
 VID, PID = 0x054C, 0x0103
 STATUS_TIMEOUT_S = 6.0        # same limit as icdcomm2.dll GetBuffInfo
 CONTROL_TIMEOUT_MS = 3000     # IcdUsb2 control timeout
+DELETE_TIMEOUT_S = 30.0       # a delete rewrites flash: allowed longer than a read's reply
 # Bulk inactivity limit. Each read may wait only for what is left of this
 # budget since the last byte-carrying read returned, so empty reads (with or
 # without a timeout) never extend it. A read that returns data at its timeout
@@ -92,19 +93,19 @@ class Recorder:
             raise RecorderError(f"short status {s.hex()}")
         return s
 
-    def _wait(self, want_reply):
-        deadline = time.monotonic() + STATUS_TIMEOUT_S
+    def _wait(self, want_reply, timeout=STATUS_TIMEOUT_S, min_len=16):
+        deadline = time.monotonic() + timeout
         while True:
             s = self.status()
             if want_reply and s[0] == 0x0F and s[1] == 0x81:
                 n = struct.unpack(">H", s[2:4])[0]
-                if not 16 <= n <= self.dev.CONTROL_BUF:
+                if not min_len <= n <= self.dev.CONTROL_BUF:
                     raise RecorderError(f"implausible reply length {n}")
                 return n
             if not want_reply and s[0] == 0x00 and s[1] == 0x00:
                 return 0
             if time.monotonic() > deadline:
-                if s[:2] == b"\x0f\x01":
+                if s[:2] == b"\x0f\x01" or timeout != STATUS_TIMEOUT_S:
                     raise RecorderStuck(f"recorder stays busy (status {s.hex()})")
                 raise RecorderError(f"recorder not {'replying' if want_reply else 'ready'} (status {s.hex()})")
 
@@ -202,3 +203,32 @@ class Recorder:
         size = blocks * BLOCK_RAW
         _, raw, _ = self.query_bulk([get_voice_opcode(folder), msg << 16, 1, blocks, size], 28, size)
         return raw
+
+    def delete_message(self, folder, number):
+        """Delete message ``number`` (1-based display position) of folder 1..5 (A..E).
+
+        The only write OpenEVP ever sends: one frame, never retried (a resend after
+        an unclear reply could delete the next recording). Returns the status byte
+        (0 OK, 1 batteries, others refused). A recorder that stops answering raises
+        RecorderStuck: only a replug recovers it, and the folder must be re-read.
+        """
+        frame = delete_frame(folder, number)
+        self._wait(want_reply=False)
+        self.dev.control_out(REQTYPE_OUT, REQ_COMMAND, WVALUE, 0, frame, CONTROL_TIMEOUT_MS)
+        n = self._wait(want_reply=True, timeout=DELETE_TIMEOUT_S, min_len=DELETE_REPLY_LEN)
+        r = self.dev.control_in(REQTYPE_IN, REQ_REPLY, WVALUE, 0, n, CONTROL_TIMEOUT_MS)
+        if len(r) != DELETE_REPLY_LEN or r[:12] != bytes([0x09]) + FRAME_PREFIX[1:12] or r[12] != 0x12:
+            raise RecorderError(f"unexpected reply to a delete: {bytes(r).hex()}")
+        return r[13]
+
+
+def folder_counts(reply):
+    """{folder 1..5: message count} from a CMD_TARGET_STATUS reply: per folder a u16 BE count at
+    0x24 + 0x40*(f-1), followed by the folder's letter (0x41 'A' .. 0x45 'E'), which is checked."""
+    counts = {}
+    for f in range(1, 6):
+        at = 0x24 + 0x40 * (f - 1)
+        if len(reply) < at + 3 or reply[at + 2] != 0x40 + f:
+            raise RecorderError(f"the folder counts reply has no folder {'ABCDE'[f - 1]}")
+        counts[f] = struct.unpack(">H", reply[at:at + 2])[0]
+    return counts

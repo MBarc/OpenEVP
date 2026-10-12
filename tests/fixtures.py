@@ -138,8 +138,12 @@ class FakeRecorderDevice:
     CONTROL_BUF = 4096
 
     def __init__(self, folders=None, voice=None, identify=""):
-        self.folders = folders or {}
+        self.folders = {k: list(v) for k, v in (folders or {}).items()}
         self.voice = voice or {}
+        self.delete_status = 0        # the status byte a delete answers with
+        self.delete_calls = []        # (folder, number) of every delete frame received
+        self.stuck_on_delete = False  # never answer a delete (busy for ever)
+        self.busy = False
         self.identify = identify
         self.queue = []          # pending replies (bytes)
         self.bulk = b""
@@ -151,6 +155,21 @@ class FakeRecorderDevice:
 
     def control_out(self, rt, req, val, idx, data, timeout_ms):
         assert policy.allow_out(rt, req, val, idx, data), data.hex()
+        if policy.delete_frame_ok(data):
+            folder = struct.unpack(">H", data[16:18])[0]
+            number = data[18:].index(1) + 1
+            self.delete_calls.append((folder, number))
+            if self.stuck_on_delete:
+                self.queue = []
+                self.busy = True
+                return
+            msgs = self.folders.get(folder, [])
+            if self.delete_status == 0 and number <= len(msgs):
+                del msgs[number - 1]
+                # The real ST10 compacts: slots renumbered 0..n-1, extents in slot order (make_table).
+                msgs[:] = [(i, *m[1:]) for i, m in enumerate(msgs)]
+            self.queue = [bytes([0x09]) + policy.FRAME_PREFIX[1:] + bytes([0x12, self.delete_status])]
+            return
         words = struct.unpack(f">{(len(data) - 12) // 4}I", data[12:])
         op = words[0]
         done = _completion_opcode(op)
@@ -171,12 +190,21 @@ class FakeRecorderDevice:
             body = bytearray(48)
             body[20:20 + len(self.identify)] = self.identify.encode("latin-1")
             self.queue = [self._msg(0x09, done, bytes(body))]
+        elif op == policy.CMD_TARGET_STATUS:
+            body = bytearray(0x24 + 0x40 * 5 - 16)
+            for f in range(1, 6):
+                at = 0x24 + 0x40 * (f - 1) - 16
+                body[at:at + 2] = struct.pack(">H", len(self.folders.get(f, [])))
+                body[at + 2] = 0x40 + f
+            self.queue = [self._msg(0x09, done, bytes(body))]
         else:
             self.queue = [self._msg(0x09, done, bytes(48))]
 
     def control_in(self, rt, req, val, idx, length, timeout_ms):
         assert policy.allow_in(rt, req, val, idx, length)
         if req == policy.REQ_STATUS:
+            if self.busy:
+                return bytes.fromhex("0f010000")
             if self.queue and not self.bulk_pending():
                 return bytes.fromhex("0f81") + struct.pack(">H", len(self.queue[0]))
             return bytes(4)
