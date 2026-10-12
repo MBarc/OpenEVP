@@ -172,5 +172,29 @@ class SessionTests(unittest.TestCase):
                                             "not 2. Check the folder before deleting more.")
 
 
+from openevp.recorders import base, get as model  # noqa: E402
+from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
+
+
+class ModelTests(unittest.TestCase):
+    def test_only_the_st10_can_delete(self):
+        self.assertTrue(model("sony-icd-st10").can_delete)
+        self.assertFalse(model("sony-icd-st25").can_delete)
+        self.assertFalse(base.Model.can_delete)
+
+    def test_rows_carry_a_key_and_delete_takes_it(self):
+        s = SonyIcdSession(session())
+        rows = s.recordings("A")
+        self.assertEqual(rows[1]["key"], "1:2:4000")
+        self.assertEqual(s.delete("A", 2, rows[1]["key"]), "A-002")
+        self.assertEqual(len(s.recordings("A")), 2)
+
+    def test_a_malformed_key_is_refused(self):
+        s = SonyIcdSession(session())
+        for key in ("", "1:2", "a:b:c", None, 5):
+            with self.assertRaises(ValueError):
+                s.delete("A", 2, key)
+
+
 if __name__ == "__main__":
     unittest.main()

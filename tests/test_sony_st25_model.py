@@ -149,7 +149,7 @@ class AdapterMatchesTodayTests(unittest.TestCase):
         ours = {f["id"]: s.recordings(f["id"]) for f in s.folders()}
         theirs = {l: [today_row(m) for m in old.messages(l)] for l in "ABCDE"}
         self.assertEqual([r["play_problem"] for l in "ABCDE" for r in ours[l]], [None] * 7)   # LP: it plays
-        self.assertEqual({l: [{k: r[k] for k in r if k not in ("recorded_sort", "play_problem")} for r in rows]
+        self.assertEqual({l: [{k: r[k] for k in r if k not in ("recorded_sort", "play_problem", "key")} for r in rows]
                           for l, rows in ours.items()}, theirs)
         self.assertEqual(s.owner, old.owner)
         self.assertEqual([len(ours[l]) for l in "ABCDE"], [3, 1, 2, 0, 1])
@@ -218,7 +218,7 @@ class AdapterMatchesTodayTests(unittest.TestCase):
     def test_no_transfer_method_is_exposed(self):
         s, _ = self.adapter()
         self.assertEqual(sorted(a for a in dir(s) if not a.startswith("_")),
-                         ["close", "download", "folders", "model_id", "owner", "recordings"])
+                         ["close", "delete", "download", "folders", "model_id", "owner", "recordings"])
 
 
 class ErrorTests(unittest.TestCase):

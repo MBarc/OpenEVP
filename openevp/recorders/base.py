@@ -88,7 +88,7 @@ STATES = (READY, NEEDS_DRIVER, NEEDS_REPLUG)
 
 FOLDER_FIELDS = ("id", "label", "safe_name")
 RECORDING_FIELDS = ("number", "recorded_label", "recorded_sort", "seconds", "owner", "problem")
-OPTIONAL_RECORDING_FIELDS = ("play_problem",)
+OPTIONAL_RECORDING_FIELDS = ("play_problem", "key")   # key: opaque identity, only for models that can delete
 
 
 # ---- errors ---------------------------------------------------------------------
@@ -214,6 +214,12 @@ class Session:
     def download(self, folder_id, number):
         raise NotImplementedError
 
+    def delete(self, folder_id, number, key):
+        """Delete one recording from the recorder (only models with can_delete). ``key`` is the
+        recording row's "key"; a recording that no longer matches it is refused (ValueError).
+        Returns its label."""
+        raise ValueError("This recorder cannot delete recordings.")
+
     def close(self):
         raise NotImplementedError
 
@@ -229,6 +235,7 @@ class Model:
     winusb_name = None
     native = None
     supported = True
+    can_delete = False              # True only once deleting has been tested on the device
 
     def discover(self):
         return []

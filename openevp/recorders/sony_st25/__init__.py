@@ -86,7 +86,7 @@ def _recording(m):
     play = None if m.problem or codec is None else formats.codec_problem(codec)
     return {"number": m.number, "recorded_label": when or "undated", "recorded_sort": when,
             "seconds": None if seconds is None else round(seconds, 1), "owner": m.owner, "problem": m.problem,
-            "play_problem": play}
+            "play_problem": play, "key": f"{m.slot}:{m.start_counter}:{m.length}"}
 
 
 class SonyIcdSession(base.Session):
@@ -133,6 +133,17 @@ class SonyIcdSession(base.Session):
         if dl.error:
             return base.Download(dl.label, dl.name, error=dl.error)
         return base.Download(dl.label, dl.name, data=dl.dvf)
+
+    def delete(self, folder_id, number, key):
+        self._check()
+        letter = self._letter(folder_id)
+        try:
+            slot, counter, length = (int(x) for x in key.split(":"))
+        except (AttributeError, ValueError):
+            raise ValueError("That recording is not known; refresh the list.") from None
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ValueError(f"no recording {number!r} in folder {letter}")
+        return _call(self._session.delete, letter, number, slot, counter, length)
 
     def close(self):
         if not self._closed:
