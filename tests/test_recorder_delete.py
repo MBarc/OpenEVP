@@ -219,8 +219,15 @@ class ApiTests(unittest.TestCase):
     def run_job(self, items):
         done = threading.Event()
         old = self.api._emit
-        self.api._emit = lambda e, p: (old(e, p), done.set() if e.startswith("recorder-delete-") and
-                                       not e.endswith("progress") else None)
+        self.busy_at_end = []
+
+        def emit(e, p):
+            if e.startswith("recorder-delete-") and not e.endswith("progress"):
+                self.busy_at_end.append(self.api._busy.locked())
+            old(e, p)
+            if e.startswith("recorder-delete-") and not e.endswith("progress"):
+                done.set()
+        self.api._emit = emit
         r = self.api.delete_from_recorder(test_backend.ID, items, 7)
         self.assertTrue(r["ok"], r)
         self.assertTrue(done.wait(5))
@@ -236,6 +243,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(events[-1], ("recorder-delete-done", {"job": 7, "deleted": ["A-002", "A-001"]}))
         self.assertEqual(len(self.dev.folders[1]), n - 2)
         self.assertIn(test_backend.ID, self.server.forgotten)
+        self.assertEqual(self.busy_at_end, [False])          # the page hears it is over only once the lock is free
 
     def test_a_stale_key_is_refused_before_anything(self):
         items = self.items(1)
@@ -250,12 +258,42 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.dev.delete_calls, [(1, 2)])
         name, p = events[-1]
         self.assertEqual((name, p["deleted"]), ("recorder-delete-failed", []))
-        self.assertIn("batteries", p["error"])
+        self.assertEqual(p["error"], "Replace the recorder's batteries, then try again.")
 
     def test_info_says_which_are_saved(self):
         info = self.api.delete_info_recorder(test_backend.ID, self.items(1))
         self.assertTrue(info["ok"], info)
         self.assertEqual((info["items"][0]["label"], info["items"][0]["saved"]), ("A-001", False))
+
+
+    def test_audio_is_refused_during_a_delete(self):
+        with self.api._recs_lock:
+            self.api._deleting.add(test_backend.ID)
+        r = self.api.audio(test_backend.ID, "A", 1)
+        self.assertEqual((r["ok"], r["error"]), (False, "Wait until the recorder has finished deleting."))
+
+    def test_a_play_that_overlaps_a_delete_leaves_no_cache(self):
+        real = self.server.prepare
+
+        def prepare(key, make=None, write=None):
+            self.api._delete_gen[test_backend.ID] = self.api._delete_gen.get(test_backend.ID, 0) + 1
+            return real(key, make=make, write=write)
+        self.server.prepare = prepare
+        r = self.api.audio(test_backend.ID, "A", 1)
+        self.assertEqual((r["ok"], r["error"]), (False, "The recorder's list changed while this was opening; "
+                                                        "pick the recording again."))
+        self.assertNotIn((test_backend.ID, "A", 1), self.api._natives)
+        self.assertIn(test_backend.ID, self.server.forgotten)
+
+    def test_info_is_refused_while_busy_and_dedupes(self):
+        items = self.items(1)
+        self.assertEqual(len(self.api.delete_info_recorder(test_backend.ID, items + items)["items"]), 1)
+        self.api._busy.acquire()
+        try:
+            r = self.api.delete_info_recorder(test_backend.ID, items)
+            self.assertEqual(r["error"], "Something else is using the recorder; try again when it finishes.")
+        finally:
+            self.api._busy.release()
 
 
 class ApiSt25Tests(unittest.TestCase):
