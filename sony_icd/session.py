@@ -120,22 +120,23 @@ class RecorderSession:
         msgs = self.messages(letter)
         m = msgs[number - 1] if 1 <= number <= len(msgs) else None
         if count != len(msgs) or m is None or (m.slot, m.start_counter, m.length) != (slot, counter, length):
-            raise ValueError(f"{label} changed on the recorder; refresh the list and try again.")
+            raise ValueError(f"{label} changed on the recorder; refresh and try again.")
         after = msgs[number] if number < len(msgs) else None
         try:
             status = self.rec.delete_message(fi, number)
         finally:
             self._forget(letter)
         if status == 1:
-            raise ValueError("The recorder says its batteries are low. Replace them, then try again.")
+            raise ValueError("Replace the recorder's batteries, then try again.")
         if status:
             raise ValueError(f"The recorder refused (status {status}). Nothing else was deleted.")
         now = self.messages(letter)
         moved = after is None or (len(now) >= number and (now[number - 1].start_counter, now[number - 1].length)
                                   == (after.start_counter, after.length))
         if folder_counts(self.rec.target_status())[fi] != count - 1 or len(now) != count - 1 or not moved:
-            raise ValueError(f"After deleting {label} the recorder now lists {len(now)} recording"
-                             f"{'' if len(now) == 1 else 's'} in folder {letter}; nothing more was deleted.")
+            raise ValueError(f"After deleting {label} the recorder lists {len(now)} recording"
+                             f"{'' if len(now) == 1 else 's'} in folder {letter}, not {count - 1}. "
+                             "Check the folder before deleting more.")
         return label
 
     def _forget(self, letter):

@@ -113,8 +113,9 @@ class SessionTests(unittest.TestCase):
         s = session()
         picked = ident(s, "A", 2)
         picked["length"] += 1
-        with self.assertRaisesRegex(ValueError, "A-002 changed on the recorder"):
+        with self.assertRaises(ValueError) as cm:
             s.delete("A", 2, **picked)
+        self.assertEqual(str(cm.exception), "A-002 changed on the recorder; refresh and try again.")
         self.assertEqual(s.rec.dev.delete_calls, [])
 
     def test_a_number_past_the_end_is_refused(self):
@@ -123,12 +124,36 @@ class SessionTests(unittest.TestCase):
             s.delete("A", 4, slot=3, counter=4, length=6000)
         self.assertEqual(s.rec.dev.delete_calls, [])
 
+    def test_counts_that_disagree_with_the_table_send_nothing(self):
+        import sony_icd.session as ss
+        s = session()
+        picked = ident(s, "A", 2)
+        real = ss.folder_counts
+        ss.folder_counts = lambda reply: {k: v + 1 for k, v in real(reply).items()}
+        try:
+            with self.assertRaisesRegex(ValueError, "changed on the recorder"):
+                s.delete("A", 2, **picked)
+        finally:
+            ss.folder_counts = real
+        self.assertEqual(s.rec.dev.delete_calls, [])
+
+    def test_a_different_slot_or_counter_is_refused_with_nothing_sent(self):
+        for field in ("slot", "counter"):
+            s = session()
+            picked = ident(s, "A", 2)
+            picked[field] += 1
+            with self.assertRaisesRegex(ValueError, "changed on the recorder"):
+                s.delete("A", 2, **picked)
+            self.assertEqual(s.rec.dev.delete_calls, [])
+
     def test_batteries_and_other_refusals(self):
-        for status, words in ((1, "batteries"), (3, "refused \\(status 3\\)")):
+        for status, words in ((1, "Replace the recorder's batteries, then try again."),
+                              (3, "The recorder refused (status 3). Nothing else was deleted.")):
             s = session()
             s.rec.dev.delete_status = status
-            with self.assertRaisesRegex(ValueError, words):
+            with self.assertRaises(ValueError) as cm:
                 s.delete("A", 2, **ident(s, "A", 2))
+            self.assertEqual(str(cm.exception), words)
 
     def test_a_result_that_is_not_one_fewer_is_reported(self):
         s = session()
@@ -141,8 +166,10 @@ class SessionTests(unittest.TestCase):
             if policy.delete_frame_ok(data):
                 del dev.folders[1][-1]                      # the recorder lost one more
         dev.control_out = deletes_two
-        with self.assertRaisesRegex(ValueError, "now lists 1 recording"):
+        with self.assertRaises(ValueError) as cm:
             s.delete("A", 2, **picked)
+        self.assertEqual(str(cm.exception), "After deleting A-002 the recorder lists 1 recording in folder A, "
+                                            "not 2. Check the folder before deleting more.")
 
 
 if __name__ == "__main__":
