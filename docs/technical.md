@@ -75,9 +75,10 @@ compared yet.
 
 ## Read-only by design
 
-Nothing on a recorder is changed or deleted. For the Sony recorders (ICD-ST25,
-ICD-ST10) the program can only send the exact read commands DVE itself sends
-to list and download recordings. Opcode, frame length and arguments are all checked in
+Nothing on a recorder is changed unless the user chooses Delete from recorder
+(ICD-ST10 only, ticked recordings, after a confirmation). For the Sony recorders
+(ICD-ST25, ICD-ST10) the program can only send the exact read commands DVE itself
+sends to list and download recordings, plus that one checked delete command. Opcode, frame length and arguments are all checked in
 `sony_icd/policy.py`.
 
 ## Driver setup

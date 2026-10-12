@@ -86,7 +86,9 @@ Sony's Digital Voice Editor makes.
 Click a recording, or a saved `.dvf` or `.wav` file, to play it and see its
 waveform.
 
-OpenEVP only reads from the recorder. Nothing on it is ever changed or deleted.
+OpenEVP never changes anything on the recorder unless you choose **Delete from
+recorder**, and then only the recordings you tick, after a confirmation (ICD-ST10
+only for now).
 
 ## Troubleshooting
 

@@ -412,5 +412,6 @@ test opens a real input):
     is greyed out and its tooltip says "Not tested on this recorder model yet."
 65. **Delete, unplug.** Start deleting a few recordings and unplug the recorder
     part way: the message says the recording "may have been deleted" and to
-    unplug, plug back in and check the folder. Closing the window during a
-    delete asks "Recordings are being deleted from the recorder."
+    unplug, plug back in and check the folder.
+65b. **Delete, closing the window.** Start deleting a few recordings and try to
+    close the window: it asks "Recordings are being deleted from the recorder."

@@ -440,6 +440,19 @@ class MarksApiTests(unittest.TestCase):
         self.api._before_install = lambda: calls.append(("mutex dropped",))
         return calls
 
+    def test_update_refused_while_a_delete_holds_the_lock_says_so(self):
+        self.api._update = {"version": "9.0.0"}
+        self.api._can_install = True
+        self.api._busy.acquire()
+        try:
+            self.assertIn("export", self.api.install_update()["error"])
+            self.api._deleting.add("dev")
+            self.assertEqual(self.api.install_update()["error"],
+                             "Wait for the recorder to finish deleting, then update.")
+        finally:
+            self.api._deleting.discard("dev")
+            self.api._busy.release()
+
     def test_no_backup_is_queued_while_an_update_installs(self):
         rec = self.load()["rec"]
         seen = []

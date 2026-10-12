@@ -30,8 +30,9 @@ the way. And whatever you record on, it opens WAV and MP3 files too.
 
 No Sony software, and no old 32-bit computer kept around just to read the
 recorder. Install OpenEVP, plug in the recorder, tick the recordings and click
-**Export**. It only ever reads from the recorder, so nothing on it gets
-changed or deleted.
+**Export**. It never changes anything on the recorder unless you choose
+**Delete from recorder**, and then only the recordings you tick, after a
+confirmation (ICD-ST10 only for now).
 
 ## See the voice before you hear it
 
@@ -148,8 +149,9 @@ against the project's own signing key before it's installed.
 
 ### Will it change my recordings?
 
-No. OpenEVP only reads from your recorder, so nothing on it is changed or
-deleted. Saved files are never overwritten. Speed, Enhance and noise reduction
+No. OpenEVP never changes anything on your recorder unless you choose
+**Delete from recorder**, and then only the recordings you tick, after a
+confirmation (ICD-ST10 only for now). Saved files are never overwritten. Speed, Enhance and noise reduction
 only change what you hear, never the file. Your EVP marks are kept separately
 from the audio, so they're safe too.
 

@@ -2555,7 +2555,8 @@ class Api(ShareOps, LibraryOps, LiveOps):
             if self._live_busy():
                 return _fail(UPDATE_RECORDING)
             if not self._busy.acquire(blocking=False):  # held from here on: no export can start
-                return _fail("Wait for the export to finish, then update.")
+                return _fail("Wait for the recorder to finish deleting, then update." if self._deleting
+                             else "Wait for the export to finish, then update.")
             self._update_claim = True
         with self._backup_lock:                         # from here on no backup can be queued
             if self._backup_queue or self._backup_running is not None:
