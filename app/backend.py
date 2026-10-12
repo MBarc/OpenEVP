@@ -2840,7 +2840,11 @@ class Api(ShareOps, LibraryOps, LiveOps):
         """True while an export of recorder recordings runs (export_marked(): saving_marked();
         a clips job: clips_running())."""
         return (self._busy.locked() and not self._updating and self._marked_done is None and not self._fs_busy
-                and self._clips_running is None)
+                and self._clips_running is None and not self._deleting)
+
+    def deleting(self):
+        """True while recordings are being deleted from a recorder (the close prompt says so)."""
+        return bool(self._deleting)
 
     def stopping(self):
         """True once the app is closing: long decodes poll this to stop early."""

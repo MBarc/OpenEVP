@@ -82,6 +82,12 @@ class MainImportTests(unittest.TestCase):
         self.assertIn("backup of a marked recording", text)
         self.assertNotIn("backup", main._close_question(True, False)[1])
 
+    def test_close_question_says_when_recordings_are_being_deleted(self):
+        main = self.main()
+        title, text = main._close_question(False, False, deleting=True)
+        self.assertEqual(title, "Delete in progress")
+        self.assertIn("deleted from the recorder", text)
+
     def test_close_question_mentions_a_wav_being_saved_with_marks(self):
         main = self.main()
         title, text = main._close_question(False, False, True)

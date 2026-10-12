@@ -102,6 +102,26 @@ answering "busy". **Unplug the USB cable, wait a few seconds, plug it back
 in**, and try again. Anything already saved gets skipped, so you won't end up
 with doubles.
 
+## Deleting recordings from the recorder
+
+Once your recordings are safe on the PC, you can clear them off the recorder.
+
+1. Plug in the recorder and tick the recordings you want gone.
+2. Click **Delete from recorder**, or right-click one of the ticked rows, or
+   press the **Delete** key.
+3. OpenEVP lists them and asks you to confirm. If it can't find a `.dvf` copy
+   of one on this PC, the list says so by name, so you don't delete the only
+   copy by accident.
+
+Deleting from the recorder can't be undone. Copies already on the PC and their
+EVP marks are not touched.
+
+This works on the Sony ICD-ST10 for now. The ICD-ST25 isn't tested yet, so the
+button is greyed out there.
+
+If the recorder stops answering during a delete, unplug it, plug it back in and
+check the folder to see what is still there.
+
 ## Marking EVPs
 
 With a recording loaded in the player at the bottom of the window:

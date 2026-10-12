@@ -396,3 +396,21 @@ test opens a real input):
     reopen OpenEVP: it opens dark at once, with no white flash. Untick it: back
     to the usual colours everywhere, the spectrogram in its usual colours.
 
+61. **Delete from the recorder, one.** With an ICD-ST10 plugged in, tick one
+    recording and click **Delete from recorder**: the dialog names it, says it
+    can't be undone, and **Cancel** has the focus (Enter cancels). Confirm: it
+    goes from the list, the numbers after it move up by one, and the other
+    recordings are unchanged.
+62. **Delete from the recorder, two.** Tick two recordings (also try the row's
+    right-click menu and the Delete key): the dialog lists both. Confirm: both
+    go and the rest stay. Copies already on the PC and their EVP marks are
+    untouched.
+63. **Delete, no copy on this PC.** Tick a recording that has no .dvf copy in
+    the Save folder (one you never saved): the dialog warns by name that there
+    is no copy on this PC. A saved one is not named in the warning.
+64. **Delete, ICD-ST25.** With an ICD-ST25 selected, **Delete from recorder**
+    is greyed out and its tooltip says "Not tested on this recorder model yet."
+65. **Delete, unplug.** Start deleting a few recordings and unplug the recorder
+    part way: the message says the recording "may have been deleted" and to
+    unplug, plug back in and check the folder. Closing the window during a
+    delete asks "Recordings are being deleted from the recorder."

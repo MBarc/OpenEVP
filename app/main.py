@@ -127,7 +127,7 @@ def _open_store():
 
 
 def _close_question(exporting, backing_up, saving_marked=False, clips_running=False, changing_files=False,
-                    recording=False):
+                    recording=False, deleting=False):
     """(title, text) for the close prompt while work is still running, or None."""
     backup = ("A backup of a marked recording is still being saved. Closing now may stop it; "
               "a backup that did not finish is shown as failed and can be retried later.")
@@ -138,6 +138,9 @@ def _close_question(exporting, backing_up, saving_marked=False, clips_running=Fa
         text = ("Files in the library are still being renamed, moved or deleted. "
                 "OpenEVP closes once that is finished. Close?")
         return "Library files in use", f"{backup} {text}" if backing_up else text
+    if deleting:
+        text = "Recordings are being deleted from the recorder. Closing now may stop it part way. Close?"
+        return "Delete in progress", f"{backup} {text}" if backing_up else text
     if clips_running:
         text = "Clips are still being exported. Stop after the current recording and close?"
         return "Export in progress", f"{backup} {text}" if backing_up else text
@@ -644,7 +647,8 @@ def _run_app(smoke=None):
                     api.request_stop()
                 return proceed
             question = _close_question(api.exporting(), api.backing_up(), api.saving_marked(),
-                                       api.clips_running(), api.changing_files(), api.recording())
+                                       api.clips_running(), api.changing_files(), api.recording(),
+                                       api.deleting())
             if question:
                 proceed = window.create_confirmation_dialog(*question)
                 if proceed and api.recording():

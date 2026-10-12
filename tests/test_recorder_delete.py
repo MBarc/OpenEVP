@@ -223,8 +223,8 @@ class SessionTests(unittest.TestCase):
         dev.control_out = drops_the_second
         with self.assertRaises(ValueError) as cm:
             s.delete("A", 3, **picked)
-        self.assertEqual(str(cm.exception), "After deleting A-003 the recorder lists 2 recordings in folder A, "
-                                            "not 2. Check the folder before deleting more.")
+        self.assertEqual(str(cm.exception), "After deleting A-003 the recorder lists different recordings in "
+                                            "folder A than expected. Check the folder before deleting more.")
 
 
 from openevp.recorders import base, get as model  # noqa: E402

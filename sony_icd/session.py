@@ -142,10 +142,13 @@ class RecorderSession:
 
         def ident(ms):
             return [(x.start_counter, x.length) for x in ms]
-        if now_count != count - 1 or len(now) != count - 1 or ident(now) != ident(msgs[:number - 1] + msgs[number:]):
+        if now_count != count - 1 or len(now) != count - 1:
             raise ValueError(f"After deleting {label} the recorder lists {len(now)} recording"
                              f"{'' if len(now) == 1 else 's'} in folder {letter}, not {count - 1}. "
                              "Check the folder before deleting more.")
+        if ident(now) != ident(msgs[:number - 1] + msgs[number:]):
+            raise ValueError(f"After deleting {label} the recorder lists different recordings in folder "
+                             f"{letter} than expected. Check the folder before deleting more.")
         return label
 
     def _forget(self, letter):
