@@ -196,5 +196,80 @@ class ModelTests(unittest.TestCase):
                 s.delete("A", 2, key)
 
 
+import threading  # noqa: E402
+import test_backend  # noqa: E402  (the module: importing BackendTests would collect its tests here)
+
+
+class ApiTests(unittest.TestCase):
+    def setUp(self):
+        # The recorder is opened by the first device refresh (inside BackendTests.setUp), so it must
+        # identify as an ICD-ST10 from the start: swap in an ST10 fake for that setUp.
+        real = test_backend.FakeRecorderDevice
+        test_backend.FakeRecorderDevice = lambda folders, **kw: real(folders, identify="ICD-ST10", **kw)
+        try:
+            test_backend.BackendTests.setUp(self)
+        finally:
+            test_backend.FakeRecorderDevice = real
+        self.assertEqual(self.api.recordings(test_backend.ID)["model_id"], "sony-icd-st10")
+
+    def items(self, *numbers):
+        rows = {r["number"]: r for r in self.api.recordings(test_backend.ID)["folders"][0]["recordings"]}
+        return [{"folder": "A", "number": n, "key": rows[n]["key"]} for n in numbers]
+
+    def run_job(self, items):
+        done = threading.Event()
+        old = self.api._emit
+        self.api._emit = lambda e, p: (old(e, p), done.set() if e.startswith("recorder-delete-") and
+                                       not e.endswith("progress") else None)
+        r = self.api.delete_from_recorder(test_backend.ID, items, 7)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(done.wait(5))
+        return [(e, p) for e, p in self.events if e.startswith("recorder-delete-")]
+
+    def test_the_st10_can_and_the_st25_cannot(self):
+        self.assertTrue(self.api.recordings(test_backend.ID)["can_delete"])
+
+    def test_deletes_highest_first_and_forgets_the_caches(self):
+        n = len(self.dev.folders[1])
+        events = self.run_job(self.items(1, 2))
+        self.assertEqual(self.dev.delete_calls, [(1, 2), (1, 1)])
+        self.assertEqual(events[-1], ("recorder-delete-done", {"job": 7, "deleted": ["A-002", "A-001"]}))
+        self.assertEqual(len(self.dev.folders[1]), n - 2)
+        self.assertIn(test_backend.ID, self.server.forgotten)
+
+    def test_a_stale_key_is_refused_before_anything(self):
+        items = self.items(1)
+        items[0]["key"] = "9:9:9"
+        r = self.api.delete_from_recorder(test_backend.ID, items, 7)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.dev.delete_calls, [])
+
+    def test_stops_at_the_first_refusal(self):
+        self.dev.delete_status = 1
+        events = self.run_job(self.items(1, 2))
+        self.assertEqual(self.dev.delete_calls, [(1, 2)])
+        name, p = events[-1]
+        self.assertEqual((name, p["deleted"]), ("recorder-delete-failed", []))
+        self.assertIn("batteries", p["error"])
+
+    def test_info_says_which_are_saved(self):
+        info = self.api.delete_info_recorder(test_backend.ID, self.items(1))
+        self.assertTrue(info["ok"], info)
+        self.assertEqual((info["items"][0]["label"], info["items"][0]["saved"]), ("A-001", False))
+
+
+class ApiSt25Tests(unittest.TestCase):
+    """The default test_backend recorder is an ICD-ST25: the Api refuses, nothing is sent."""
+    def setUp(self):
+        test_backend.BackendTests.setUp(self)
+
+    def test_the_st25_is_refused_with_nothing_sent(self):
+        self.assertFalse(self.api.recordings(test_backend.ID)["can_delete"])
+        rows = self.api.recordings(test_backend.ID)["folders"][0]["recordings"]
+        r = self.api.delete_from_recorder(test_backend.ID, [{"folder": "A", "number": 1, "key": rows[0]["key"]}], 7)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.dev.delete_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,10 @@ ID = "1-4@7"
 class FakeAudioServer:
     def __init__(self):
         self.prepared = []
+        self.forgotten = []
+
+    def forget(self, device_id):
+        self.forgotten.append(device_id)
 
     def prepare(self, key, make=None, write=None):
         self.prepared.append(key)

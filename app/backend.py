@@ -76,6 +76,7 @@ from openevp import __version__, clips, denoise, enhance, formats, mp3, pcm, rec
 from openevp.export import save_unique, save_wav
 from openevp.paths import open_folder, show_in_folder
 from openevp.recorders import base as rbase
+from sony_icd import dvf as sony_dvf
 
 from .updater import UpdateCancelled
 
@@ -230,6 +231,25 @@ def save_native(fmt, data, outdir, name):
     already holds the same recording (a .dvf: the same audio, ignoring the time
     counters DVE rewrites). Never replaces a file. Returns (path, already_saved)."""
     return save_unique(data, outdir, name, lambda existing: fmt.same(existing, data))
+
+
+def _saved_dvf(root, data):
+    """Whether a .dvf with the same audio as ``data`` (a recorder download) is anywhere under
+    ``root`` (any name: deletes renumber recordings). Same size first, so few files are read."""
+    fp = sony_dvf.audio_fingerprint(data)
+    if fp is None or not root or not os.path.isdir(root):
+        return False
+    for d, _dirs, files in os.walk(root):
+        for name in files:
+            p = os.path.join(d, name)
+            if name.lower().endswith(".dvf") and os.path.getsize(p) == len(data):
+                try:
+                    with open(p, "rb") as f:
+                        if sony_dvf.audio_matches(f.read(), fp):
+                            return True
+                except OSError:
+                    continue
+    return False
 
 
 def _usable_filename(fmt, name):
@@ -488,7 +508,7 @@ def _recording(folder, r):
             "recorded": r.get("recorded_label") or "",
             "seconds": round(seconds, 1) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None,
             "owner": r.get("owner"), "problem": r.get("problem") or None,
-            "play_problem": r.get("play_problem") or None}
+            "play_problem": r.get("play_problem") or None, **({"key": r["key"]} if r.get("key") else {})}
 
 
 class Api(ShareOps, LibraryOps, LiveOps):
@@ -693,7 +713,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         model = listing["model"]
         problem = model.wav_problem()
         return {"ok": True, "model": model.name, "model_id": model.model_id,
-                "folders": [{"id": f["id"], "label": f["label"],
+                "can_delete": model.can_delete, "folders": [{"id": f["id"], "label": f["label"],
                              "recordings": [_recording(f, r) for r in listing["rows"][f["id"]]]}
                             for f in listing["folders"]],
                 "formats": self._export_formats(model), "playable": problem is None, "play_reason": problem}
@@ -2623,6 +2643,92 @@ class Api(ShareOps, LibraryOps, LiveOps):
         Another OpenEVP holding the store may be renaming or deleting the folders
         this one would write into."""
         return self._store_read_only()
+
+    # ---- Delete from recorder (only models with can_delete; see sony_icd.session.delete) ----------
+    def _delete_work(self, device_id, items):
+        """[(folder, row)] for the page's items, each checked against the listing and its key; or a
+        _fail result."""
+        if not isinstance(items, list) or not items:
+            return _fail("Nothing is selected.")
+        listing = self._listing(device_id)
+        if not listing["model"].can_delete:
+            return _fail("Deleting is not tested on this recorder model yet.")
+        work = []
+        for i in items:
+            if not isinstance(i, dict) or not isinstance(i.get("key"), str):
+                return _fail("Nothing valid is selected.")
+            found = self._find(device_id, i.get("folder"), i.get("number"))
+            if found is None or found[2].get("key") != i["key"]:
+                return _fail("The recorder's list has changed. Refresh it and try again.")
+            work.append((found[1], found[2]))
+        return work
+
+    def delete_info_recorder(self, device_id, items):
+        """What the confirmation says: each recording's label, length and whether a .dvf with the
+        same audio is already somewhere in the Save folder ("saved")."""
+        try:
+            work = self._delete_work(device_id, items)
+            if isinstance(work, dict):
+                return work
+            out = []
+            for folder, row in work:
+                dl = self._manager.with_session(device_id, lambda s, f=folder["id"], n=row["number"]: s.download(f, n))
+                out.append({"folder": folder["id"], "number": row["number"], "key": row["key"],
+                            "label": _label(folder, row["number"]), "seconds": row.get("seconds"),
+                            "saved": not dl.error and _saved_dvf(self._dest, dl.data)})
+            return {"ok": True, "items": out}
+        except Exception as e:
+            return _error(e)
+
+    def delete_from_recorder(self, device_id, items, job):
+        if self._stop.is_set():
+            return _fail(CLOSING)
+        try:
+            work = self._delete_work(device_id, items)
+        except Exception as e:
+            return _error(e)
+        if isinstance(work, dict):
+            return work
+        work.sort(key=lambda fr: (fr[0]["id"], -fr[1]["number"]))     # highest first: the others keep their numbers
+        if not self._busy.acquire(blocking=False):
+            return _fail("An export is already running.")
+        thread = threading.Thread(target=self._delete_job, args=(device_id, work, job), name="recorder-delete")
+        with self._workers_lock:
+            if self._stop.is_set():
+                self._busy.release()
+                return _fail(CLOSING)
+            try:
+                thread.start()
+            except Exception as e:
+                self._busy.release()
+                return _fail(f"Could not start deleting: {e}")
+            self._workers = [t for t in self._workers if t.is_alive()] + [thread]
+        return {"ok": True, "job": job}
+
+    def _delete_job(self, device_id, work, job):
+        deleted = []
+        try:
+            for i, (folder, row) in enumerate(work, 1):
+                label = _label(folder, row["number"])
+                if self._stop.is_set():
+                    self._emit("recorder-delete-failed", {**_fail("Stopped because the app is closing."),
+                                                          "job": job, "deleted": deleted})
+                    return
+                self._emit("recorder-delete-progress", {"job": job, "done": i - 1, "total": len(work), "label": label})
+                try:
+                    deleted.append(self._manager.with_session(
+                        device_id, lambda s, f=folder["id"], n=row["number"], k=row["key"]: s.delete(f, n, k)))
+                except Exception as e:
+                    self._emit("recorder-delete-failed", {**_error(e), "job": job, "deleted": deleted})
+                    return
+            self._emit("recorder-delete-done", {"job": job, "deleted": deleted})
+        finally:
+            with self._recs_lock:            # numbers shifted: nothing keyed by (device, folder, number) holds
+                self._listings.pop(device_id, None)
+                for key in [k for k in self._natives if k[0] == device_id]:
+                    del self._natives[key]
+            self._server.forget(device_id)
+            self._busy.release()
 
     def export(self, device_id, items, fmt, dest, job):
         if self._stop.is_set():
