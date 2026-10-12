@@ -3592,9 +3592,45 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     const job = vm.runInContext("S.job", context);
     window.onBackendEvent("recorder-delete-progress", { job, done: 0, total: 2, label: "A-002" });
     assert.strictEqual($("status").textContent, "Deleting A-002… (1 of 2)");
+    vm.runInContext(`S.folder = "B";`, context);
     window.onBackendEvent("recorder-delete-done", { job, deleted: ["A-002", "A-001"] });
     assert.strictEqual($("banner-text").textContent, "Deleted 2 recordings from the recorder.");
     await new Promise((r) => setImmediate(r));
+    assert.strictEqual(vm.runInContext("S.folder", context), "B", "the folder shown is kept");
+    // A failed delete: what went, why it stopped; the button is free again.
+    await context.deleteFromRecorderDialog([{ folder: "A", number: 1, key: "0:1:2" }]);
+    await context.folderDialogOk();
+    const job2 = vm.runInContext("S.job", context);
+    window.onBackendEvent("recorder-delete-failed", { job: job2, deleted: [], error: "It stopped.", advice: "Replug it." });
+    assert.ok($("banner-text").textContent.includes("Stopped: It stopped."));
+    assert.ok(!vm.runInContext("S.exporting", context));
+    await new Promise((r) => setImmediate(r));
+    // The Delete key in the device view with a ticked row asks once.
+    let asked = 0;
+    const askInfo = api.delete_info_recorder;
+    api.delete_info_recorder = async (...a) => { asked++; return askInfo(...a); };
+    vm.runInContext(`S.view = "device"; S.selected.set("k", { device: S.device, folder: "A", number: 1, key: "0:1:2" });`, context);
+    const del = { key: "Delete", target: document.body, preventDefault() {} };
+    context.libraryKeys(del); context.libraryKeys(del);     // twice while the question is pending
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(asked, 1);
+    assert.ok(!$("folder-dialog").hidden);
+    context.closeFolderDialog();
+    // The view moved on before the outcome: not pulled back, no re-list.
+    let listed = 0;
+    const rec = api.recordings;
+    api.recordings = async (id) => { listed++; return rec(id); };
+    await context.deleteFromRecorderDialog([{ folder: "A", number: 1, key: "0:1:2" }]);
+    await context.folderDialogOk();
+    const job3 = vm.runInContext("S.job", context);
+    vm.runInContext(`S.view = "library";`, context);
+    window.onBackendEvent("recorder-delete-done", { job: job3, deleted: ["A-001"] });
+    await new Promise((r) => setImmediate(r));
+    assert.strictEqual(vm.runInContext("S.view", context), "library");
+    assert.strictEqual(listed, 0);
+    api.recordings = rec;
+    api.delete_info_recorder = askInfo;
+    vm.runInContext(`S.view = "device";`, context);
     vm.runInContext(`S.canDelete = false; updateExport();`, context);
     assert.strictEqual($("delete-recorder").title, "Not tested on this recorder model yet.");
   }
