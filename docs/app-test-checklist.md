@@ -408,7 +408,8 @@ test opens a real input):
 63. **Delete, no copy on this PC.** Tick a recording that has no .dvf copy in
     the Save folder (one you never saved): the dialog warns by name that there
     is no copy on this PC. A saved one is not named in the warning.
-64. **Delete, ICD-ST25.** With an ICD-ST25 selected, **Delete from recorder**
+64. **Delete, unsupported model.** On a recorder model without delete support
+    (a placeholder model), **Delete from recorder**
     is greyed out and its tooltip says "Not tested on this recorder model yet."
 65. **Delete, unplug.** Start deleting a few recordings and unplug the recorder
     part way: the message says the recording "may have been deleted" and to

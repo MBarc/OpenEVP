@@ -87,8 +87,7 @@ Click a recording, or a saved `.dvf` or `.wav` file, to play it and see its
 waveform.
 
 OpenEVP never changes anything on the recorder unless you choose **Delete from
-recorder**, and then only the recordings you tick, after a confirmation (ICD-ST10
-only for now).
+recorder**, and then only the recordings you tick, after a confirmation.
 
 ## Troubleshooting
 
@@ -118,8 +117,7 @@ Once your recordings are safe on the PC, you can clear them off the recorder.
 Deleting from the recorder can't be undone. Copies already on the PC and their
 EVP marks are not touched.
 
-This works on the Sony ICD-ST10 for now. The ICD-ST25 isn't tested yet, so the
-button is greyed out there.
+On a recorder model without delete support the button is greyed out.
 
 If the recorder stops answering during a delete, unplug it, plug it back in and
 check the folder to see what is still there.

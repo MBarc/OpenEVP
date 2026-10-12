@@ -232,9 +232,9 @@ from openevp.recorders.sony_st25 import SonyIcdSession  # noqa: E402
 
 
 class ModelTests(unittest.TestCase):
-    def test_only_the_st10_can_delete(self):
+    def test_both_sony_models_can_delete_and_the_default_cannot(self):
         self.assertTrue(model("sony-icd-st10").can_delete)
-        self.assertFalse(model("sony-icd-st25").can_delete)
+        self.assertTrue(model("sony-icd-st25").can_delete)
         self.assertFalse(base.Model.can_delete)
 
     def test_rows_carry_a_key_and_delete_takes_it(self):
@@ -288,7 +288,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(done.wait(5))
         return [(e, p) for e, p in self.events if e.startswith("recorder-delete-")]
 
-    def test_the_st10_can_and_the_st25_cannot(self):
+    def test_a_model_that_can_delete_says_so(self):
         self.assertTrue(self.api.recordings(test_backend.ID)["can_delete"])
 
     def test_deletes_highest_first_and_forgets_the_caches(self):
@@ -412,16 +412,32 @@ class ApiTests(unittest.TestCase):
 
 
 class ApiSt25Tests(unittest.TestCase):
-    """The default test_backend recorder is an ICD-ST25: the Api refuses, nothing is sent."""
+    """The default test_backend recorder is an ICD-ST25 (which can delete); a model without can_delete is refused."""
     def setUp(self):
         test_backend.BackendTests.setUp(self)
 
-    def test_the_st25_is_refused_with_nothing_sent(self):
-        self.assertFalse(self.api.recordings(test_backend.ID)["can_delete"])
+    def _item(self):
         rows = self.api.recordings(test_backend.ID)["folders"][0]["recordings"]
-        r = self.api.delete_from_recorder(test_backend.ID, [{"folder": "A", "number": 1, "key": rows[0]["key"]}], 7)
+        return [{"folder": "A", "number": 1, "key": rows[0]["key"]}]
+
+    def test_a_model_without_delete_support_is_refused_with_nothing_sent(self):
+        from unittest import mock
+        from openevp.recorders.sony_st25 import SonyST25
+        with mock.patch.object(SonyST25, "can_delete", False):
+            self.assertFalse(self.api.recordings(test_backend.ID)["can_delete"])
+            r = self.api.delete_from_recorder(test_backend.ID, self._item(), 7)
         self.assertFalse(r["ok"])
+        self.assertEqual(r["error"], "Deleting is not tested on this recorder model yet.")
         self.assertEqual(self.dev.delete_calls, [])
+
+    def test_the_st25_deletes(self):
+        self.assertTrue(self.api.recordings(test_backend.ID)["can_delete"])
+        done = threading.Event()
+        self.api._emit = lambda e, p=None: done.set() if e.startswith("recorder-delete-done") else None
+        r = self.api.delete_from_recorder(test_backend.ID, self._item(), 7)
+        self.assertTrue(r["ok"], r)
+        self.assertTrue(done.wait(5))
+        self.assertEqual(self.dev.delete_calls, [(1, 1)])
 
 
 if __name__ == "__main__":

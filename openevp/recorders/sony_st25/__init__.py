@@ -158,6 +158,7 @@ class SonyST25(base.Model):
     needs_winusb = True
     winusb_name = "Sony IC Recorder (ST) - WinUSB"     # the driver's device name since v0.5.0
     native = formats.DVF
+    can_delete = True               # tested on an ICD-ST25, 2026-10-12
 
     def discover(self):
         ids = _call(list_devices, VID, PID)
