@@ -615,7 +615,9 @@ class LibraryMp3RecordingsTests(unittest.TestCase):
         api._pick_wav = lambda start: wav
         self.assertTrue(api.open_wav()["ok"])
         from app import main
-        self.assertEqual(main.AUDIO_FILE_TYPES[0], "Audio files (*.wav;*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a)")
+        self.assertTrue(main.AUDIO_FILE_TYPES[0].startswith("Audio and video ("))
+        for ext in ("*.wav", "*.mp3", "*.mpeg", "*.mp4", "*.mov", "*.webm"):
+            self.assertIn(ext, main.AUDIO_FILE_TYPES[0])
         self.assertIn("All files (*.*)", main.AUDIO_FILE_TYPES)
 
 

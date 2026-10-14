@@ -335,9 +335,9 @@ nothing, and you can add cuts yourself.
 Marks work here too: press **M** and the mark goes into the import, and into
 whichever part it falls in once it's split.
 
-## Opening WAV and MP3 files
+## Opening audio and video files
 
-**Open audio file…** plays a WAV or an MP3 from anywhere on the PC.
+**Open audio / video…** opens a recording from anywhere on the PC.
 
 MP3 files work just like WAVs. They play with the same waveform, zoom, loop
 and speed, you can mark them, and **Export WAV with marks** and **Export
@@ -350,6 +350,30 @@ to check it really is MPEG audio, so an `.mpeg` *video* is ignored.
 
 Marks belong to the audio, so renaming `x.mp3` to `x.mpeg` keeps them. An
 MP3's own tags (the title and comment some apps add) are never read as marks.
+
+### Reviewing a video
+
+Open a video to review its audio with the waveform, spectrogram, Enhance,
+speed controls, loops and EVP marks. Supported extensions are `.mp4`, `.mov`,
+`.m4v`, `.mkv`, `.avi`, `.webm`, `.wmv`, `.mpg`, `.mts` and `.m2ts`.
+Videos in your library folders appear alongside audio recordings.
+
+The video panel opens above the waveform. **Hide video** collapses it;
+**Show video** brings it back at the current audio position. Use the normal
+Play button and waveform to play, pause, seek and loop. Speed changes apply
+to the picture too. The preview is muted so you hear only the audio being
+reviewed, including any enhancement you have applied.
+
+On the first open, OpenEVP extracts the first audio track as 16-bit PCM and
+prepares a video preview up to 720p. Long videos can take a while to prepare
+and need temporary disk space. The preview and audio are cached for this
+session, within the normal cache budget; reopening an evicted video prepares
+it again. Your original video is never changed. Videos without audio cannot
+be reviewed. Additional audio tracks are not selectable in this version.
+
+EVP marks and the reviewed flag save just as they do for audio recordings.
+**Export WAV with marks** and **Export clips** export the video's audio;
+they do not create video clips.
 
 ## The EVP Library
 

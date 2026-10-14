@@ -67,6 +67,7 @@ class Element {
   addEventListener(type, fn, capture) { listen(this, type, fn, capture); }
   removeEventListener() {}
   setAttribute(k, v) { this[k] = v; }
+  removeAttribute(k) { delete this[k]; }
   getAttribute(k) { return this[k]; }
   focus() { document.activeElement = this; } select() {} scrollIntoView() {}
   contains(x) { for (; x; x = x.parentNode) if (x === this) return true; return false; }
@@ -1345,8 +1346,8 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
   assert.strictEqual($("banner-text").textContent, "The clips export did not start: boom");
 
   // ---- Open audio file…: WAV or MP3 (the dialog's filter is app/main.py's AUDIO_FILE_TYPES) ----
-  assert.ok(/<button id="open-wav" title="Open a WAV or MP3 file">Open audio file…<\/button>/.test(html));
-  assert.ok(/<button id="open-wav-2" class="link" title="Open another WAV or MP3 file">Open audio file…<\/button>/.test(html));
+  assert.ok(/<button id="open-wav"[^>]*>Open audio \/ video…<\/button>/.test(html));
+  assert.ok(/<button id="open-wav-2"[^>]*>Open audio \/ video…<\/button>/.test(html));
   assert.ok(!/Open WAV file/.test(html));
 
   // ---- the clip format: a menu next to Export clips (MP3 by default), one setting for the player and the library ----
@@ -3647,6 +3648,40 @@ const texts = (el) => el.children.map((c) => (typeof c === "string" ? c : c.text
     vm.runInContext(`S.view = "device";`, context);
     vm.runInContext(`S.canDelete = false; updateExport();`, context);
     assert.strictEqual($("delete-recorder").title, "Not tested on this recorder model yet.");
+  }
+  // Video follows the audio clock: seek, loop, rate, buffering and hide/show.
+  {
+    const media = new Element("audio"), video = $("review-video");
+    Object.assign(media, { currentTime: 2, playbackRate: 0.5, paused: false, ended: false });
+    Object.assign(video, { currentTime: 0, duration: 10, readyState: 4, paused: true,
+      load() {}, pause() { this.paused = true; },
+      play() { this.paused = false; return Promise.resolve(); } });
+    context.setupVideo(media);
+    context.setVideo("http://localhost/test.mp4");
+    fire([media], "playing");
+    assert.strictEqual(video.currentTime, 2);
+    assert.strictEqual(video.playbackRate, 0.5);
+    assert.strictEqual(video.muted, true);
+    assert.strictEqual(video.paused, false);
+    await Promise.resolve(); await Promise.resolve();
+    media.currentTime = 1; fire([media], "seeking");
+    assert.strictEqual(video.currentTime, 1, "a loop jumps back with the audio");
+    fire([media], "waiting"); assert.strictEqual(video.paused, true);
+    fire([media], "playing"); assert.strictEqual(video.paused, false);
+    $("toggle-video").onclick(); assert.strictEqual(video.paused, false, "collapsed video stays warm");
+    assert.strictEqual($("video-panel").hidden, true);
+    media.currentTime = 5;
+    fire([media], "seeking");
+    assert.strictEqual(video.currentTime, 5, "hidden video follows seeks too");
+    let seekCount = 0, videoTime = video.currentTime;
+    Object.defineProperty(video, "currentTime", { configurable: true,
+      get() { return videoTime; }, set(value) { seekCount++; videoTime = value; } });
+    $("toggle-video").onclick(); assert.strictEqual(video.currentTime, 5);
+    assert.strictEqual(seekCount, 0, "revealing an in-sync video must not trigger a seek");
+    media.paused = true; fire([media], "pause"); assert.strictEqual(video.paused, true);
+    context.setVideo(null);
+    assert.strictEqual($("video-tools").hidden, true);
+    assert.strictEqual($("video-panel").hidden, true);
   }
   finished = true;
   console.log("ok");

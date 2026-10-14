@@ -168,8 +168,8 @@
     </div>
   </div>
   <div id="player-empty">
-    <p id="player-hint">Open an audio file to analyze it here.</p>
-    <span class="player-start"><button id="open-wav" title="Open a WAV or MP3 file">Open audio file…</button>
+    <p id="player-hint">Open an audio or video file to analyze it here.</p>
+    <span class="player-start"><button id="open-wav" title="Open audio or video for review">Open audio / video…</button>
       <button id="open-live" title="Record from a microphone, or import from a recorder's headphone jack">Record live…</button></span>
   </div>
   <div id="player-loaded" hidden>
@@ -179,6 +179,14 @@
         <div id="now-playing"></div>
         <span id="enhanced-tag" class="enhanced-tag" hidden title="You hear this recording enhanced (Enhance, on the right). The file itself is never changed.">Enhanced</span>
         <label id="reviewed-label" title="Tick when you have listened through this recording"><input type="checkbox" id="reviewed"> Reviewed</label>
+      </div>
+      <div id="video-tools" hidden>
+        <button id="toggle-video" aria-expanded="true" aria-controls="video-panel">Hide video</button>
+        <span class="muted">Video follows the audio playback controls.</span>
+      </div>
+      <div id="video-panel" hidden>
+        <video id="review-video" muted playsinline preload="metadata" aria-label="Video preview"></video>
+        <p id="video-error" role="status" hidden>Video preview could not play. You can still review the audio.</p>
       </div>
       <div id="waveform"></div>
       <div id="selection-bar">
@@ -277,7 +285,7 @@
       </div>
       </div>
     </div>
-    <button id="open-wav-2" class="link" title="Open another WAV or MP3 file">Open audio file…</button>
+    <button id="open-wav-2" class="link" title="Open another audio or video file">Open audio / video…</button>
   </div>
 </footer>
 <div id="status"></div>

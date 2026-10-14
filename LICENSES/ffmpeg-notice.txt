@@ -1,0 +1,18 @@
+Video support uses imageio-ffmpeg 0.6.0, licensed BSD-2-Clause.
+Its package metadata and license are included in the Windows application.
+Project: https://github.com/imageio/imageio-ffmpeg
+
+The Windows wheel includes FFmpeg 7.1 essentials, built by gyan.dev.
+Copyright (c) 2000-2024 the FFmpeg developers.
+This build is licensed under the GNU General Public License version 3 or
+later. The GPL version 3 license text is in OpenEVP's LICENSE.
+FFmpeg is distributed WITHOUT ANY WARRANTY; without even the implied
+warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+FFmpeg project and source: https://ffmpeg.org/
+FFmpeg 7.1 source: https://ffmpeg.org/releases/ffmpeg-7.1.tar.xz
+Windows build information: https://www.gyan.dev/ffmpeg/builds/
+Binary distribution: https://github.com/imageio/imageio-binaries
+
+OpenEVP invokes FFmpeg as a separate executable to extract audio and create
+temporary silent H.264 previews. It does not modify the executable.

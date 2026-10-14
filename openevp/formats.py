@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from openevp import wavinfo as _wavinfo
+from openevp import video as _video
 from openevp.decoders import mp3 as _mp3dec
 from sony_icd import audio as _dvf_audio
 from sony_icd import dvf as _dvf
@@ -392,7 +393,20 @@ MP3 = MP3_FORMATS[0]
 
 
 # ---- the registry -------------------------------------------------------------
-_registry = {WAV.ext: WAV, DVF.ext: DVF, **{f.ext: f for f in MP3_FORMATS}}
+VIDEO_DECODER = _video.Decoder()
+VIDEO_FORMATS = tuple(Format(ext=ext, label="Video", decoder=VIDEO_DECODER,
+                            same=lambda existing, new: existing == new, seconds=lambda path: None)
+                      for ext in _video.EXTENSIONS)
+_registry = {WAV.ext: WAV, DVF.ext: DVF, **{f.ext: f for f in MP3_FORMATS},
+             **{f.ext: f for f in VIDEO_FORMATS}}
+
+
+def read_source(fmt, path):
+    """Video decoders read from disk; other decoders consume native bytes."""
+    if fmt in VIDEO_FORMATS:
+        return os.path.abspath(path)
+    with open(path, "rb") as f:
+        return f.read()
 
 
 def by_ext(ext):

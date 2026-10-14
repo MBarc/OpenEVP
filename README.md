@@ -24,7 +24,7 @@ still exists at all. So I wrote this for my team. You plug the recorder in,
 OpenEVP pulls the recordings off, and you can go through them properly. 👻
 
 Right now it talks to the Sony ICD-ST25 and ICD-ST10, with more recorders on
-the way. And whatever you record on, it opens WAV and MP3 files too.
+the way. And whatever you record on, it opens WAV, MP3 and video files too.
 
 ## Your recorder works on a modern PC again
 
@@ -96,7 +96,8 @@ recording on it as its own file.
 ## A few more things
 
 - It opens WAV and MP3 files from anywhere on your PC, including voice notes
-  and clips saved from WhatsApp Web.
+  and clips saved from WhatsApp Web. Open a video to review its audio with an
+  optional video panel that follows playback, seeking, loops and speed changes.
 - Right-click any recording to show it in File Explorer, rename it, or delete
   it. Deleted recordings go to the Recycle Bin, and if you restore one, its
   EVP marks come back with it.
@@ -261,3 +262,6 @@ licence:
   installer runs it only when WebView2 is missing.
 - **wavesurfer.js:** `app/ui/vendor/wavesurfer.min.js` is wavesurfer.js
   (BSD-3-Clause).
+- **imageio-ffmpeg and FFmpeg:** video audio extraction and preview generation
+  use imageio-ffmpeg 0.6.0 (BSD-2-Clause), which bundles FFmpeg 7.1 for Windows
+  (GPL-3.0-or-later). See [`LICENSES/ffmpeg-notice.txt`](LICENSES/ffmpeg-notice.txt).

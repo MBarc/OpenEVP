@@ -115,7 +115,8 @@ Get-FileHash dist\openevp-cli.exe -Algorithm SHA256
 python -m PyInstaller --noconfirm --clean --onedir --windowed --name "OpenEVP" `
     --icon assets\openevp.ico --add-binary "$dll;." --add-data "app/ui;app/ui" `
     --add-data "assets/openevp.ico;assets" --add-data "app/driver;driver" --add-data "LICENSES;LICENSES" `
-    --hidden-import lameenc --copy-metadata lameenc @decoder openevp-app.py
+    --hidden-import lameenc --copy-metadata lameenc `
+    --collect-all imageio_ffmpeg --copy-metadata imageio-ffmpeg @decoder openevp-app.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller (app) failed" }
 if ((Get-PeMachine "dist\OpenEVP\OpenEVP.exe") -ne $AMD64) { throw "the built app is not x64" }
 foreach ($f in "install-winusb.ps1", "uninstall-winusb.ps1", "manifest.ps1", "models.json") {

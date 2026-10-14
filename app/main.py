@@ -290,7 +290,8 @@ def _own_taskbar_identity():
 SMOKE_FLAG = "--smoke"
 # Open audio file…: WAV and MP3 (with the other extensions MP3 files are saved
 # under, e.g. WhatsApp Web's .mpeg).
-AUDIO_FILE_TYPES = ("Audio files (*.wav;*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a)", "WAV audio (*.wav)",
+AUDIO_FILE_TYPES = ("Audio and video (*.wav;*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a;*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wmv;*.mpg;*.mts;*.m2ts)",
+                    "Video files (*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wmv;*.mpg;*.mts;*.m2ts)", "WAV audio (*.wav)",
                     "MP3 audio (*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a)", "All files (*.*)")
 SMOKE_TIMEOUT = 60                      # seconds for the page to load and answer
 

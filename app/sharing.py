@@ -610,8 +610,7 @@ class ShareOps:
         if f is not None:
             with f:
                 return f.read()
-        with open(path, "rb") as src:
-            data = src.read()
+        data = formats.read_source(fmt, path)
         out = io.BytesIO()
         formats.write_wav(fmt, data, out, should_stop=self._stop.is_set)
         return out.getvalue()

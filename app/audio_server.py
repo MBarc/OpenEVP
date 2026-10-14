@@ -287,7 +287,7 @@ class AudioServer:
     def _url(self, file_id):
         return f"http://127.0.0.1:{self._httpd.server_address[1]}/{self._token}/{file_id}.wav"
 
-    def prepare(self, key, make=None, write=None, expected=None, fingerprint=True):
+    def prepare(self, key, make=None, write=None, expected=None, fingerprint=True, preview=None):
         """Decode a recording into the cache (once per key) and return _info().
         ``write(f)``, when given, decodes straight into the cache file ``f`` (a
         seekable binary file), so a long recording is never held in memory;
@@ -329,12 +329,16 @@ class AudioServer:
                         peaks, duration, rate, fp = _analyze(f, fingerprint)
                         channels = _channels(f)
                         size = os.fstat(f.fileno()).st_size
+                    if preview is not None:
+                        preview(path[:-4] + ".mp4")
+                        size += os.path.getsize(path[:-4] + ".mp4")
                 except BaseException:
                     self._remove(path)
+                    self._remove(path[:-4] + ".mp4")
                     raise
                 with self._lock:
                     self._entries[key] = {"file": file_id, "size": size, "peaks": peaks, "duration": duration,
-                                          "rate": rate, "channels": channels, "fp": fp}
+                                          "rate": rate, "channels": channels, "fp": fp, "video": preview is not None}
                     self._by_file[file_id] = key
                     self._evict(keep=key)
                 return self._info(self._entries[key])
@@ -423,7 +427,8 @@ class AudioServer:
         from the audio itself), and the audio fingerprint (openevp.wavinfo) of
         the decoded samples."""
         return {"url": self._url(e["file"]), "peaks": e["peaks"], "duration": e["duration"], "rate": e["rate"],
-                "channels": e["channels"], "fp": e["fp"]}
+                "channels": e["channels"], "fp": e["fp"],
+                **({"video_url": self._url(e["file"])[:-4] + ".mp4"} if e.get("video") else {})}
 
     def _file_of(self, url):
         """(path, entry) of the audio a URL of this server serves; ValueError if none."""
@@ -587,6 +592,8 @@ class AudioServer:
         self._by_file.pop(e["file"], None)
         if "path" in e:
             return                                   # the user's own file: never deleted
+        if e.get("video"):
+            self._remove(os.path.join(self._dir, e["file"] + ".mp4"))
         try:
             os.remove(os.path.join(self._dir, e["file"] + ".wav"))
         except OSError:
@@ -599,14 +606,15 @@ class AudioServer:
         if t:
             self._tile(h, t)
             return
-        m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.wav", h.path)
+        m = re.fullmatch(r"/([^/]+)/([0-9a-f]{16})\.(wav|mp4)", h.path)
         with self._lock:
             ok = m and secrets.compare_digest(m.group(1), self._token) and m.group(2) in self._by_file
             entry = self._entries.get(self._by_file[m.group(2)]) if ok else None
-        if not entry:
+        if not entry or (m.group(3) == "mp4" and not entry.get("video")):
             h.send_error(404)
             return
-        path = entry.get("path") or os.path.join(self._dir, m.group(2) + ".wav")
+        is_video = m.group(3) == "mp4"
+        path = entry.get("path") or os.path.join(self._dir, m.group(2) + (".mp4" if is_video else ".wav"))
         try:
             f = _open_shared(path)
         except OSError:
@@ -632,7 +640,7 @@ class AudioServer:
                     return
                 status = 206
             h.send_response(status)
-            h.send_header("Content-Type", "audio/wav")
+            h.send_header("Content-Type", "video/mp4" if is_video else "audio/wav")
             h.send_header("Accept-Ranges", "bytes")
             h.send_header("Content-Length", str(end - start + 1))
             if status == 206:

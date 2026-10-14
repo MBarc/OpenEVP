@@ -1463,9 +1463,8 @@ class Api(ShareOps, LibraryOps, LiveOps):
                 return wav, os.path.join(self._dest, src["safe_name"]), os.path.splitext(native_name)[0]
             path = src["path"]
             name = os.path.basename(path)
-            with open(path, "rb") as f:
-                raw = f.read()
             fmt = formats.by_ext(os.path.splitext(name)[1])
+            raw = formats.read_source(fmt, path)
             if fmt is not None and fmt is not formats.WAV:
                 problem = _decoder_problem(fmt) or fmt.data_problem(raw)
                 if problem:
@@ -2018,8 +2017,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
             if fmt.max_bytes is not None and st.st_size > fmt.max_bytes:
                 return f"too large to be {fmt.a_recording()}"
         try:
-            with open(path, "rb") as f:
-                raw = f.read()
+            raw = formats.read_source(fmt, path)
             if fmt is formats.WAV:
                 wav = raw
             else:
@@ -2130,13 +2128,26 @@ class Api(ShareOps, LibraryOps, LiveOps):
             report = self._open_progress(job)
 
             def write(out):
-                with open(path, "rb") as f:
-                    data = f.read()
+                if fmt in formats.VIDEO_FORMATS:
+                    report("extract", 0)
+                data = formats.read_source(fmt, path)
                 self._reserve(fmt, data)
                 formats.write_wav(fmt, data, out, should_stop=lambda: self._stop.is_set() or self._opening != key,
                                   progress=lambda fraction: report("convert", fraction))
                 report("finish", 1.0)
-            return self._loaded(self._server.prepare(key, write=write), name, name, source, {"name": name})
+            if fmt in formats.VIDEO_FORMATS:
+                from openevp import video
+
+                def preview(target):
+                    report("video", 0)
+                    video.preview(path, target, should_stop=lambda: self._stop.is_set() or self._opening != key)
+                    now = os.stat(path)
+                    if (now.st_size, now.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+                        raise ValueError("the video changed while it was being read; try again")
+                info = self._server.prepare(key, write=write, preview=preview)
+            else:
+                info = self._server.prepare(key, write=write)
+            return self._loaded(info, name, name, source, {"name": name})
         except Exception as e:
             return _fail(f"Could not play {name}: {_plain(e)}")
 
@@ -2155,7 +2166,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
         if not path:
             return {"ok": False, "cancelled": True}
         fmt = formats.by_ext(os.path.splitext(path)[1])
-        if fmt is not None and fmt.sniff is not None:
+        if fmt is not None and fmt is not formats.WAV:
             return self._play_file(path)
         try:
             info = self._server.prepare_file(path)
@@ -2442,8 +2453,7 @@ class Api(ShareOps, LibraryOps, LiveOps):
             elif fmt.max_bytes is not None and size > fmt.max_bytes:
                 error = f"{name} is too large to be {fmt.a_recording()}."
             else:
-                with open(path, "rb") as f:
-                    data = f.read()
+                data = formats.read_source(fmt, path)
                 fp, length = formats.analyze(fmt, data, should_stop=cancelled)
                 del data
         except (formats.Cancelled, wavinfo.Stopped):

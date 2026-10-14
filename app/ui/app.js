@@ -112,10 +112,10 @@ window.addEventListener("pywebviewready", async () => {
   setupLive();
   loadLibrary();
   if (S.caps.wav) {
-    $("player-hint").textContent = "Select a recording, or open an audio file, to analyze it here.";
+    $("player-hint").textContent = "Select a recording, or open an audio or video file, to analyze it here.";
     $("device-table").classList.add("playable");
   } else {
-    $("player-hint").textContent = "Open an audio file to analyze it here. Recordings can't be played " +
+    $("player-hint").textContent = "Open an audio or video file to analyze it here. Recordings can't be played " +
                                    "here. " + wavStatus();
     const wav = $("format").querySelector('option[value="wav"]');
     wav.disabled = true;
@@ -2370,6 +2370,60 @@ window.onBackendEvent = (event, p) => {
   }
 };
 
+// Audio is the master clock, including enhancement reloads and selection loops.
+// Keep the muted preview on the audio clock while collapsed, so revealing it
+// doesn't require a seek and decoder restart before the first frame appears.
+const V = { url: null, shown: true, media: null, waiting: false, pending: false };
+function setVideo(url) {
+  const video = $("review-video");
+  if (V.url) { video.pause(); video.removeAttribute("src"); video.load(); }
+  V.url = url || null;
+  V.waiting = false;
+  $("video-tools").hidden = !V.url;
+  $("video-panel").hidden = !V.url || !V.shown;
+  $("video-error").hidden = true;
+  if (V.url) { video.muted = true; video.src = V.url; video.load(); }
+}
+
+function syncVideo(force = false) {
+  if (!V.url || !V.media) return;
+  const video = $("review-video"), media = V.media;
+  if (video.readyState < 1) return;
+  const time = Math.max(0, Math.min(media.currentTime || 0, video.duration || Infinity));
+  video.muted = true;
+  video.playbackRate = media.playbackRate || 1;
+  if (Math.abs(video.currentTime - time) > (force ? 0.01 : 0.15)) video.currentTime = time;
+  if (media.paused || media.ended || V.waiting || time >= video.duration) video.pause();
+  else if (video.paused && !V.pending && !video.error) {
+    V.pending = true;
+    const url = V.url;
+    video.play().catch((e) => {
+      if (url === V.url && e.name !== "AbortError") $("video-error").hidden = false;
+    }).finally(() => { V.pending = false; });
+  }
+}
+
+function setupVideo(media) {
+  V.media = media;
+  const video = $("review-video");
+  $("toggle-video").onclick = () => {
+    V.shown = !V.shown;
+    $("video-panel").hidden = !V.shown;
+    $("toggle-video").textContent = V.shown ? "Hide video" : "Show video";
+    $("toggle-video").setAttribute("aria-expanded", String(V.shown));
+    syncVideo();
+  };
+  video.addEventListener("loadedmetadata", () => syncVideo(true));
+  video.addEventListener("error", () => { if (V.url) $("video-error").hidden = false; });
+  for (const event of ["timeupdate", "seeking", "seeked", "play", "pause", "ended", "ratechange", "playing", "waiting", "emptied"]) {
+    media.addEventListener(event, () => {
+      if (event === "waiting" || event === "emptied") V.waiting = true;
+      if (event === "playing" || event === "seeked") V.waiting = false;
+      syncVideo(event === "seeking" || event === "seeked" || event === "pause");
+    });
+  }
+}
+
 function setupPlayer() {
   const css = getComputedStyle(document.body);
   // Our own media element, asking for CORS: the audio comes from the audio server (another local
@@ -2377,6 +2431,7 @@ function setupPlayer() {
   const media = document.createElement("audio");
   media.crossOrigin = "anonymous";
   media.preload = "auto";
+  setupVideo(media);
   S.ws = WaveSurfer.create({ container: "#waveform", height: 80, media,
                              waveColor: css.getPropertyValue("--muted").trim(),
                              progressColor: css.getPropertyValue("--accent").trim() });
@@ -3329,7 +3384,7 @@ function tick() { $("time").textContent = `${fmtTime(S.ws.getCurrentTime())} / $
 // file: not while its file dialog is up). The bar is the current stage's share; time left is
 // said once a stage has run a few seconds, from its own rate.
 const OPENING_DELAY = 500;
-const OPENING_STAGES = { download: "Reading from the recorder", convert: "Converting", finish: "Almost ready" };
+const OPENING_STAGES = { download: "Reading from the recorder", convert: "Converting", extract: "Extracting video audio", video: "Preparing video preview", finish: "Almost ready" };
 
 function openingStart(job, label, onReport = false) {
   openingEnd();
@@ -3355,7 +3410,10 @@ function openingReport(p) {
   fill.className = "";
   fill.style.width = `${Math.round(100 * p.fraction)}%`;
   const name = OPENING_STAGES[p.stage] || "Opening";
-  if (p.stage === "finish") { $("opening-detail").textContent = `${name}…`; return; }
+  if (["finish", "video", "extract"].includes(p.stage)) {
+    fill.className = "unknown";
+    $("opening-detail").textContent = `${name}…`; return;
+  }
   let text = `${name}… ${Math.floor(100 * p.fraction)}%`;
   const ran = (now - o.since) / 1000, done = p.fraction - o.from;
   if (ran > 3 && done > 0.02) text += `, ${openingTimeLeft(ran / done * (1 - p.fraction))}`;
@@ -3480,6 +3538,7 @@ function setupMarks() {
 
 // The recording now in the player (its label and the backend's audio result), or none (null).
 function setCurrent(label, r) {
+  setVideo(r && r.video_url);
   closeMarkForm();
   liveCutsLeft(r);                              // an import's cuts belong to it (live.js)
   S.activeMark = null; S.markLoop = false;      // another recording: nothing selected or looping

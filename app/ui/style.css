@@ -376,3 +376,9 @@ html.night #live-clip { background: #8f2a2a; color: #f0c0c0; }
 .cut-chip { display: inline-flex; align-items: center; gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 0 2px 0 8px; }
 .cut-remove { background: none; border: none; color: var(--muted); cursor: pointer; padding: 0 4px; }
 .cut-remove:disabled { cursor: default; opacity: .5; }
+#video-tools { display: flex; align-items: center; gap: 12px; margin: 8px 0; }
+#video-tools[hidden], #video-panel[hidden] { display: none; }
+#video-panel { margin: 8px 0 12px; text-align: center; }
+#review-video { display: block; width: 100%; max-height: min(30vh, 300px); background: #000; object-fit: contain; border-radius: 6px; }
+#player:has(#video-tools:not([hidden])) { max-height: 75vh; overflow-y: auto; flex-shrink: 0; }
+#video-error { color: var(--muted); }
