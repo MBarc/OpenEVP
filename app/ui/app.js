@@ -2451,6 +2451,7 @@ function setupPlayer() {
   setupSelection();                         // once: the plugin stays registered across loads
   setupMarks();
   $("open-wav").onclick = openWav;
+  $("open-media").onclick = openWav;
   $("open-wav-2").onclick = openWav;
 }
 

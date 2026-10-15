@@ -96,7 +96,8 @@ recording on it as its own file.
 ## A few more things
 
 - It opens WAV and MP3 files from anywhere on your PC, including voice notes
-  and clips saved from WhatsApp Web. Open a video to review its audio with an
+  and clips saved from WhatsApp Web. Use **Open audio / video…** in the top
+  toolbar to choose a file from your PC. Open a video to review its audio with an
   optional video panel that follows playback, seeking, loops and speed changes.
 - Right-click any recording to show it in File Explorer, rename it, or delete
   it. Deleted recordings go to the Recycle Bin, and if you restore one, its

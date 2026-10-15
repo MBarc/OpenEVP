@@ -288,8 +288,7 @@ def _own_taskbar_identity():
 # It uses a throwaway data folder and save folder, no updater (no network) and no
 # driver setup; without the flag nothing changes.
 SMOKE_FLAG = "--smoke"
-# Open audio file…: WAV and MP3 (with the other extensions MP3 files are saved
-# under, e.g. WhatsApp Web's .mpeg).
+# Open audio / video: supported review formats, including MP3 aliases.
 AUDIO_FILE_TYPES = ("Audio and video (*.wav;*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a;*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wmv;*.mpg;*.mts;*.m2ts)",
                     "Video files (*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.wmv;*.mpg;*.mts;*.m2ts)", "WAV audio (*.wav)",
                     "MP3 audio (*.mp3;*.mpeg;*.mpga;*.mp2;*.m2a)", "All files (*.*)")

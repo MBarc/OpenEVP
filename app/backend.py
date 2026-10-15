@@ -2152,11 +2152,12 @@ class Api(ShareOps, LibraryOps, LiveOps):
             return _fail(f"Could not play {name}: {_plain(e)}")
 
     def open_wav(self):
-        """Let the user pick an audio file (Open audio file: a WAV, or an MP3 by any
-        of its extensions, .mpeg included) and prepare it for the player. The path
-        comes only from the file dialog, never from the page. An MP3 is decoded
-        through the audio server like a library file; anything else is opened as
-        a WAV."""
+        """Pick audio or video and prepare it for review, including video preview.
+
+        The path comes only from the native file dialog. Registered formats use
+        the same decoder as library playback; other files are tried as WAV.
+        The bridge name is retained for compatibility.
+        """
         if self._pick_wav is None:
             return _fail("Opening files is not available here.")
         try:
