@@ -30,7 +30,7 @@ from .export import save_dvf
 from .folder import TableError, parse
 from .protocol import Recorder, RecorderError
 from .session import build_dvf
-from .usb import UsbError
+from .usb import DeviceBusy, UsbError
 
 LETTERS = "ABCDE"
 MODELS = ("ICD-ST25", "ICD-ST10")      # the identify strings verified; any other is read as an ST25
@@ -82,6 +82,10 @@ def run(args, progress=None):
     problems = pr.problems
     try:
         rec = Recorder()
+    except DeviceBusy as e:
+        print(f"\nCould not open the recorder: {e}")
+        print("Close OpenEVP (every window) or any other program using the recorder, then try again.")
+        return 2
     except UsbError as e:
         print(f"\nCould not open the recorder: {e}")
         print("Check that it is plugged in and that its driver is WinUSB (see docs/technical.md).")

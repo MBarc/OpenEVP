@@ -21,7 +21,7 @@ from sony_icd import policy  # noqa: E402
 from sony_icd.folder import PAGE, TableError  # noqa: E402
 from sony_icd.protocol import PID, VID, RecorderError, RecorderStuck  # noqa: E402
 from sony_icd.session import RecorderSession  # noqa: E402
-from sony_icd.usb import DriverMissing, UsbError  # noqa: E402
+from sony_icd.usb import DeviceBusy, DriverMissing, UsbError  # noqa: E402
 
 UNDATED = b"\xff" * 8
 FEB31 = bytes.fromhex("07ed021f0b0c0d00")        # 2029-02-31 11:12:13: shown as stored (A12)
@@ -310,6 +310,20 @@ class ErrorTests(unittest.TestCase):
                 model.open(device)
             self.assertEqual(str(caught.exception), str(exc))
             self.assertEqual(base.state_for(caught.exception)[0], state)
+
+    def test_a_recorder_in_use_by_another_program_says_so(self):
+        # e.g. a second OpenEVP window: WinUSB lets only one program open the recorder.
+        model = recorders.get("sony-icd-st25")
+        device = base.DiscoveredDevice(PORT_ID, model.model_id, "port 1-4", locator=PORT_ID)
+        exc = DeviceBusy("the recorder on USB port 1-4 is in use by another program, "
+                         "probably another OpenEVP window (LIBUSB_ERROR_ACCESS)")
+        with mock.patch("sony_icd.protocol.Device", side_effect=exc), \
+                self.assertRaises(base.RecorderError) as caught:
+            model.open(device)
+        self.assertEqual(str(caught.exception), str(exc))
+        self.assertEqual(caught.exception.advice, sony_st25.BUSY_ADVICE)
+        self.assertIn("other OpenEVP window", sony_st25.BUSY_ADVICE)
+        self.assertEqual(base.state_for(caught.exception), (base.NEEDS_REPLUG, True))
 
     def test_a_failed_connect_releases_the_device(self):
         class Silent(Device):

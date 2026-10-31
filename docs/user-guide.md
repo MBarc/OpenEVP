@@ -103,6 +103,15 @@ answering "busy". **Unplug the USB cable, wait a few seconds, plug it back
 in**, and try again. Anything already saved gets skipped, so you won't end up
 with doubles.
 
+### It says the recorder is in use by another program
+
+Only one program at a time can talk to the recorder. This usually means a
+second OpenEVP window is open, sometimes one left behind other windows or
+started days ago (for example by the installer). **Close every OpenEVP
+window** (check the taskbar), and `openevp-cli` too if it's running, then open
+OpenEVP once and unplug and replug the recorder. Older versions showed this as
+`LIBUSB_ERROR_ACCESS`.
+
 ## Deleting recordings from the recorder
 
 Once your recordings are safe on the PC, you can clear them off the recorder.
