@@ -13,7 +13,7 @@ DATE = bytes.fromhex("07ed051713360403")   # 2029-05-23 19:54:04, Wednesday
 
 
 def make_table(messages):
-    """messages: list of (slot, start_counter, start_addr, length, date, owner),
+    """messages: list of (list id, start_counter, start_addr, length, date, owner),
     optionally with a 7th item, the message-list mode byte (0x00 LP, as on the
     ICD-ST25; 0x6c for the ICD-ST10's LPEC ST, whose entries carry a 90 00 tag
     where the ST25 has 03 00 before the owner name)."""
@@ -23,13 +23,14 @@ def make_table(messages):
         base = page * PAGE + offset
         t[base:base + len(data)] = data
 
-    rank = {slot: r for r, slot in enumerate(sorted(m[0] for m in messages))}
-    for i, (slot, counter, start, length, date, owner, *mode) in enumerate(messages):
+    for i, (ident, counter, start, length, date, owner, *mode) in enumerate(messages):
         mode = mode[0] if mode else 0x00
-        put(0, i * 4, struct.pack(">HH", slot, 0x6000 | mode))
+        put(0, i * 4, struct.pack(">HH", ident, 0x6000 | mode))
+        # As on a real ICD-ST10 whose list ids have a gap from a deletion: every
+        # other page is indexed by the message's position in the list, not its id.
+        slot = i
         put(2 + slot // 128, (slot % 128) * 4, struct.pack(">I", counter))
-        r = rank[slot]                       # one extent per message, in slot order
-        put(5 + r // 64, (r % 64) * 8, struct.pack(">II", start, (start + length - 1) | 0x80000000))
+        put(5 + slot // 64, (slot % 64) * 8, struct.pack(">II", start, (start + length - 1) | 0x80000000))
         entry = bytearray(b"\xff" * 512)
         entry[274:276] = b"\x03\x00" if mode == 0x00 else b"\x90\x00"
         name = owner.encode("latin-1")
@@ -165,9 +166,9 @@ class FakeRecorderDevice:
                 return
             msgs = self.folders.get(folder, [])
             if self.delete_status == 0 and number <= len(msgs):
+                # The real ST10 packs the other pages by position (make_table) but keeps
+                # the list's ids, leaving a gap where the deleted one was.
                 del msgs[number - 1]
-                # The real ST10 compacts: slots renumbered 0..n-1, extents in slot order (make_table).
-                msgs[:] = [(i, *m[1:]) for i, m in enumerate(msgs)]
             self.queue = [bytes([0x09]) + policy.FRAME_PREFIX[1:] + bytes([0x12, self.delete_status])]
             return
         words = struct.unpack(f">{(len(data) - 12) // 4}I", data[12:])

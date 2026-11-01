@@ -65,8 +65,20 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(r.delete_message(1, 2), 0)
         self.assertEqual(r.dev.delete_calls, [(1, 2)])
         self.assertEqual([m[1] for m in r.dev.folders[1]], [1, 3])          # counters: the second went
-        self.assertEqual([m[0] for m in r.dev.folders[1]], [0, 1])          # slots renumbered
+        self.assertEqual([m[0] for m in r.dev.folders[1]], [0, 2])          # list ids keep the gap
         self.assertEqual(folder_counts(r.target_status())[1], 2)
+
+    def test_recordings_after_a_deleted_one_still_download(self):
+        # A real ICD-ST10 (2026-10-31): after a deletion left a gap in the list's ids,
+        # every recording from the gap on failed "does not match the folder table".
+        from sony_icd.session import RecorderSession
+        r = recorder()
+        self.assertEqual(r.delete_message(1, 1), 0)
+        s = RecorderSession(r)
+        msgs = s.messages("A")
+        self.assertEqual([(m.ident, m.slot, m.start_counter) for m in msgs], [(1, 0, 2), (2, 1, 3)])
+        for m in msgs:
+            self.assertEqual(s.download("A", m.number).error, "")
 
     def test_a_refusal_is_the_status_byte(self):
         r = recorder()
