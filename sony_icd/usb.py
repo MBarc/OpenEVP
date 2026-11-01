@@ -12,6 +12,8 @@ import sys
 
 from . import policy
 
+LIBUSB_ERROR_ACCESS = -3           # Windows: another program already has the device open
+LIBUSB_ERROR_BUSY = -6
 LIBUSB_ERROR_TIMEOUT = -7
 LIBUSB_ERROR_NOT_SUPPORTED = -12   # Windows: the device is not bound to WinUSB
 
@@ -22,6 +24,18 @@ class UsbError(Exception):
 
 class DriverMissing(UsbError):
     """The recorder is attached but not bound to WinUSB (see docs/technical.md)."""
+
+
+class DeviceBusy(UsbError):
+    """The recorder is attached but another program has it open. WinUSB lets only
+    one program open a device at a time, so this is usually a second OpenEVP
+    window (or openevp-cli) that is still running."""
+
+
+def _busy(rc):
+    """Whether a libusb_open/claim result means another program has the device
+    (on Linux LIBUSB_ERROR_ACCESS means a permissions problem instead)."""
+    return rc == LIBUSB_ERROR_BUSY or (rc == LIBUSB_ERROR_ACCESS and sys.platform == "win32")
 
 
 class _DeviceDescriptor(ctypes.Structure):
@@ -191,13 +205,19 @@ class Device:
         if rc != 0:
             raise UsbError(f"libusb_init failed: {error_name(rc)}")
         if device_id is None:
-            self._h = lib.libusb_open_device_with_vid_pid(self._ctx, vid, pid)
-            if not self._h:
-                self._fail(UsbError(f"device {vid:04x}:{pid:04x} not found, busy, or not bound to WinUSB"))
-        else:
-            self._h = self._open_id(vid, pid, device_id)
+            # The first one attached. Opened by id (not libusb_open_device_with_vid_pid,
+            # which hides why an open failed) so a busy or driverless recorder says so.
+            with _device_list(lib, self._ctx) as devices:
+                found = _find(lib, devices, vid, pid)
+            if not found:
+                self._fail(UsbError(f"device {vid:04x}:{pid:04x} not found"))
+            device_id = found[0][1]
+        self._h = self._open_id(vid, pid, device_id)
         lib.libusb_set_auto_detach_kernel_driver(self._h, 1)   # no-op on Windows
         rc = lib.libusb_claim_interface(self._h, 0)
+        if _busy(rc):
+            self.close()
+            raise DeviceBusy(f"cannot claim interface 0: {error_name(rc)} (another program is using the recorder)")
         if rc != 0:
             self.close()
             raise UsbError(f"cannot claim interface 0: {error_name(rc)} (is another program using the recorder?)")
@@ -224,6 +244,9 @@ class Device:
             self._fail(UsbError(f"the recorder on USB port {port} is no longer connected"))
         if rc == LIBUSB_ERROR_NOT_SUPPORTED:
             self._fail(DriverMissing(f"the recorder on USB port {port} does not have the WinUSB driver"))
+        if _busy(rc):
+            self._fail(DeviceBusy(f"the recorder on USB port {port} is in use by another program, "
+                                  f"probably another OpenEVP window ({error_name(rc)})"))
         if rc != 0:
             self._fail(UsbError(f"cannot open the recorder on USB port {port}: {error_name(rc)}"))
         return handle.value

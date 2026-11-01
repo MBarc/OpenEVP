@@ -31,6 +31,8 @@ always used):
 
     sony_icd exception                      raised as        state / session
     sony_icd.usb.DriverMissing              DriverMissing    needs_driver / kept
+    sony_icd.usb.DeviceBusy (another        RecorderError    needs_replug / closed
+      program has it open)                  (BUSY_ADVICE)
     sony_icd.protocol.RecorderError (incl.  RecorderError    needs_replug / closed
       RecorderStuck), sony_icd.usb.UsbError,
       sony_icd.folder.TableError
@@ -38,7 +40,8 @@ always used):
     a call on a closed session              NotReady         needs_replug / closed
     ValueError (unknown folder/number)      ValueError       unchanged / kept
 
-Messages are the sony_icd exception's text unchanged; advice is left to the app.
+Messages are the sony_icd exception's text unchanged; advice is left to the app,
+except for DeviceBusy, where the app's usual "replug" advice alone would not help.
 """
 import logging
 
@@ -49,6 +52,7 @@ from sony_icd.folder import TableError
 from sony_icd.protocol import PID, VID, RecorderError as _IcdRecorderError
 from sony_icd import protocol as _protocol
 from sony_icd.session import LETTERS, RecorderSession
+from sony_icd.usb import DeviceBusy as _IcdDeviceBusy
 from sony_icd.usb import DriverMissing as _IcdDriverMissing
 from sony_icd.usb import UsbError, list_devices
 
@@ -57,12 +61,18 @@ SETUP_PREFIX = _pnp.SETUP_PREFIX
 MODEL_IDS = {"ICD-ST25": "sony-icd-st25", "ICD-ST10": "sony-icd-st10"}
 _log = logging.getLogger(__name__)
 SETUP_MESSAGE = "This recorder's driver is not set up on this PC yet."   # shown in the recorder list
+# Only one program at a time can open a WinUSB device: a second OpenEVP window (often one
+# left open behind others) keeps every other one from reaching the recorder.
+BUSY_ADVICE = ("Close any other OpenEVP window (check the taskbar) or other program using the recorder, "
+               "then unplug the recorder's USB cable and plug it back in.")
 
 
 def _translated(e):
     """The shared-vocabulary exception for a sony_icd one, or None to let it through."""
     if isinstance(e, _IcdDriverMissing):
         return base.DriverMissing(str(e))
+    if isinstance(e, _IcdDeviceBusy):
+        return base.RecorderError(str(e), BUSY_ADVICE)
     if isinstance(e, (_IcdRecorderError, UsbError, TableError)):
         return base.RecorderError(str(e))
     return None
