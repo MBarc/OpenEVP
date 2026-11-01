@@ -40,7 +40,10 @@ BUILDS = {
 TABLE = [(0, 0x3AB79EC2, 0x1D0000, 2958, DATE, "Casey Q Hunters"),
          (70, 5, 0x200000, 5000, b"\xff" * 8, "Z"),
          (3, 9, 0x1000, 3000, DATE, "")]
-TABLE_SHA = "0410ffdcf29b0bd48d7064d822554a89d5b744f3e6eb683179b0d71a9d582d90"
+# Repinned when the table's pages were found to be indexed by list position, not by the
+# list's id (a real ICD-ST10, 2026-10-31): only Message.slot changed (ids 70 and 3 are
+# now slots 1 and 2); every counter, length, block count, date and owner is as before.
+TABLE_SHA = "3c80e7bcc667014b93385bd7bce63eda9d3b20afa2ee7e537cc8e553b207c05d"
 
 # tests/vectors/<name>.dvf -> (validate(), sha256 of payload(), audio_fingerprint)
 VECTOR_SHAS = "4beaa0ef993657d4359fbaadea793cc2545e0cd3632441c0cc3e3c611260cc70"

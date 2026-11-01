@@ -1,7 +1,7 @@
 """Parse an ICD-ST folder table (137 NAND pages of 528 bytes, 512 data + 16 spare).
 
 Pages used (offsets are page numbers):
-  0   message list, one u32 per message in display order: slot (u16), 0x60,
+  0   message list, one u32 per message in display order: id (u16), 0x60,
       then the recording mode (0x00 LP on the ICD-ST25, 0x6C LPEC ST on the
       ICD-ST10: sony_icd.dvf.MODES); 0xFFFFFFFF ends the list (all 0xFF = empty
       folder)
@@ -17,12 +17,17 @@ Pages used (offsets are page numbers):
       which is not parsed: its recordings get no owner name)
 Page 4 is NOT the message list: it keeps 00 01 02 ... even in an empty folder.
 Pages after the live entries hold stale entries from deleted recordings; only
-slots listed on page 0 are used.
+as many as page 0 lists are used.
 
-Verified on one ICD-ST25 with slots 0..19, and one ICD-ST10 with slots 0..2
-(its start timestamps and dates were all 0xFF: its clock had not been set).
-Extents are matched to the listed slots in slot order; seen only with slots
-0..n-1 and one split recording (the last one). More than 64 extents
+"Slot" below is a message's position in the list (number - 1), not its id:
+the other pages are packed by position. On an ICD-ST10 after a deletion the
+ids were 0..6, 8..12 while the counters, extents and entries were in 0..11,
+and GET_VOICE (which takes the position) served each recording with the
+position's counter and length. Reading the pages by id had shifted every
+recording from the gap on by one. Verified on one ICD-ST25 with ids 0..19,
+one ICD-ST10 with ids 0..2 (its start timestamps and dates were all 0xFF: its
+clock had not been set) and that ICD-ST10 with the gap; one split recording
+(the last one). More than 64 extents
 continuing onto page 6 is assumed. Each message is cross-checked against its
 downloaded data (start counter, block lengths, LPEC ST framing), so a wrong
 assumption stops the download instead of producing a bad file. A mode byte other than the known
@@ -54,7 +59,7 @@ class TableError(ValueError):
 @dataclass
 class Message:
     number: int          # 1-based position in the folder (what DVE shows as No.)
-    slot: int
+    slot: int            # number - 1: its index in the table's other pages
     start_counter: int   # first-block timestamp; must match the downloaded data
     length: int          # valid bytes including the 10-byte block headers
     blocks: int
@@ -62,6 +67,7 @@ class Message:
     owner: str
     problem: str = ""    # non-empty: this message cannot be downloaded safely
     mode: int = dvf.MODE_LP   # the message list's mode byte (sony_icd.dvf.MODES)
+    ident: int = -1      # the message list's id (high u16); equals slot until a deletion leaves a gap
 
     @property
     def dated(self):
@@ -110,13 +116,15 @@ def parse(table):
         raise TableError("message list contains a slot twice")
 
     groups = _ranges(table)
-    rank = {slot: i for i, slot in enumerate(sorted(slot for slot, _mode in order))}
     msgs = []
-    for number, (slot, mode) in enumerate(order, 1):
+    for number, (ident, mode) in enumerate(order, 1):
+        # The other pages are indexed by position in the list, not by the list's id:
+        # after a deletion the ids keep a gap that the rest of the table does not.
+        slot = number - 1
         m = Message(number=number, slot=slot, start_counter=0, length=0, blocks=0,
-                    date=b"\xff" * 8, owner="", mode=mode)
+                    date=b"\xff" * 8, owner="", mode=mode, ident=ident)
         msgs.append(m)
-        _fill(m, table, groups[rank[slot]] if rank[slot] < len(groups) else None)
+        _fill(m, table, groups[slot] if slot < len(groups) else None)
         if not m.problem and mode not in dvf.MODES:
             m.problem = f"unknown recording mode 0x{mode:02x} for slot {slot}"
     return msgs

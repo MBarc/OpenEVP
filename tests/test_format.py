@@ -40,11 +40,28 @@ class FolderTests(unittest.TestCase):
         self.assertAlmostEqual(m[0].seconds(), 3.904, places=3)
         self.assertFalse(m[0].problem or m[1].problem)
 
-    def test_slot_beyond_64(self):
+    def test_a_large_list_id_is_only_an_id(self):
         m = parse(make_table([(70, 0x1000, 0x200000, 5000, DATE, "X")]))
+        self.assertEqual((m[0].ident, m[0].slot), (70, 0))
         self.assertEqual(m[0].blocks, 5)
         self.assertEqual(m[0].start_counter, 0x1000)
         self.assertEqual(m[0].problem, "")
+
+    def test_a_gap_in_the_list_ids_does_not_shift_the_table(self):
+        # A real ICD-ST10 after a deletion (2026-10-31): the message list's ids are
+        # 0..6, 8..12, while the counters, extents and entries are packed in 0..11.
+        # Reading them by id gave A-008 on the slot-7 row and A-012 an empty one, and
+        # the recorder (which serves by position) sent the previous recording's data.
+        ids = list(range(7)) + list(range(8, 13))
+        t = make_table([(ident, 0x3554A000 + n, 0x180000 + 0x10000 * n, 3000 + n, DATE, f"R{n}")
+                        for n, ident in enumerate(ids)])
+        m = parse(t)
+        self.assertEqual([x.ident for x in m], ids)
+        self.assertEqual([x.slot for x in m], list(range(12)))
+        self.assertEqual([x.start_counter for x in m], [0x3554A000 + n for n in range(12)])
+        self.assertEqual([x.length for x in m], [3000 + n for n in range(12)])
+        self.assertEqual([x.owner for x in m], [f"R{n}" for n in range(12)])
+        self.assertTrue(all(x.dated and not x.problem for x in m))
 
     def test_split_recording_joins_its_extents(self):
         # The real ICD-ST25 table: A-002 recorded into a gap, so its first extent is
